@@ -1,0 +1,25 @@
+[project]
+name = "china-travel-agent"
+version = "0.1.0"
+description = "LangGraph scaffold for a China travel-planning agent using Baidu map tools."
+requires-python = ">=3.11"
+dependencies = [
+  "langchain>=0.3",
+  "langgraph>=0.2",
+  "langchain-mcp-adapters>=0.1",
+  "pydantic>=2",
+  "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
