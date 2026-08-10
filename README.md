@@ -1,128 +1,90 @@
 # China Travel Agent
 
-Extensible China travel-planning agent, organized around a clear harness:
+中国境内旅游攻略 Agent。模块 01–03 已完成实现与验收，后续模块按冻结规范继续交付；旧原型接口不构成兼容要求。
+
+## 架构基线
 
 ```text
-AgentHarness
-  -> Router
-  -> Skill
-  -> LangGraph travel graph
-  -> Tool/MCP layer
-  -> Guardrail
-  -> Memory
-  -> Trace
+CLI Demo
+        → Application Service
+        → LangGraph workflow
+        → Runtime Agent Skill / deterministic domain service
+        → typed domain port
+        → MCP Gateway（仅外部 Agent 工具能力）
+        → trusted MCP Server
 ```
 
-The first version focuses on a readable runtime skeleton rather than a perfect
-itinerary. It can already route a request, extract travel requirements, call the
-Baidu Map tool facade, validate the draft, format the answer, and record trace.
+- LangChain：DeepSeek 调用、结构化输出、tool schema 和 MCP 工具适配。
+- LangGraph：主工作流、状态转换、受控循环、interrupt/resume 和 checkpoint。
+- Runtime Agent Skill：单一业务能力、Prompt、工具白名单、调用预算、停止条件与失败策略。
+- MCP：外部 Agent 工具协议。首版百度地图能力由模块 06 的 typed adapter 和 MCP Gateway 接入。
+- PostgreSQL：Production v1 的 checkpoint、artifact 与审计基础设施，不通过 MCP；当前 Demo 不依赖数据库。
 
-## Structure
+外部工具型 Skill 在项目已指定 MCP Server 时必须走 MCP；纯领域计算和确定性校验不使用 MCP。Skill 不得直连供应商 HTTP、直接管理 MCP session 或把 MCP 原始 payload 写入 Graph state。DeepSeek 由模块 02 通过 LangChain 专用集成调用，不经过 MCP。
 
-```text
-china_travel_agent/
-  app/
-    agent/
-      harness.py       # Main runtime: Router -> Skill -> Tool/MCP -> Guardrail -> Memory -> Trace
-      router.py        # Intent and skill routing
-      skills.py        # TravelPlanSkill and future skills
-      graph.py         # LangGraph facade with fallback execution
-      guardrail.py     # Requirement and plan checks
-      formatter.py     # Final answer formatting
-      memory.py        # Local memory/cache backend
-      trace.py         # Thought/Action/Observation/Final trace
-      schemas.py       # TravelRequirement and TravelPlanState
-    nlp/
-      extractor.py     # Requirement extractor
-    tools/
-      baidu_map_tool.py # Baidu Agent Plan Tool/MCP facade
-    config.py
-    main.py            # Optional FastAPI app
-  configs/
-    planner_rules.yaml
-    styles.yaml
-  docs/
-    step1_framework.md
-  prompts/
-    extractor.md
-    formatter.md
-    planner.md
-    router.md
-  scripts/
-    run_agent.py       # CLI entry
-  tests/
-```
+## 规范入口
 
-## Environment
+- [`docs/00_agent_master_design.md`](./docs/00_agent_master_design.md)：产品边界、跨模块架构和全局不变量。
+- [`docs/IMPLEMENTATION_ROADMAP.md`](./docs/IMPLEMENTATION_ROADMAP.md)：组件职责、依赖、工作包和 Gate 的唯一索引。
+- [`docs/IMPLEMENTATION_STATUS.md`](./docs/IMPLEMENTATION_STATUS.md)：当前 HEAD、Prompt hash 和验证结果快照。
+- [`docs/SHARED_IMPLEMENTATION_RULES.md`](./docs/SHARED_IMPLEMENTATION_RULES.md)：所有模块执行契约共享的工作区、测试、安全和报告规则。
+- [`docs/01_requirement_and_dialogue.md`](./docs/01_requirement_and_dialogue.md)：模块 01 纯需求领域合同。
+- [`docs/01_requirement_and_dialogue_vibe_coding.md`](./docs/01_requirement_and_dialogue_vibe_coding.md)：模块 01 精确执行契约。
+- [`docs/02_llm_runtime_and_model_profiles.md`](./docs/02_llm_runtime_and_model_profiles.md)：模块 02 LangChain / DeepSeek 运行时合同。
+- [`docs/02_llm_runtime_and_model_profiles_vibe_coding.md`](./docs/02_llm_runtime_and_model_profiles_vibe_coding.md)：模块 02 精确执行契约。
+- [`docs/03_requirement_extraction_adapter.md`](./docs/03_requirement_extraction_adapter.md)：模块 03 需求提取适配合同。
+- [`docs/03_requirement_extraction_adapter_vibe_coding.md`](./docs/03_requirement_extraction_adapter_vibe_coding.md)：模块 03 精确执行契约。
 
-Required for real Baidu Agent Plan calls:
+权威层级和冲突处理以主设计第 1 节为准。后续模块必须按路线图中的 `depends_on` 和模块 acceptance gate 开工。`_vibe_coding.md` 专门面向能力较弱的编码模型，必须保留精确文件白名单、符号、算法、阶段 Gate、测试矩阵、停止条件和报告模板，不能压缩成需要模型自行推导的摘要。
+
+## 当前边界
+
+模块 01、02、03 已完成：完整 unit/contract 与 Docker 离线测试为 `370 passed`，模块 02 正式 live 为 `1/1`，模块 03 正式 live 为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
+
+模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。LangGraph 从模块 05 开始实现；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前开发没有客户端、FastAPI 或 Web；模块 14 只规划薄 CLI 和 Application Service。
+
+安装、环境变量、运行命令和 live probe 命令必须以对应模块文档为准，不允许从旧原型 README 推断。
+
+## 分支策略
+
+本地 `main` 只保存已验收的稳定基线。后续每个新功能都必须先从最新 `main` 创建独立的 `feature/<short-kebab-name>` 分支，在该分支完成实现、测试和文档；验收通过后再合并回 `main`。具体工作区和 Git 规则见 [`docs/SHARED_IMPLEMENTATION_RULES.md`](./docs/SHARED_IMPLEMENTATION_RULES.md)。
+
+## Docker 开发与测试
+
+当前容器只承诺复现已经实现的模块 01–03，不会把尚不存在的 Graph/CLI 主链伪装成可运行服务。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+
+基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
+
+复制本地配置并填写需要的密钥：
 
 ```powershell
-Copy `.env.example` to `.env`, then set:
-
-BAIDU_MAP_AUTH_TOKEN=your-token
+Copy-Item .env.example .env
 ```
 
-The runtime loads `.env.local`, `.env`, the current process environment, and on
-Windows also tries the persisted User environment. This keeps CLI scripts,
-tests, and future MCP server processes on the same configuration path.
-
-You can still override it for one shell:
+构建并验证当前运行时包：
 
 ```powershell
-$env:BAIDU_MAP_AUTH_TOKEN="your-token"
+docker compose build runtime
+docker compose run --rm runtime
 ```
 
-Required LLM router settings, using the same DeepSeek-compatible setup as
-`D:\制冷站房agent`:
+运行全部离线测试：
 
 ```powershell
-DEEPSEEK_API_KEY=your-key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
-DEEPSEEK_TIMEOUT_SECONDS=30
-DEEPSEEK_MAX_RETRIES=2
+docker compose --profile test run --rm test
 ```
 
-`AgentHarness` routes with `DeepSeekRouterProvider` only. Missing or failed LLM
-configuration should be fixed directly.
-
-Optional for LangSmith tracing:
+真实 DeepSeek 测试会产生外部 API 调用，只在明确需要时运行：
 
 ```powershell
-$env:LANGSMITH_TRACING="true"
-$env:LANGSMITH_API_KEY="your-key"
-$env:LANGSMITH_PROJECT="china-travel-agent"
+docker compose --profile live run --rm live-test
 ```
 
-## Install
-
-Create and use the project-local virtual environment:
+PostgreSQL 是 Production v1 的预留服务，当前模块不会连接它。需要单独验证数据库容器时运行：
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+docker compose --profile production up -d postgres
+docker compose --profile production down
 ```
 
-The first Baidu tool layer calls Agent Plan HTTP APIs directly. A formal MCP
-server can later be placed behind `BaiduMapTool` without changing the harness.
-
-## Run
-
-```powershell
-.\.venv\Scripts\python.exe scripts\run_agent.py "我想去杭州玩3天，喜欢自然风景和美食，高铁到杭州东站，轻松一点"
-```
-
-If `BAIDU_MAP_AUTH_TOKEN` is not present, the planner still returns a structured
-draft with tool errors recorded in state. This lets you test the architecture
-without external services.
-
-## Next Extensions
-
-1. Replace `RequirementExtractor` with LLM structured extraction.
-2. Replace the thin planner node with a LangChain ReAct planner node.
-3. Connect Baidu Map through a formal MCP server.
-4. Add separate skills for `place_query`, `route_query`, and `adjust_plan`.
-5. Add hotel pricing, ticket booking, budget, and transport providers.
-6. Add Redis or LangGraph checkpointer memory for multi-turn edits.
-7. Add route validation using real direction durations and geographic constraints.
+本地开发默认密码只用于隔离开发环境；任何共享或生产环境都必须通过 Secret 或外部环境变量覆盖。百度地图默认使用远程 Streamable HTTP MCP 地址，不需要额外启动 `baidu-mcp` 容器。

@@ -1,0 +1,82 @@
+name: china-travel-agent
+
+x-agent-environment: &agent-environment
+  TZ: Asia/Shanghai
+  HOME: /tmp
+  XDG_CACHE_HOME: /tmp/.cache
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  BAIDU_MAPS_API_KEY: ${BAIDU_MAPS_API_KEY:-}
+  BAIDU_MAPS_MCP_URL: ${BAIDU_MAPS_MCP_URL:-https://mcp.map.baidu.com/mcp}
+
+x-agent-security: &agent-security
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,size=256m
+  security_opt:
+    - no-new-privileges:true
+
+x-agent-build: &agent-build
+  context: .
+  args:
+    PYTHON_IMAGE: ${PYTHON_IMAGE:-docker.m.daocloud.io/library/python:3.12-slim}
+
+services:
+  runtime:
+    <<: *agent-security
+    image: china-travel-agent:local
+    build:
+      <<: *agent-build
+      target: runtime
+    environment: *agent-environment
+
+  test:
+    <<: *agent-security
+    profiles: ["test"]
+    image: china-travel-agent:test
+    build:
+      <<: *agent-build
+      target: test
+    environment: *agent-environment
+    command: ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+
+  live-test:
+    <<: *agent-security
+    profiles: ["live"]
+    image: china-travel-agent:test
+    build:
+      <<: *agent-build
+      target: test
+    environment: *agent-environment
+    command:
+      - python
+      - -m
+      - pytest
+      - -q
+      - -p
+      - no:cacheprovider
+      - tests/live/llm_runtime
+      - tests/live/requirement_extraction
+
+  postgres:
+    profiles: ["production"]
+    image: ${POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-china_travel_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-china_travel_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only-change-me}
+      TZ: Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:

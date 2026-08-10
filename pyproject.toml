@@ -1,19 +1,30 @@
 [project]
 name = "china-travel-agent"
 version = "0.1.0"
-description = "LangGraph scaffold for a China travel-planning agent using Baidu map tools."
-requires-python = ">=3.11"
+description = "China travel-planning agent with LangGraph, DeepSeek, Baidu Map, and PostgreSQL."
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "langchain>=0.3",
+  "langchain-core==1.4.9",
   "langgraph>=0.2",
+  "langgraph-checkpoint-postgres>=3.0",
   "langchain-mcp-adapters>=0.1",
-  "pydantic>=2",
+  "langchain-deepseek==1.1.0",
+  "pydantic==2.13.4",
+  "python-dotenv>=1,<2",
   "pyyaml>=6",
+  "asyncpg>=0.31",
+  "psycopg2-binary>=2.9",
+  "psycopg-binary>=3.3",
+  "cryptography>=42",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=5",
+  "hypothesis>=6",
 ]
 
 [tool.setuptools.packages.find]
@@ -21,5 +32,14 @@ where = ["."]
 include = ["app*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/unit", "tests/contract"]
 pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+branch = true
+source = ["app.llm_runtime"]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
