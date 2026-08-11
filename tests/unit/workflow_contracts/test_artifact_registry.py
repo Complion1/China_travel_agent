@@ -3,6 +3,7 @@
 from datetime import date, datetime, timezone
 from dataclasses import fields
 from enum import Enum, IntEnum
+from hashlib import sha256
 from typing import Annotated, Literal, Mapping
 from typing import get_type_hints
 from uuid import UUID
@@ -165,6 +166,96 @@ def test_empty_registry_and_unknown_type_version_are_explicit() -> None:
         registry.resolve(artifact_type="other.artifact", schema_version="1.0")
     with pytest.raises(UnsupportedArtifactVersionError):
         registry.resolve(artifact_type="test.sample_artifact", schema_version="2.0")
+
+
+def test_registry_rejects_invalid_registration_shapes_and_unhashable_resolution_input() -> None:
+    registration = ArtifactSchemaRegistration(
+        artifact_type="test.sample_artifact",
+        schema_version="1.0",
+        model=StrictSampleArtifact,
+    )
+    invalid_registrations = (
+        [registration],
+        (object(),),
+        (ArtifactSchemaRegistration(artifact_type=1, schema_version="1.0", model=StrictSampleArtifact),),
+        (ArtifactSchemaRegistration(artifact_type="test.sample_artifact", schema_version=1, model=StrictSampleArtifact),),
+        (ArtifactSchemaRegistration(artifact_type="not a valid type", schema_version="1.0", model=StrictSampleArtifact),),
+        (ArtifactSchemaRegistration(artifact_type="test.sample_artifact", schema_version="not-a-version", model=StrictSampleArtifact),),
+        (ArtifactSchemaRegistration(artifact_type="test.sample_artifact", schema_version="1.0", model=object),),
+    )
+    for registrations in invalid_registrations:
+        with pytest.raises(ArtifactRegistryConfigurationError):
+            ArtifactSchemaRegistry(registrations)  # type: ignore[arg-type]
+
+    registry = _registry()
+    with pytest.raises(UnsupportedArtifactTypeError):
+        registry.resolve(artifact_type=[], schema_version="1.0")  # type: ignore[arg-type]
+
+
+def test_registry_rejects_forbidden_validator_and_type_graph_shapes() -> None:
+    class BeforeDecorated(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: int
+
+        @field_validator("value", mode="before")
+        @classmethod
+        def keep_before(cls, value: int) -> int:
+            return value
+
+    class PlainDecorated(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: int
+
+        @field_validator("value", mode="plain")
+        @classmethod
+        def keep_plain(cls, value: object) -> object:
+            return value
+
+    class WrapDecorated(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: int
+
+        @field_validator("value", mode="wrap")
+        @classmethod
+        def keep_wrap(cls, value: object, handler: object) -> object:
+            return handler(value)  # type: ignore[operator]
+
+    class BytesLiteral(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: Literal[b"bytes"]
+
+    class BytesEnum(Enum):
+        VALUE = b"bytes"
+
+    class InvalidEnum(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: BytesEnum
+
+    class EmptyTuple(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: tuple[()]
+
+    class InvalidTuple(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: tuple
+
+    class InvalidDictKey(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: dict[int, str]
+
+    invalid_models = (
+        BeforeDecorated,
+        PlainDecorated,
+        WrapDecorated,
+        BytesLiteral,
+        InvalidEnum,
+        EmptyTuple,
+        InvalidTuple,
+        InvalidDictKey,
+    )
+    for model in invalid_models:
+        with pytest.raises(ArtifactRegistryConfigurationError):
+            _registry(model)
 
 
 @pytest.mark.parametrize(
@@ -407,6 +498,36 @@ def test_registry_supports_annotated_literal_nullable_nested_and_recursive_model
     ).size_bytes > 0
 
 
+def test_registry_supports_fixed_and_variadic_tuples_and_union_paths_deterministically() -> None:
+    class TupleArtifact(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        fixed: tuple[int, str]
+        variadic: tuple[int, ...]
+        nullable: int | None
+        alternative: int | str
+        nested: list[dict[str, tuple[int, ...]]]
+        annotated_values: list[Annotated[int, AfterValidator(lambda value: value)]]
+        identifier: UUID
+
+    registry = _registry(TupleArtifact)
+    request = _request(
+        {
+            "fixed": [1, "one"],
+            "variadic": [2, 3],
+            "nullable": None,
+            "alternative": "text",
+            "nested": [{"values": [4, 5]}],
+            "annotated_values": [6],
+            "identifier": str(RUN_ID),
+        }
+    )
+    first = registry.prepare(request)
+    second = registry.prepare(request)
+    assert first.canonical_bytes == second.canonical_bytes
+    assert first.content_hash == second.content_hash
+    assert first.size_bytes == len(first.canonical_bytes)
+
+
 def test_after_validator_must_preserve_values_and_path_kinds() -> None:
     class Transforming(BaseModel):
         model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
@@ -426,6 +547,32 @@ def test_after_validator_must_preserve_values_and_path_kinds() -> None:
     )
     with pytest.raises(ArtifactRequestValidationError):
         registry.prepare(request)
+
+
+def test_after_validator_conversions_are_rejected_for_union_enum_and_uuid_paths() -> None:
+    class OptionalTransform(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: Annotated[int | None, AfterValidator(lambda _: None)]
+
+    class Color(Enum):
+        RED = "red"
+
+    class EnumTransform(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: Annotated[Color, AfterValidator(lambda _: "red")]
+
+    class UUIDTransform(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: Annotated[UUID, AfterValidator(lambda _: "not-a-uuid")]
+
+    cases = (
+        (OptionalTransform, {"value": 1}),
+        (EnumTransform, {"value": "red"}),
+        (UUIDTransform, {"value": str(RUN_ID)}),
+    )
+    for model, content in cases:
+        with pytest.raises(ArtifactRequestValidationError):
+            _registry(model).prepare(_request(content))
 
 
 def test_float_json_int_and_numeric_enum_kinds_are_exact() -> None:
@@ -498,6 +645,28 @@ def test_float_json_int_and_numeric_enum_kinds_are_exact() -> None:
     ):
         with pytest.raises(ArtifactRequestValidationError):
             _registry(model).prepare(_request({"value": wrong_value}))
+
+
+def test_registry_preserves_uuid_date_and_timezone_datetime_observations() -> None:
+    class TemporalArtifact(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        identifier: UUID
+        occurred_on: date
+        observed_at: datetime
+
+    prepared = _registry(TemporalArtifact).prepare(
+        _request(
+            {
+                "identifier": str(RUN_ID),
+                "occurred_on": "2026-08-11",
+                "observed_at": "2026-08-11T17:30:00+08:00",
+            }
+        )
+    )
+    assert prepared.canonical_bytes == (
+        b'{"identifier":"12345678-1234-5678-1234-567812345678",'
+        b'"observed_at":"2026-08-11T09:30:00Z","occurred_on":"2026-08-11"}'
+    )
 
 
 def test_model_after_validator_must_be_identity_or_pure_assertion() -> None:
@@ -616,4 +785,28 @@ def test_nested_list_and_dict_transforming_after_validators_are_rejected() -> No
                     schema_version="1.0",
                     content=content,
                 )
+            )
+
+
+def test_decode_rejects_hash_matched_noncanonical_and_invalid_json_bytes() -> None:
+    class ValueArtifact(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+        value: int
+
+    registry = _registry(ValueArtifact)
+    for canonical_bytes in (b' {"value":1}', b"not-json"):
+        ref = ArtifactRef(
+            artifact_id=ARTIFACT_ID,
+            artifact_type="test.sample_artifact",
+            schema_version="1.0",
+            content_hash="sha256:" + sha256(canonical_bytes).hexdigest(),
+            operation_id=OPERATION_ID,
+            created_at=datetime(2026, 8, 11, 9, 30, tzinfo=timezone.utc),
+            size_bytes=len(canonical_bytes),
+        )
+        with pytest.raises(ArtifactIntegrityError):
+            registry.decode(
+                ref=ref,
+                canonical_bytes=canonical_bytes,
+                expected_model=ValueArtifact,
             )

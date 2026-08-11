@@ -194,6 +194,23 @@ def test_delivery_status_matrix_and_terminal_outcome_invariants() -> None:
             trace_id=TRACE_ID,
         )
 
+    with pytest.raises(ValidationError):
+        _state(
+            delivery_status=DeliveryStatus.CANCELLED,
+            terminal_code="cancelled_by_user",
+            terminal_outcome=_cancelled_outcome(trace_id=OTHER_RUN_ID),
+        )
+
+
+def test_state_rejects_forged_requirement_outcome_during_fresh_copy() -> None:
+    forged = NeedClarification.model_construct(
+        requirement=TravelRequirement(),
+        metadata=FieldMetadataRegistry(),
+        issues=(),
+    )
+    with pytest.raises(ValidationError):
+        _state(requirement_outcome=forged)
+
 
 @pytest.mark.parametrize("outcome", _outcomes())
 def test_requirement_domain_outcome_round_trips_every_branch_fresh(outcome: object) -> None:
@@ -253,6 +270,8 @@ def test_state_codec_duplicate_and_version_error_priority() -> None:
         )
     with pytest.raises(WorkflowStateValidationError):
         parse_travel_session_state_json(b'{"schema_version":"1.0","bad":NaN}')
+    with pytest.raises(WorkflowStateValidationError):
+        parse_travel_session_state_json(b'{"schema_version":"1.0"}')
 
 
 def test_state_model_construct_and_nested_mutation_cannot_bypass_codec() -> None:
@@ -409,6 +428,228 @@ def test_terminal_registry_configuration_and_validation_order() -> None:
     )
     with pytest.raises(TerminalStateMismatchError):
         action_registry.validate_state(bad_action)
+
+    with pytest.raises(TerminalRegistryConfigurationError):
+        TerminalCodeRegistry(None)  # type: ignore[arg-type]
+    with pytest.raises(UnsupportedTerminalCodeError):
+        action_registry.resolve([])  # type: ignore[arg-type]
+
+
+def test_terminal_registration_rejects_action_order_and_semantic_combinations() -> None:
+    with pytest.raises(ValidationError):
+        TerminalCodeRegistration(
+            terminal_code="duplicate_actions",
+            delivery_status=DeliveryStatus.DEGRADED,
+            outcome_requirement=FieldRequirement.REQUIRED,
+            category=TerminalCategory.PROVIDER,
+            recoverable=True,
+            user_action_codes=("retry", "retry"),
+        )
+    with pytest.raises(ValidationError):
+        TerminalCodeRegistration(
+            terminal_code="unsorted_actions",
+            delivery_status=DeliveryStatus.DEGRADED,
+            outcome_requirement=FieldRequirement.REQUIRED,
+            category=TerminalCategory.PROVIDER,
+            recoverable=True,
+            user_action_codes=("z_action", "a_action"),
+        )
+    with pytest.raises(ValidationError):
+        TerminalCodeRegistration(
+            terminal_code="forbidden_category",
+            delivery_status=DeliveryStatus.DEMO_READY,
+            outcome_requirement=FieldRequirement.FORBIDDEN,
+            category=TerminalCategory.INPUT,
+            recoverable=None,
+            user_action_codes=(),
+        )
+    with pytest.raises(ValidationError):
+        TerminalCodeRegistration(
+            terminal_code="forbidden_recoverable",
+            delivery_status=DeliveryStatus.DEMO_READY,
+            outcome_requirement=FieldRequirement.FORBIDDEN,
+            category=None,
+            recoverable=False,
+            user_action_codes=(),
+        )
+    with pytest.raises(ValidationError):
+        TerminalCodeRegistration(
+            terminal_code="forbidden_action",
+            delivery_status=DeliveryStatus.DEMO_READY,
+            outcome_requirement=FieldRequirement.FORBIDDEN,
+            category=None,
+            recoverable=None,
+            user_action_codes=("retry",),
+        )
+
+
+def test_terminal_registration_rejects_missing_required_semantics_and_optional_requirement() -> None:
+    with pytest.raises(ValidationError):
+        TerminalCodeRegistration(
+            terminal_code="missing_category",
+            delivery_status=DeliveryStatus.DEGRADED,
+            outcome_requirement=FieldRequirement.REQUIRED,
+            category=None,
+            recoverable=True,
+            user_action_codes=(),
+        )
+    with pytest.raises(ValidationError):
+        TerminalCodeRegistration(
+            terminal_code="missing_recoverable",
+            delivery_status=DeliveryStatus.DEGRADED,
+            outcome_requirement=FieldRequirement.REQUIRED,
+            category=TerminalCategory.PROVIDER,
+            recoverable=None,
+            user_action_codes=(),
+        )
+    with pytest.raises(ValidationError):
+        TerminalCodeRegistration(
+            terminal_code="nonrecoverable_action",
+            delivery_status=DeliveryStatus.DEGRADED,
+            outcome_requirement=FieldRequirement.REQUIRED,
+            category=TerminalCategory.PROVIDER,
+            recoverable=False,
+            user_action_codes=("retry",),
+        )
+    with pytest.raises(ValidationError):
+        TerminalCodeRegistration(
+            terminal_code="optional_outcome",
+            delivery_status=DeliveryStatus.DEGRADED,
+            outcome_requirement=FieldRequirement.OPTIONAL,
+            category=None,
+            recoverable=None,
+            user_action_codes=(),
+        )
+
+
+def test_terminal_registry_rejects_observable_registration_state_mismatches() -> None:
+    demo_mismatch = TerminalCodeRegistry(
+        (
+            TerminalCodeRegistration(
+                terminal_code="demo_mismatch",
+                delivery_status=DeliveryStatus.CANCELLED,
+                outcome_requirement=FieldRequirement.REQUIRED,
+                category=TerminalCategory.INPUT,
+                recoverable=False,
+                user_action_codes=(),
+            ),
+        )
+    )
+    with pytest.raises(TerminalStateMismatchError):
+        demo_mismatch.validate_state(
+            _state(
+                delivery_status=DeliveryStatus.DEMO_READY,
+                terminal_code="demo_mismatch",
+            )
+        )
+
+    status_mismatch = TerminalCodeRegistry(
+        (
+            TerminalCodeRegistration(
+                terminal_code="status_mismatch",
+                delivery_status=DeliveryStatus.DEGRADED,
+                outcome_requirement=FieldRequirement.REQUIRED,
+                category=TerminalCategory.INPUT,
+                recoverable=False,
+                user_action_codes=(),
+            ),
+        )
+    )
+    status_state = _state(
+        delivery_status=DeliveryStatus.CANCELLED,
+        terminal_code="status_mismatch",
+        terminal_outcome=TerminalOutcome(
+            schema_version="1.0",
+            terminal_code="status_mismatch",
+            category=TerminalCategory.INPUT,
+            recoverable=False,
+            user_action_code=None,
+            trace_id=TRACE_ID,
+        ),
+    )
+    with pytest.raises(TerminalStateMismatchError):
+        status_mismatch.validate_state(status_state)
+
+    forbidden_mismatch = TerminalCodeRegistry(
+        (
+            TerminalCodeRegistration(
+                terminal_code="forbidden_terminal",
+                delivery_status=DeliveryStatus.CANCELLED,
+                outcome_requirement=FieldRequirement.FORBIDDEN,
+                category=None,
+                recoverable=None,
+                user_action_codes=(),
+            ),
+        )
+    )
+    forbidden_state = _state(
+        delivery_status=DeliveryStatus.CANCELLED,
+        terminal_code="forbidden_terminal",
+        terminal_outcome=TerminalOutcome(
+            schema_version="1.0",
+            terminal_code="forbidden_terminal",
+            category=TerminalCategory.INPUT,
+            recoverable=False,
+            user_action_code=None,
+            trace_id=TRACE_ID,
+        ),
+    )
+    with pytest.raises(TerminalStateMismatchError):
+        forbidden_mismatch.validate_state(forbidden_state)
+
+    semantic_mismatch = TerminalCodeRegistry(
+        (
+            TerminalCodeRegistration(
+                terminal_code="semantic_mismatch",
+                delivery_status=DeliveryStatus.CANCELLED,
+                outcome_requirement=FieldRequirement.REQUIRED,
+                category=TerminalCategory.PROVIDER,
+                recoverable=True,
+                user_action_codes=(),
+            ),
+        )
+    )
+    semantic_state = _state(
+        delivery_status=DeliveryStatus.CANCELLED,
+        terminal_code="semantic_mismatch",
+        terminal_outcome=TerminalOutcome(
+            schema_version="1.0",
+            terminal_code="semantic_mismatch",
+            category=TerminalCategory.INPUT,
+            recoverable=False,
+            user_action_code=None,
+            trace_id=TRACE_ID,
+        ),
+    )
+    with pytest.raises(TerminalStateMismatchError):
+        semantic_mismatch.validate_state(semantic_state)
+
+    recoverable_mismatch = TerminalCodeRegistry(
+        (
+            TerminalCodeRegistration(
+                terminal_code="recoverable_mismatch",
+                delivery_status=DeliveryStatus.CANCELLED,
+                outcome_requirement=FieldRequirement.REQUIRED,
+                category=TerminalCategory.INPUT,
+                recoverable=True,
+                user_action_codes=(),
+            ),
+        )
+    )
+    recoverable_state = _state(
+        delivery_status=DeliveryStatus.CANCELLED,
+        terminal_code="recoverable_mismatch",
+        terminal_outcome=TerminalOutcome(
+            schema_version="1.0",
+            terminal_code="recoverable_mismatch",
+            category=TerminalCategory.INPUT,
+            recoverable=False,
+            user_action_code=None,
+            trace_id=TRACE_ID,
+        ),
+    )
+    with pytest.raises(TerminalStateMismatchError):
+        recoverable_mismatch.validate_state(recoverable_state)
 
 
 def test_state_error_markers_do_not_expose_payload() -> None:

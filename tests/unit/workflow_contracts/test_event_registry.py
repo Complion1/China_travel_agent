@@ -183,6 +183,44 @@ def test_event_registry_configuration_unknown_and_strict_copy() -> None:
         registry.validate(forged_event)
 
 
+def test_event_registration_rejects_duplicate_and_unsorted_counter_names() -> None:
+    with pytest.raises(ValidationError):
+        SafeWorkflowEventRegistration(
+            event_type="custom.duplicate",
+            counter_names=("custom.counter", "custom.counter"),
+            operation_id=FieldRequirement.OPTIONAL,
+            duration_ms=FieldRequirement.OPTIONAL,
+            terminal_code=FieldRequirement.OPTIONAL,
+        )
+    with pytest.raises(ValidationError):
+        SafeWorkflowEventRegistration(
+            event_type="custom.unsorted",
+            counter_names=("z.counter", "a.counter"),
+            operation_id=FieldRequirement.OPTIONAL,
+            duration_ms=FieldRequirement.OPTIONAL,
+            terminal_code=FieldRequirement.OPTIONAL,
+        )
+
+
+def test_event_registry_rejects_unreadable_and_non_iterable_registrations() -> None:
+    with pytest.raises(SafeWorkflowEventRegistryConfigurationError):
+        SafeWorkflowEventRegistry((object(),))  # type: ignore[arg-type]
+    with pytest.raises(SafeWorkflowEventRegistryConfigurationError):
+        SafeWorkflowEventRegistry(None)  # type: ignore[arg-type]
+
+
+def test_event_registry_configuration_failure_precedes_runtime_event_validation() -> None:
+    forged = SafeWorkflowEventRegistration.model_construct(
+        event_type="custom.invalid",
+        counter_names=("z.counter", "a.counter"),
+        operation_id=FieldRequirement.OPTIONAL,
+        duration_ms=FieldRequirement.OPTIONAL,
+        terminal_code=FieldRequirement.OPTIONAL,
+    )
+    with pytest.raises(SafeWorkflowEventRegistryConfigurationError):
+        SafeWorkflowEventRegistry((forged,))
+
+
 def test_failure_code_registry_validates_format_before_membership() -> None:
     registry = EventDeliveryFailureCodeRegistry(STANDARD_EVENT_DELIVERY_FAILURE_CODES)
     registry.validate("sink_timeout")

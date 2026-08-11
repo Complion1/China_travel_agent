@@ -98,3 +98,46 @@ def test_hash_format_and_size_are_based_on_canonical_bytes() -> None:
     assert digest.startswith("sha256:")
     assert len(digest) == len("sha256:") + 64
     assert len(encoded) == len(b'{"value":"hash-me"}')
+
+
+def test_canonical_json_rejects_non_object_and_non_json_values_with_marker() -> None:
+    recursive_list: list[object] = []
+    recursive_list.append(recursive_list)
+    recursive_dict: dict[str, object] = {}
+    recursive_dict["self"] = recursive_dict
+    invalid_values = (
+        None,
+        [],
+        {1: "non-string key"},
+        {"object": object()},
+        {"bytes": b"bytes"},
+        {"set": {"value"}},
+        {"recursive_list": recursive_list},
+        {"recursive_dict": recursive_dict},
+    )
+    for value in invalid_values:
+        with pytest.raises(ArtifactRequestValidationError) as exc_info:
+            _canonical_json_bytes(value)  # type: ignore[arg-type]
+        assert exc_info.value.args == ()
+        assert str(exc_info.value) == "ArtifactRequestValidationError"
+
+
+def test_canonical_json_rejects_negative_safe_int_infinity_and_nested_invalid_values() -> None:
+    invalid_values = (
+        {"value": -(2**53)},
+        {"value": float("-inf")},
+        {"items": [{"invalid": b"bytes"}]},
+    )
+    for value in invalid_values:
+        with pytest.raises(ArtifactRequestValidationError) as exc_info:
+            _canonical_json_bytes(value)
+        assert exc_info.value.args == ()
+        assert "bytes" not in str(exc_info.value)
+
+
+def test_canonical_json_rejects_datetime_normalization_overflow_as_typed_error() -> None:
+    value = datetime.min.replace(tzinfo=timezone(timedelta(hours=1)))
+    with pytest.raises(ArtifactRequestValidationError) as exc_info:
+        _canonical_json_bytes({"datetime": value})
+    assert exc_info.value.args == ()
+    assert str(exc_info.value) == "ArtifactRequestValidationError"
