@@ -1,7 +1,9 @@
 """Test-only deterministic providers for workflow contract tests."""
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict
 
 
 class FixedUtcClock:
@@ -38,3 +40,14 @@ class SequenceUUIDFactory:
         value = self._values[self._index]
         self._index += 1
         return value
+
+
+class StrictSampleArtifact(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+
+    label: str
+    count: int
+    ratio: float
+    occurred_on: date
+    observed_at: datetime
+    note: str | None
