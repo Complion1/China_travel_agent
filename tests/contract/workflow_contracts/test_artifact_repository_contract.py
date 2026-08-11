@@ -18,6 +18,7 @@ from app.workflow_contracts.artifacts.models import (
     ArtifactRepositoryLimits,
     ArtifactWriteRequest,
 )
+from app.workflow_contracts.artifacts.in_memory import InMemoryArtifactRepository
 from app.workflow_contracts.artifacts.registry import (
     ArtifactSchemaRegistration,
     ArtifactSchemaRegistry,
@@ -429,6 +430,17 @@ async def assert_artifact_repository_contract(
     assert unchanged.content.label == "contract"
 
 
+async def test_in_memory_artifact_repository_contract() -> None:
+    await assert_artifact_repository_contract(
+        lambda registry, utc_clock, uuid_factory, limits: InMemoryArtifactRepository(
+            registry=registry,
+            utc_clock=utc_clock,
+            uuid_factory=uuid_factory,
+            limits=limits,
+        )
+    )
+
+
 def test_artifact_repository_protocol_surface() -> None:
     public_methods = {
         name for name in ArtifactRepository.__dict__ if not name.startswith("_")
@@ -447,9 +459,9 @@ def test_artifact_repository_protocol_surface() -> None:
     assert lookup_signature.parameters["operation_id"].kind.name == "KEYWORD_ONLY"
     assert list(get_signature.parameters) == ["self", "ref", "expected_model"]
     assert get_signature.parameters["expected_model"].kind.name == "KEYWORD_ONLY"
-    put_hints = get_type_hints(ArtifactRepository.put)
-    lookup_hints = get_type_hints(ArtifactRepository.lookup)
-    get_hints = get_type_hints(ArtifactRepository.get)
+    put_hints = get_type_hints(ArtifactRepository.put, include_extras=True)
+    lookup_hints = get_type_hints(ArtifactRepository.lookup, include_extras=True)
+    get_hints = get_type_hints(ArtifactRepository.get, include_extras=True)
     assert put_hints["request"] is ArtifactWriteRequest
     assert lookup_hints["operation_id"] is OperationId
     assert get_hints["ref"] is ArtifactRef
