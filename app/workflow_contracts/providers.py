@@ -2,21 +2,18 @@
 
 import time
 from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 from uuid import UUID, uuid4
 
 
-@runtime_checkable
 class UtcClock(Protocol):
     def now(self) -> datetime: ...
 
 
-@runtime_checkable
 class MonotonicClock(Protocol):
     def now_ns(self) -> int: ...
 
 
-@runtime_checkable
 class UUIDFactory(Protocol):
     def new(self) -> UUID: ...
 

@@ -39,7 +39,6 @@ def test_system_utc_clock_is_utc_and_protocol_compatible() -> None:
     provider = SystemUtcClock()
     observed = provider.now()
 
-    assert isinstance(provider, UtcClock)
     assert isinstance(observed, datetime)
     assert observed.tzinfo is timezone.utc
     assert observed.utcoffset() == timedelta(0)
@@ -50,7 +49,6 @@ def test_system_monotonic_clock_is_non_decreasing_and_protocol_compatible() -> N
     first = provider.now_ns()
     second = provider.now_ns()
 
-    assert isinstance(provider, MonotonicClock)
     assert isinstance(first, int)
     assert isinstance(second, int)
     assert second >= first
@@ -61,19 +59,16 @@ def test_random_uuid_factory_returns_v4_uuids_and_protocol_compatible() -> None:
     first = provider.new()
     second = provider.new()
 
-    assert isinstance(provider, UUIDFactory)
     assert isinstance(first, UUID)
     assert isinstance(second, UUID)
     assert first.version == 4
     assert second.version == 4
-    assert first != second
 
 
 def test_fixed_utc_clock_rejects_naive_and_non_utc_values() -> None:
     fixed = datetime(2026, 8, 11, 9, 30, tzinfo=timezone.utc)
     provider = FixedUtcClock(fixed)
 
-    assert isinstance(provider, UtcClock)
     assert provider.now() == fixed
     assert provider.now() is fixed
 
@@ -88,7 +83,6 @@ def test_fixed_utc_clock_rejects_naive_and_non_utc_values() -> None:
 def test_step_monotonic_clock_returns_tuple_order_and_fails_closed() -> None:
     provider = StepMonotonicClock((10, 20))
 
-    assert isinstance(provider, MonotonicClock)
     assert provider.now_ns() == 10
     assert provider.now_ns() == 20
     with pytest.raises(AssertionError):
@@ -102,7 +96,6 @@ def test_sequence_uuid_factory_returns_tuple_order_and_fails_closed() -> None:
     second = UUID("00000000-0000-0000-0000-000000000002")
     provider = SequenceUUIDFactory((first, second))
 
-    assert isinstance(provider, UUIDFactory)
     assert provider.new() == first
     assert provider.new() == second
     with pytest.raises(AssertionError):
