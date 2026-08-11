@@ -1,0 +1,1 @@
+"""Safe workflow event contracts."""
