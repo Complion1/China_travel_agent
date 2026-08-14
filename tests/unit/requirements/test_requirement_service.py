@@ -1,9 +1,12 @@
 """RequirementDomainService orchestration tests against the frozen v1 contract."""
 
+import hashlib
+import json
 from datetime import date
 from uuid import uuid4
 
 import pytest
+from pydantic import TypeAdapter
 
 from app.requirements.extraction_contract import ATTR_TO_PATH, StrictFieldEvidenceDTO
 from app.requirements import ExtractionRepairFeedback, ExtractionRepairRequired
@@ -13,16 +16,19 @@ from app.requirements.models import (
     EvidenceReceipt,
     FieldMetadataRegistry,
     InterestTag,
+    HubType,
     ManualTemplateSubmission,
     NeedClarification,
     NeedConfirmation,
     RequirementConfirmation,
     RequirementDomainState,
+    RequirementDomainTransition,
     RequirementErrorCode,
     RequirementExtractionFailed,
     RequirementFieldPath,
     RequirementIntent,
     RequirementInvalidated,
+    RequirementIssue,
     RequirementTurnInput,
     TravelBudget,
     TravelConstraints,
@@ -35,6 +41,7 @@ from app.requirements.models import (
     TravelTimeWindowDeparture,
     VerifiedFieldEvidence,
 )
+from app.requirements.dialogue import render_confirmation_summary
 from app.requirements.service import RequirementDomainService
 from tests.unit.requirements.fakes import (
     FixedClock,
@@ -155,16 +162,28 @@ async def test_process_turn_returns_clarification_with_partial_requirement():
 
     outcome = await service.process_turn(turn(state=original))
 
-    assert isinstance(outcome, NeedClarification)
-    assert outcome.requirement.destination == "杭州"
-    assert "missing" not in {issue.code for issue in outcome.issues}
+    assert isinstance(outcome.outcome, NeedClarification)
+    assert outcome.state.requirement.destination == "杭州"
+    assert "missing" not in {issue.code for issue in outcome.outcome.issues}
     assert original.requirement.destination is None
+
+
+async def test_process_turn_8000_code_points_enters_extractor_pipeline():
+    service, extractor, sink = make_service(strict_dto())
+
+    transition = await service.process_turn(turn(dto_message="x" * 8000))
+
+    assert isinstance(transition, RequirementDomainTransition)
+    assert isinstance(transition.outcome, NeedClarification)
+    assert len(extractor.calls) == 1
+    assert extractor.calls[0].user_message == "x" * 8000
+    assert len(sink.received) == 1
 
 
 async def test_empty_extraction_returns_clarification_without_evidence_writes():
     service, _, sink = make_service(strict_dto())
     outcome = await service.process_turn(turn())
-    assert isinstance(outcome, NeedClarification)
+    assert isinstance(outcome.outcome, NeedClarification)
     assert len(sink.received) == 1
     assert sink.received[0][1] == ()
 
@@ -175,10 +194,10 @@ async def test_complete_extraction_returns_confirmation_and_records_metadata():
 
     outcome = await service.process_turn(request)
 
-    assert isinstance(outcome, NeedConfirmation)
-    assert outcome.requirement.party.total_people == 2
-    assert outcome.requirement.time_window.hotel_nights == 2
-    assert outcome.metadata.metadata[RequirementFieldPath.DESTINATION].evidence_ref
+    assert isinstance(outcome.outcome, NeedConfirmation)
+    assert outcome.state.requirement.party.total_people == 2
+    assert outcome.state.requirement.time_window.hotel_nights == 2
+    assert outcome.state.metadata.metadata[RequirementFieldPath.DESTINATION].evidence_ref
     assert sink.received[0][0] == request.turn_id
     assert extractor.calls[0].current_requirement == request.current.requirement
     assert extractor.calls[0].turn_id == request.turn_id
@@ -197,10 +216,10 @@ async def test_confirm_accept_requires_awaiting_complete_state_and_returns_narro
         RequirementConfirmation(decision="accept", revision_text=None),
     )
 
-    assert isinstance(outcome, ConfirmedTravelRequirement)
-    assert len(outcome.confirmation_summary_digest) == 64
-    assert outcome.requirement == state.requirement
-    assert not hasattr(outcome, "state")
+    assert isinstance(outcome.outcome, ConfirmedTravelRequirement)
+    assert len(outcome.outcome.confirmation_summary_digest) == 64
+    assert outcome.outcome.requirement == state.requirement
+    assert outcome.state.confirmation_status == "confirmed"
     assert state.confirmation_status == "awaiting_confirmation"
 
 
@@ -210,8 +229,8 @@ async def test_confirm_accept_rejects_incomplete_or_non_awaiting_state():
         RequirementDomainState(),
         RequirementConfirmation(decision="accept", revision_text=None),
     )
-    assert isinstance(outcome, NeedClarification)
-    assert any(issue.code == RequirementErrorCode.CONFIRMATION_NOT_READY.value for issue in outcome.issues)
+    assert isinstance(outcome.outcome, NeedClarification)
+    assert any(issue.code == RequirementErrorCode.CONFIRMATION_NOT_READY.value for issue in outcome.outcome.issues)
 
 
 async def test_confirm_revise_routes_through_extractor_with_revision_intent():
@@ -227,10 +246,30 @@ async def test_confirm_revise_routes_through_extractor_with_revision_intent():
         RequirementConfirmation(decision="revise", revision_text="行程"),
     )
 
-    assert isinstance(outcome, RequirementInvalidated)
-    assert outcome.changed_fields == (RequirementFieldPath.DESTINATION,)
+    assert isinstance(outcome.outcome, RequirementInvalidated)
+    assert outcome.outcome.changed_fields == (RequirementFieldPath.DESTINATION,)
     assert extractor.calls[0].intent is RequirementIntent.CONFIRMATION_REVISION
     assert extractor.calls[0].user_message == "行程"
+
+
+async def test_confirm_revise_8000_code_points_enters_extractor_pipeline():
+    service, extractor, sink = make_service(strict_dto(is_correction=True))
+    state = RequirementDomainState(
+        requirement=complete_requirement(),
+        confirmation_status="confirmed",
+    )
+
+    transition = await service.confirm(
+        state,
+        RequirementConfirmation(decision="revise", revision_text="x" * 8000),
+    )
+
+    assert isinstance(transition, RequirementDomainTransition)
+    assert isinstance(transition.outcome, NeedConfirmation)
+    assert len(extractor.calls) == 1
+    assert extractor.calls[0].user_message == "x" * 8000
+    assert extractor.calls[0].intent is RequirementIntent.CONFIRMATION_REVISION
+    assert len(sink.received) == 1
 
 
 async def test_invalidated_when_confirmed_requirement_changes():
@@ -243,9 +282,173 @@ async def test_invalidated_when_confirmed_requirement_changes():
     outcome = await service.process_turn(
         turn(state=state, intent=RequirementIntent.CORRECTION)
     )
-    assert isinstance(outcome, RequirementInvalidated)
-    assert outcome.before_digest != outcome.after_digest
-    assert outcome.reason == "confirmed_requirement_changed"
+    assert isinstance(outcome.outcome, RequirementInvalidated)
+    assert outcome.outcome.before_digest != outcome.outcome.after_digest
+    assert outcome.outcome.reason == "confirmed_requirement_changed"
+    assert outcome.state.confirmation_status == "awaiting_confirmation"
+    assert outcome.state.issues == ()
+    assert outcome.outcome.summary == render_confirmation_summary(outcome.state.requirement)
+    assert outcome.outcome.after_digest == hashlib.sha256(
+        outcome.state.requirement.model_dump_json(exclude_none=False).encode("utf-8")
+    ).hexdigest()
+    confirmed = await service.confirm(
+        outcome.state,
+        RequirementConfirmation(decision="accept", revision_text=None),
+    )
+    assert confirmed.state.confirmation_status == "confirmed"
+    assert isinstance(confirmed.outcome, ConfirmedTravelRequirement)
+
+
+async def test_process_turn_8001_returns_fresh_failure_before_side_effects():
+    service, extractor, sink = make_service(strict_dto())
+    original = RequirementDomainState(
+        requirement=complete_requirement(),
+        confirmation_status="confirmed",
+    )
+
+    transition = await service.process_turn(turn(dto_message="x" * 8001, state=original))
+
+    assert transition.outcome == RequirementExtractionFailed(
+        code=RequirementErrorCode.INPUT_TOO_LONG
+    )
+    assert transition.state == original
+    assert transition.state is not original
+    assert transition.state.requirement is not original.requirement
+    assert extractor.calls == []
+    assert sink.received == []
+
+
+async def test_extraction_failure_preserves_complete_fresh_prior_state():
+    failure = ExtractionRepairRequired(
+        feedback=ExtractionRepairFeedback(
+            code="structured_output_invalid",
+            field_paths=(),
+        )
+    )
+    service, extractor, sink = make_service(failure, failure)
+    issue = RequirementIssue(
+        code="existing_issue",
+        field_path=RequirementFieldPath.DESTINATION,
+        message="keep me",
+    )
+    original = RequirementDomainState(
+        requirement=complete_requirement(),
+        metadata=FieldMetadataRegistry(),
+        issues=(issue,),
+        confirmation_status="confirmed",
+    )
+
+    transition = await service.process_turn(turn(state=original))
+
+    assert isinstance(transition, RequirementDomainTransition)
+    assert isinstance(transition.outcome, RequirementExtractionFailed)
+    assert transition.state == original
+    assert transition.state is not original
+    assert transition.state.requirement is not original.requirement
+    assert transition.state.metadata is not original.metadata
+    assert transition.state.issues is not original.issues
+    assert transition.state.issues[0] is not original.issues[0]
+    assert extractor.calls and extractor.sessions[0].repair_calls == 1
+    assert sink.received == []
+
+
+async def test_service_transition_json_round_trip_preserves_nested_types():
+    service, _, _ = make_service(complete_dto())
+
+    transition = await service.process_turn(turn())
+    restored = TypeAdapter(RequirementDomainTransition).validate_json(
+        json.dumps(
+            transition.model_dump(
+                mode="json",
+                exclude_none=False,
+                by_alias=False,
+                exclude_computed_fields=True,
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ),
+        strict=True,
+    )
+
+    assert isinstance(transition, RequirementDomainTransition)
+    assert isinstance(restored.outcome, NeedConfirmation)
+    assert isinstance(restored.state.metadata.metadata[RequirementFieldPath.DESTINATION].source_turn_id, type(uuid4()))
+    assert restored.state.requirement.time_window.arrival.hub_type is HubType.RAILWAY_STATION
+    assert isinstance(restored.state.issues, tuple)
+    assert restored.state.requirement.party.total_people == 2
+
+
+async def test_service_transition_state_and_outcome_are_deeply_independent():
+    dto = dto_with_evidence(destination="杭州")
+    service, _, _ = make_service(dto)
+    input_state = RequirementDomainState()
+
+    transition = await service.process_turn(
+        turn(state=input_state, dto_message="行程")
+    )
+
+    assert isinstance(transition.outcome, NeedClarification)
+    assert transition.state.requirement is not input_state.requirement
+    assert transition.state.metadata is not transition.outcome.metadata
+    outcome_metadata_issues = list(
+        transition.outcome.metadata.metadata[RequirementFieldPath.DESTINATION].issues
+    )
+    transition.state.requirement.destination = "上海"
+    transition.state.metadata.metadata[RequirementFieldPath.DESTINATION].issues.append(
+        RequirementIssue(
+            code="state_only",
+            field_path=RequirementFieldPath.DESTINATION,
+            message="state only",
+        )
+    )
+    assert transition.outcome.requirement.destination == "杭州"
+    assert transition.outcome.metadata.metadata[RequirementFieldPath.DESTINATION].issues == outcome_metadata_issues
+
+    transition.outcome.requirement.destination = "南京"
+    transition.outcome.metadata.metadata[RequirementFieldPath.DESTINATION].issues.append(
+        RequirementIssue(
+            code="outcome_only",
+            field_path=RequirementFieldPath.DESTINATION,
+            message="outcome only",
+        )
+    )
+    assert transition.state.requirement.destination == "上海"
+    assert [issue.code for issue in transition.state.metadata.metadata[RequirementFieldPath.DESTINATION].issues] == [
+        "state_only"
+    ]
+
+    issue_dto = dto_with_evidence(destination="杭州", sightseeing_start_date="不确定日期")
+    issue_service, _, _ = make_service(issue_dto)
+    issue_transition = await issue_service.process_turn(turn(dto_message="行程"))
+    assert isinstance(issue_transition.outcome, NeedClarification)
+    assert issue_transition.state.issues is not issue_transition.outcome.issues
+    issue_transition.state.issues[0].message = "state issue only"
+    assert issue_transition.outcome.issues[0].message != "state issue only"
+    issue_transition.outcome.issues[0].message = "outcome issue only"
+    assert issue_transition.state.issues[0].message == "state issue only"
+
+
+async def test_revise_8001_returns_fresh_failure_before_side_effects():
+    service, extractor, sink = make_service(strict_dto())
+    original = RequirementDomainState(
+        requirement=complete_requirement(),
+        confirmation_status="awaiting_confirmation",
+    )
+
+    transition = await service.confirm(
+        original,
+        RequirementConfirmation(decision="revise", revision_text="x" * 8001),
+    )
+
+    assert transition.outcome == RequirementExtractionFailed(
+        code=RequirementErrorCode.INPUT_TOO_LONG
+    )
+    assert transition.state == original
+    assert transition.state is not original
+    assert transition.state.requirement is not original.requirement
+    assert extractor.calls == []
+    assert sink.received == []
 
 
 async def test_extractor_gets_exactly_one_repair_attempt_for_schema_or_evidence_error():
@@ -257,14 +460,14 @@ async def test_extractor_gets_exactly_one_repair_attempt_for_schema_or_evidence_
         )
     )
     service, extractor, _ = make_service(structured_repair, repaired)
-    assert isinstance(await service.process_turn(turn()), NeedClarification)
+    assert isinstance((await service.process_turn(turn())).outcome, NeedClarification)
     assert len(extractor.calls) == 1
     assert extractor.sessions[0].extract_calls == 1
     assert extractor.sessions[0].repair_calls == 1
 
     bad_evidence = strict_dto(destination="杭州", evidence=[])
     service, extractor, _ = make_service(bad_evidence, repaired)
-    assert isinstance(await service.process_turn(turn()), NeedClarification)
+    assert isinstance((await service.process_turn(turn())).outcome, NeedClarification)
     assert len(extractor.calls) == 1
     assert extractor.sessions[0].repair_calls == 1
 
@@ -283,13 +486,12 @@ async def test_two_failed_attempts_return_fixed_error_code_only():
         ),
     )
     outcome = await service.process_turn(turn())
-    assert outcome == RequirementExtractionFailed(code=RequirementErrorCode.STRICT_SCHEMA_ERROR)
-    assert not hasattr(outcome, "message")
+    assert outcome.outcome == RequirementExtractionFailed(code=RequirementErrorCode.STRICT_SCHEMA_ERROR)
 
     bad = strict_dto(destination="杭州", evidence=[])
     service, _, _ = make_service(bad, bad)
     outcome = await service.process_turn(turn())
-    assert outcome.code is RequirementErrorCode.EVIDENCE_MISSING
+    assert outcome.outcome.code is RequirementErrorCode.EVIDENCE_MISSING
 
 
 async def test_evidence_not_substring_has_distinct_failure_code():
@@ -304,8 +506,8 @@ async def test_evidence_not_substring_has_distinct_failure_code():
     )
     service, _, _ = make_service(bad, bad)
     outcome = await service.process_turn(turn(dto_message="行程"))
-    assert isinstance(outcome, RequirementExtractionFailed)
-    assert outcome.code is RequirementErrorCode.EVIDENCE_NOT_SUBSTRING
+    assert isinstance(outcome.outcome, RequirementExtractionFailed)
+    assert outcome.outcome.code is RequirementErrorCode.EVIDENCE_NOT_SUBSTRING
 
 
 async def test_receipt_path_mismatch_fails_without_merging():
@@ -321,7 +523,7 @@ async def test_receipt_path_mismatch_fails_without_merging():
 
     service, _, _ = make_service(dto_with_evidence(destination="杭州"), sink=WrongSink())
     outcome = await service.process_turn(turn())
-    assert outcome == RequirementExtractionFailed(code=RequirementErrorCode.EVIDENCE_MISSING)
+    assert outcome.outcome == RequirementExtractionFailed(code=RequirementErrorCode.EVIDENCE_MISSING)
 
 
 async def test_bad_relative_date_returns_clarification_without_partial_mutation():
@@ -331,10 +533,10 @@ async def test_bad_relative_date_returns_clarification_without_partial_mutation(
 
     outcome = await service.process_turn(turn(state=state))
 
-    assert isinstance(outcome, NeedClarification)
-    assert outcome.requirement.destination is None
-    assert outcome.issues[0].code == RequirementErrorCode.NORMALIZATION_ERROR.value
-    assert outcome.issues[0].field_path is RequirementFieldPath.SIGHTSEEING_START_DATE
+    assert isinstance(outcome.outcome, NeedClarification)
+    assert outcome.state.requirement.destination is None
+    assert outcome.outcome.issues[0].code == RequirementErrorCode.NORMALIZATION_ERROR.value
+    assert outcome.outcome.issues[0].field_path is RequirementFieldPath.SIGHTSEEING_START_DATE
     assert state == RequirementDomainState()
 
 
@@ -342,9 +544,9 @@ async def test_budget_evidence_must_parse_to_the_extracted_amount():
     dto = dto_with_evidence(destination="杭州", budget_total_cny=6000.0)
     service, _, _ = make_service(dto)
     outcome = await service.process_turn(turn())
-    assert isinstance(outcome, NeedClarification)
-    assert outcome.requirement.destination is None
-    assert outcome.issues[0].field_path is RequirementFieldPath.BUDGET_TOTAL_CNY
+    assert isinstance(outcome.outcome, NeedClarification)
+    assert outcome.state.requirement.destination is None
+    assert outcome.outcome.issues[0].field_path is RequirementFieldPath.BUDGET_TOTAL_CNY
 
 
 def test_process_manual_template_parse_error_is_non_mutating_clarification():
@@ -354,9 +556,9 @@ def test_process_manual_template_parse_error_is_non_mutating_clarification():
         state,
         ManualTemplateSubmission(template_version="1", content="bad content"),
     )
-    assert isinstance(outcome, NeedClarification)
-    assert outcome.requirement == state.requirement
-    assert outcome.issues
+    assert isinstance(outcome.outcome, NeedClarification)
+    assert outcome.state.requirement == state.requirement
+    assert outcome.outcome.issues
 
 
 def test_process_manual_template_uses_same_merge_validation_and_confirmation_path():
@@ -366,10 +568,10 @@ def test_process_manual_template_uses_same_merge_validation_and_confirmation_pat
 
     outcome = service.process_manual_template(state, submission)
 
-    assert isinstance(outcome, NeedConfirmation)
-    assert outcome.requirement.time_window.hotel_nights == 2
-    assert outcome.requirement.party.total_people == 2
-    assert outcome.metadata.metadata[RequirementFieldPath.DESTINATION].source_turn_id.int == 0
+    assert isinstance(outcome.outcome, NeedConfirmation)
+    assert outcome.state.requirement.time_window.hotel_nights == 2
+    assert outcome.state.requirement.party.total_people == 2
+    assert outcome.state.metadata.metadata[RequirementFieldPath.DESTINATION].source_turn_id.int == 0
     assert state == RequirementDomainState()
 
 
@@ -382,11 +584,11 @@ async def test_preference_values_and_relative_dates_are_normalized_into_patch():
     )
     service, _, _ = make_service(dto)
     outcome = await service.process_turn(turn())
-    assert isinstance(outcome, NeedClarification)
-    assert outcome.requirement.time_window.sightseeing_start_date == "2025-06-02"
-    assert outcome.requirement.time_window.arrival.hub_type.value == "airport"
-    assert outcome.requirement.preferences.interests == [InterestTag.NATURE]
-    metadata = outcome.metadata.metadata[RequirementFieldPath.SIGHTSEEING_START_DATE]
+    assert isinstance(outcome.outcome, NeedClarification)
+    assert outcome.state.requirement.time_window.sightseeing_start_date == "2025-06-02"
+    assert outcome.state.requirement.time_window.arrival.hub_type.value == "airport"
+    assert outcome.state.requirement.preferences.interests == [InterestTag.NATURE]
+    metadata = outcome.state.metadata.metadata[RequirementFieldPath.SIGHTSEEING_START_DATE]
     assert metadata.status.value == "pending_confirmation"
     assert metadata.normalization.rule_name == "relative_date"
 
@@ -398,7 +600,7 @@ async def test_intent_mismatch_repairs_once_before_evidence_validation():
 
     outcome = await service.process_turn(turn(intent=RequirementIntent.INITIAL))
 
-    assert isinstance(outcome, NeedClarification)
+    assert isinstance(outcome.outcome, NeedClarification)
     session = extractor.sessions[0]
     assert session.extract_calls == 1
     assert session.repair_calls == 1
@@ -430,7 +632,7 @@ async def test_zero_children_does_not_require_ages_and_room_no_preference_is_nor
         turn(dto_message="行程：2位成人，没有儿童，房型无特殊要求")
     )
 
-    assert isinstance(outcome, NeedClarification)
-    assert outcome.requirement.party.children_ages == []
-    assert outcome.requirement.rooms.room_type_requirements == "NO_PREFERENCE"
-    assert "儿童年龄" not in outcome.message
+    assert isinstance(outcome.outcome, NeedClarification)
+    assert outcome.state.requirement.party.children_ages == []
+    assert outcome.state.requirement.rooms.room_type_requirements == "NO_PREFERENCE"
+    assert "儿童年龄" not in outcome.outcome.message

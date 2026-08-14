@@ -8,7 +8,16 @@ from pathlib import Path
 
 
 PACKAGE_ROOT = Path(__file__).parents[3] / "app" / "workflow_contracts"
-ALLOWED_EXTERNAL_APP_IMPORT = ("app.requirements", ("RequirementDomainOutcome",))
+ALLOWED_EXTERNAL_APP_IMPORT = (
+    "app.requirements",
+    frozenset(
+        {
+            "RequirementDomainState",
+            "RequirementDomainOutcome",
+            "RequirementDomainTransition",
+        }
+    ),
+)
 FORBIDDEN_IMPORT_TOKENS = {
     "app.llm_runtime",
     "app.requirement_extraction",
@@ -58,6 +67,7 @@ def test_production_imports_are_within_the_allowlist() -> None:
     assert source_files
 
     stdlib = set(sys.stdlib_module_names)
+    imported_requirement_names: set[str] = set()
     for path in source_files:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         source_text = path.read_text(encoding="utf-8")
@@ -82,9 +92,10 @@ def test_production_imports_are_within_the_allowlist() -> None:
             module = _module_name(node)
             if module == "app.requirements":
                 assert isinstance(node, ast.ImportFrom)
-                assert tuple(alias.name for alias in node.names) == (
-                    "RequirementDomainOutcome",
-                )
+                imported_names = {alias.name for alias in node.names}
+                assert imported_names <= ALLOWED_EXTERNAL_APP_IMPORT[1]
+                assert all(alias.asname is None for alias in node.names)
+                imported_requirement_names.update(imported_names)
                 continue
             if module.startswith("app."):
                 assert module == "app.workflow_contracts" or module.startswith(
@@ -103,6 +114,8 @@ def test_production_imports_are_within_the_allowlist() -> None:
             assert not any(
                 token in module.lower() for token in FORBIDDEN_IMPORT_TOKENS
             ), f"forbidden dependency import {module}: {path}:{node.lineno}"
+
+    assert imported_requirement_names == ALLOWED_EXTERNAL_APP_IMPORT[1]
 
 
 def test_subpackage_init_files_are_docstring_only() -> None:

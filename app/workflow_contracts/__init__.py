@@ -1,4 +1,4 @@
-"""Stable public API for the module 04 workflow contracts."""
+"""Stable module 04 API; module 01 requirement DTOs are not re-exported."""
 
 from app.workflow_contracts.artifacts.in_memory import (
     DEMO_ARTIFACT_REPOSITORY_LIMITS,

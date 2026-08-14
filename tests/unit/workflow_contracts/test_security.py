@@ -7,7 +7,14 @@ from uuid import UUID
 import warnings
 
 import pytest
-from app.requirements import FieldMetadataRegistry, NeedClarification, TravelRequirement
+from app.requirements import (
+    FieldMetadataRegistry,
+    NeedClarification,
+    RequirementDomainState,
+    RequirementFieldPath,
+    RequirementIssue,
+    TravelRequirement,
+)
 from pydantic import TypeAdapter, ValidationError
 
 import app.workflow_contracts as contracts
@@ -18,6 +25,8 @@ from tests.unit.workflow_contracts.fakes import (
 
 
 CANARY = "MODULE04_CANARY_SECRET_7f91"
+STATE_CANARY = "MODULE04_STATE_CANARY_4e2a"
+OUTCOME_CANARY = "MODULE04_OUTCOME_CANARY_8b71"
 RUN_ID = UUID("12345678-1234-5678-1234-567812345678")
 TRACE_ID = UUID("22345678-1234-5678-1234-567812345678")
 ARTIFACT_ID = UUID("32345678-1234-5678-1234-567812345678")
@@ -75,14 +84,48 @@ def _artifact_request(*, note: object = None) -> contracts.ArtifactWriteRequest:
 
 def _valid_state() -> contracts.TravelSessionState:
     return contracts.TravelSessionState(
-        schema_version="1.0",
+        schema_version="2.0",
         run_id=RUN_ID,
         trace_id=TRACE_ID,
         phase=contracts.WorkflowPhase.REQUIREMENTS,
         delivery_status=contracts.DeliveryStatus.IN_PROGRESS,
         terminal_code=None,
         terminal_outcome=None,
+        requirement_state=RequirementDomainState(),
         requirement_outcome=None,
+        artifact_refs=(),
+    )
+
+
+def _sensitive_nonempty_state() -> contracts.TravelSessionState:
+    requirement = TravelRequirement(destination=STATE_CANARY)
+    metadata = FieldMetadataRegistry()
+    issue = RequirementIssue(
+        code="sensitive_issue",
+        field_path=RequirementFieldPath.DESTINATION,
+        message="sensitive issue",
+    )
+    state = RequirementDomainState(
+        requirement=requirement,
+        metadata=metadata,
+        issues=(issue,),
+    )
+    outcome = NeedClarification(
+        requirement=requirement,
+        metadata=metadata,
+        issues=(issue,),
+        message=OUTCOME_CANARY,
+    )
+    return contracts.TravelSessionState(
+        schema_version="2.0",
+        run_id=RUN_ID,
+        trace_id=TRACE_ID,
+        phase=contracts.WorkflowPhase.REQUIREMENTS,
+        delivery_status=contracts.DeliveryStatus.AWAITING_USER,
+        terminal_code=None,
+        terminal_outcome=None,
+        requirement_state=state,
+        requirement_outcome=outcome,
         artifact_refs=(),
     )
 
@@ -143,13 +186,14 @@ def _valid_summary() -> contracts.RunSummary:
         pytest.param(
             CANARY,
             lambda: contracts.TravelSessionState(
-                schema_version="1.0",
+                schema_version="2.0",
                 run_id=RUN_ID,
                 trace_id=TRACE_ID,
                 phase=contracts.WorkflowPhase.REQUIREMENTS,
                 delivery_status=contracts.DeliveryStatus.IN_PROGRESS,
                 terminal_code=None,
                 terminal_outcome=None,
+                requirement_state=RequirementDomainState(),
                 requirement_outcome=NeedClarification(
                     requirement=TravelRequirement(),
                     metadata=FieldMetadataRegistry(),
@@ -189,6 +233,14 @@ def test_canary_is_not_in_sensitive_repr(value: str, make_repr) -> None:
     assert CANARY not in repr(make_repr())
 
 
+def test_nonempty_requirement_state_and_outcome_canaries_are_not_in_repr() -> None:
+    state = _sensitive_nonempty_state()
+    assert type(state).model_fields["requirement_state"].repr is False
+    assert type(state).model_fields["requirement_outcome"].repr is False
+    assert STATE_CANARY not in repr(state)
+    assert OUTCOME_CANARY not in repr(state)
+
+
 def test_sensitive_event_and_summary_surfaces_have_no_raw_payload_fields() -> None:
     forbidden = {
         "details",
@@ -221,13 +273,14 @@ def test_state_python_tree_preflight_rejects_forged_values(
     bad_value: object,
 ) -> None:
     values = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "run_id": RUN_ID,
         "trace_id": TRACE_ID,
         "phase": contracts.WorkflowPhase.REQUIREMENTS,
         "delivery_status": contracts.DeliveryStatus.IN_PROGRESS,
         "terminal_code": None,
         "terminal_outcome": None,
+        "requirement_state": RequirementDomainState(),
         "requirement_outcome": None,
         "artifact_refs": (),
     }
@@ -345,13 +398,14 @@ def test_nested_mutation_is_revalidated_at_behavior_boundaries() -> None:
         message="safe",
     )
     state_with_mutated_nested_outcome = contracts.TravelSessionState(
-        schema_version="1.0",
+        schema_version="2.0",
         run_id=RUN_ID,
         trace_id=TRACE_ID,
         phase=contracts.WorkflowPhase.REQUIREMENTS,
         delivery_status=contracts.DeliveryStatus.IN_PROGRESS,
         terminal_code=None,
         terminal_outcome=None,
+        requirement_state=RequirementDomainState(),
         requirement_outcome=outcome,
         artifact_refs=(),
     )
@@ -375,13 +429,14 @@ def test_nested_mutation_is_revalidated_at_behavior_boundaries() -> None:
 async def test_typed_errors_do_not_expose_canary(case: str) -> None:
     if case == "state":
         forged = contracts.TravelSessionState.model_construct(
-            schema_version="1.0",
+            schema_version="2.0",
             run_id=RUN_ID,
             trace_id=TRACE_ID,
             phase=CANARY,
             delivery_status=contracts.DeliveryStatus.IN_PROGRESS,
             terminal_code=None,
             terminal_outcome=None,
+            requirement_state=RequirementDomainState(),
             requirement_outcome=None,
             artifact_refs=(),
         )

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import warnings
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -14,9 +16,12 @@ from app.requirements import (
     FieldMetadataRegistry,
     NeedClarification,
     NeedConfirmation,
+    RequirementDomainTransition,
     RequirementErrorCode,
+    RequirementDomainState,
     RequirementExtractionFailed,
     RequirementFieldPath,
+    RequirementIssue,
     RequirementInvalidated,
     TravelRequirement,
 )
@@ -101,8 +106,11 @@ def _outcomes() -> tuple[object, ...]:
         RequirementInvalidated(
             changed_fields=(RequirementFieldPath.DESTINATION,),
             before_digest="before",
-            after_digest="after",
+            after_digest=hashlib.sha256(
+                requirement.model_dump_json(exclude_none=False).encode("utf-8")
+            ).hexdigest(),
             reason="用户修正",
+            summary="请确认新的行程",
         ),
     )
 
@@ -113,16 +121,44 @@ def _state(
     terminal_code: str | None = None,
     terminal_outcome: TerminalOutcome | None = None,
     requirement_outcome: object | None = None,
+    requirement_state: RequirementDomainState | None = None,
     artifact_refs: tuple[ArtifactRef, ...] = (),
 ) -> TravelSessionState:
+    if requirement_state is None:
+        requirement_state = RequirementDomainState()
+        if requirement_outcome is None and (
+            delivery_status is not DeliveryStatus.IN_PROGRESS
+            or terminal_code is not None
+            or terminal_outcome is not None
+            or artifact_refs
+        ):
+            requirement_outcome = NeedClarification(
+                requirement=requirement_state.requirement,
+                metadata=requirement_state.metadata,
+                issues=requirement_state.issues,
+                message="请继续提供需求",
+            )
+        if isinstance(requirement_outcome, NeedConfirmation):
+            requirement_state = requirement_state.model_copy(
+                update={"confirmation_status": "awaiting_confirmation"}
+            )
+        elif isinstance(requirement_outcome, ConfirmedTravelRequirement):
+            requirement_state = requirement_state.model_copy(
+                update={"confirmation_status": "confirmed"}
+            )
+        elif isinstance(requirement_outcome, RequirementInvalidated):
+            requirement_state = requirement_state.model_copy(
+                update={"confirmation_status": "awaiting_confirmation"}
+            )
     return TravelSessionState(
-        schema_version="1.0",
+        schema_version="2.0",
         run_id=RUN_ID,
         trace_id=TRACE_ID,
         phase=WorkflowPhase.REQUIREMENTS,
         delivery_status=delivery_status,
         terminal_code=terminal_code,
         terminal_outcome=terminal_outcome,
+        requirement_state=requirement_state,
         requirement_outcome=requirement_outcome,
         artifact_refs=artifact_refs,
     )
@@ -146,6 +182,19 @@ def test_state_dtos_are_strict_frozen_forbid_and_required() -> None:
         assert model.model_config["extra"] == "forbid"
         assert all(field.is_required() for field in model.model_fields.values())
     assert TravelSessionState.model_fields["requirement_outcome"].repr is False
+    assert TravelSessionState.model_fields["requirement_state"].repr is False
+    assert tuple(TravelSessionState.model_fields) == (
+        "schema_version",
+        "run_id",
+        "trace_id",
+        "phase",
+        "delivery_status",
+        "terminal_code",
+        "terminal_outcome",
+        "requirement_state",
+        "requirement_outcome",
+        "artifact_refs",
+    )
 
 
 def test_delivery_status_matrix_and_terminal_outcome_invariants() -> None:
@@ -248,7 +297,7 @@ def test_state_codec_is_deterministic_and_accepts_only_safe_json_bytes() -> None
 def test_state_codec_duplicate_and_version_error_priority() -> None:
     with pytest.raises(WorkflowStateValidationError):
         parse_travel_session_state_json(
-            b'{"schema_version":"1.0","schema_version":"1.0"}'
+            b'{"schema_version":"2.0","schema_version":"2.0"}'
         )
     with pytest.raises(UnsupportedWorkflowStateVersionError):
         parse_travel_session_state_json(
@@ -262,27 +311,369 @@ def test_state_codec_duplicate_and_version_error_priority() -> None:
         parse_travel_session_state_json(b'{"schema_version":null}')
     with pytest.raises(WorkflowStateValidationError):
         parse_travel_session_state_json(
-            b'{"schema_version":"1.0","nested":{"a":1,"a":2}}'
+            b'{"schema_version":"2.0","nested":{"a":1,"a":2}}'
         )
     with pytest.raises(WorkflowStateValidationError):
         parse_travel_session_state_json(
-            b'{"schema_version":"1.0","run_id":1,"run_id":2}'
+            b'{"schema_version":"2.0","run_id":1,"run_id":2}'
         )
     with pytest.raises(WorkflowStateValidationError):
-        parse_travel_session_state_json(b'{"schema_version":"1.0","bad":NaN}')
+        parse_travel_session_state_json(b'{"schema_version":"2.0","bad":NaN}')
     with pytest.raises(WorkflowStateValidationError):
+        parse_travel_session_state_json(b'{"schema_version":"2.0"}')
+
+
+def test_state_schema_version_v1_is_fail_closed() -> None:
+    with pytest.raises(UnsupportedWorkflowStateVersionError) as error_info:
         parse_travel_session_state_json(b'{"schema_version":"1.0"}')
+    assert error_info.value.args == ()
+
+
+def test_initial_state_requires_default_state_and_only_none_outcome() -> None:
+    _state()
+    with pytest.raises(ValidationError):
+        TravelSessionState(
+            schema_version="2.0",
+            run_id=RUN_ID,
+            trace_id=TRACE_ID,
+            phase=WorkflowPhase.REQUIREMENTS,
+            delivery_status=DeliveryStatus.IN_PROGRESS,
+            terminal_code=None,
+            terminal_outcome=None,
+            requirement_state=RequirementDomainState(
+                confirmation_status="awaiting_confirmation"
+            ),
+            requirement_outcome=None,
+            artifact_refs=(),
+        )
+
+
+def test_requirement_state_and_outcome_are_fresh_and_mutation_isolated() -> None:
+    requirement = TravelRequirement()
+    outcome = NeedClarification(
+        requirement=requirement,
+        metadata=FieldMetadataRegistry(),
+        issues=(),
+        message="canary",
+    )
+    input_state = RequirementDomainState()
+    state = _state(
+        requirement_state=input_state,
+        requirement_outcome=outcome,
+    )
+    assert state.requirement_state is not input_state
+    assert state.requirement_state.requirement is not requirement
+    assert state.requirement_outcome is not outcome
+    requirement.destination = "泄漏"
+    outcome.message = "changed"
+    assert state.requirement_state.requirement.destination is None
+    assert state.requirement_outcome.message == "canary"
+
+
+def test_travel_session_state_deep_fresh_copy_has_bidirectional_mutation_canaries() -> None:
+    source_requirement = TravelRequirement(destination="源状态城市")
+    source_metadata = FieldMetadataRegistry()
+    source_issue = RequirementIssue(
+        code="source_issue",
+        field_path=RequirementFieldPath.DESTINATION,
+        message="源问题",
+    )
+    source_issues = (source_issue,)
+    source_state = RequirementDomainState(
+        requirement=source_requirement,
+        metadata=source_metadata,
+        issues=source_issues,
+    )
+    source_outcome = NeedClarification(
+        requirement=source_requirement,
+        metadata=source_metadata,
+        issues=source_issues,
+        message="源追问",
+    )
+    source_transition = RequirementDomainTransition(
+        state=source_state,
+        outcome=source_outcome,
+    )
+    snapshot = _state(
+        requirement_state=source_transition.state,
+        requirement_outcome=source_transition.outcome,
+    )
+
+    assert snapshot.requirement_state is not source_transition.state
+    assert snapshot.requirement_outcome is not source_transition.outcome
+    assert snapshot.requirement_state.requirement is not source_transition.state.requirement
+    assert snapshot.requirement_state.requirement is not source_transition.outcome.requirement
+    assert snapshot.requirement_state.metadata is not source_transition.state.metadata
+    assert snapshot.requirement_state.metadata is not source_transition.outcome.metadata
+    assert snapshot.requirement_state.issues[0] is not source_transition.state.issues[0]
+    assert snapshot.requirement_state.issues[0] is not source_transition.outcome.issues[0]
+    assert snapshot.requirement_state.requirement is not snapshot.requirement_outcome.requirement
+    assert snapshot.requirement_state.metadata is not snapshot.requirement_outcome.metadata
+
+    source_transition.state.requirement.destination = "源状态修改"
+    source_transition.state.metadata.metadata[RequirementFieldPath.DESTINATION] = object()  # type: ignore[assignment]
+    source_transition.state.issues[0].message = "源问题修改"
+    source_transition.outcome.requirement.destination = "源结果修改"
+    source_transition.outcome.metadata.metadata[RequirementFieldPath.DESTINATION] = object()  # type: ignore[assignment]
+    source_transition.outcome.issues[0].message = "源结果问题修改"
+    assert snapshot.requirement_state.requirement.destination == "源状态城市"
+    assert snapshot.requirement_outcome.requirement.destination == "源状态城市"
+    assert snapshot.requirement_state.metadata.metadata == {}
+    assert snapshot.requirement_outcome.metadata.metadata == {}
+    assert snapshot.requirement_state.issues[0].message == "源问题"
+    assert snapshot.requirement_outcome.issues[0].message == "源问题"
+
+    snapshot.requirement_state.requirement.destination = "快照状态修改"
+    snapshot.requirement_state.issues[0].message = "快照状态问题修改"
+    snapshot.requirement_outcome.requirement.destination = "快照结果修改"
+    snapshot.requirement_outcome.issues[0].message = "快照结果问题修改"
+    assert snapshot.requirement_outcome.requirement.destination == "快照结果修改"
+    assert snapshot.requirement_state.requirement.destination == "快照状态修改"
+    assert snapshot.requirement_state.issues[0].message == "快照状态问题修改"
+    assert snapshot.requirement_outcome.issues[0].message == "快照结果问题修改"
+
+
+@pytest.mark.parametrize(
+    ("state_factory", "outcome_factory"),
+    [
+        pytest.param(
+            lambda: RequirementDomainState(
+                requirement=TravelRequirement(destination="状态城市")
+            ),
+            lambda: NeedClarification(
+                requirement=TravelRequirement(),
+                metadata=FieldMetadataRegistry(),
+                issues=(),
+                message="状态不一致",
+            ),
+            id="need-clarification-state-mismatch",
+        ),
+        pytest.param(
+            lambda: RequirementDomainState(
+                requirement=TravelRequirement(destination="状态城市")
+            ),
+            lambda: NeedConfirmation(
+                requirement=TravelRequirement(),
+                metadata=FieldMetadataRegistry(),
+                summary="状态不一致",
+            ),
+            id="need-confirmation-state-mismatch",
+        ),
+        pytest.param(
+            lambda: RequirementDomainState(
+                requirement=TravelRequirement(destination="状态城市")
+            ),
+            lambda: ConfirmedTravelRequirement(
+                schema_version="1.0",
+                requirement=TravelRequirement(),
+                metadata_without_raw_evidence=FieldMetadataRegistry(),
+                confirmation_summary_digest="digest",
+            ),
+            id="confirmed-state-mismatch",
+        ),
+        pytest.param(
+            lambda: RequirementDomainState(
+                requirement=TravelRequirement(destination="杭州"),
+                confirmation_status="awaiting_confirmation",
+            ),
+            lambda: RequirementInvalidated(
+                changed_fields=(RequirementFieldPath.DESTINATION,),
+                before_digest="before",
+                after_digest="wrong-after-digest",
+                reason="反例",
+                summary="反例摘要",
+            ),
+            id="invalidated-after-digest-mismatch",
+        ),
+    ],
+)
+def test_travel_session_state_rejects_public_transition_mismatches(
+    state_factory,
+    outcome_factory,
+) -> None:
+    with pytest.raises(ValidationError):
+        _state(
+            requirement_state=state_factory(),
+            requirement_outcome=outcome_factory(),
+        )
+
+
+def _json_payload_with(**updates: object) -> bytes:
+    tree = json.loads(serialize_travel_session_state(_state(requirement_outcome=_outcomes()[0])))
+    tree.update(updates)
+    return json.dumps(
+        tree,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _assert_marker_error(error: Exception, expected_type: type[Exception]) -> None:
+    assert type(error) is expected_type
+    assert error.args == ()
+    assert error.__cause__ is None
+    assert str(error) == expected_type.__name__
+    assert repr(error) == f"{expected_type.__name__}()"
+
+
+def _codec_validation_vectors() -> tuple[tuple[object, type[Exception]], ...]:
+    valid = serialize_travel_session_state(_state(requirement_outcome=_outcomes()[0]))
+    return (
+        (bytearray(valid), WorkflowStateValidationError),
+        (valid.decode("utf-8"), WorkflowStateValidationError),
+        (b"\xff", WorkflowStateValidationError),
+        (b"\xef\xbb\xbf" + valid, WorkflowStateValidationError),
+        (b"{", WorkflowStateValidationError),
+        (b"[]", WorkflowStateValidationError),
+        (valid + b" trailing", WorkflowStateValidationError),
+        (b'{"schema_version":"2.0","schema_version":"2.0"}', WorkflowStateValidationError),
+        (b'{"schema_version":"2.0","run_id":1,"run_id":2}', WorkflowStateValidationError),
+        (b'{"schema_version":"2.0","nested":{"a":1,"a":2}}', WorkflowStateValidationError),
+        (b'{"schema_version":"2.0","bad":NaN}', WorkflowStateValidationError),
+        (b'{"schema_version":"2.0","bad":Infinity}', WorkflowStateValidationError),
+        (b'{"schema_version":"2.0","bad":-Infinity}', WorkflowStateValidationError),
+        (b'{"schema_version":"2.0"}', WorkflowStateValidationError),
+        (_json_payload_with(unexpected="extra"), WorkflowStateValidationError),
+        (_json_payload_with(run_id=1), WorkflowStateValidationError),
+        (
+            _json_payload_with(
+                requirement_state={
+                    **json.loads(
+                        serialize_travel_session_state(
+                            _state(requirement_outcome=_outcomes()[0])
+                        )
+                    )["requirement_state"],
+                    "confirmation_status": "awaiting_confirmation",
+                }
+            ),
+            WorkflowStateValidationError,
+        ),
+    )
+
+
+@pytest.mark.parametrize("payload, expected_type", _codec_validation_vectors())
+def test_codec_validation_markers_have_exact_shape(
+    payload: object,
+    expected_type: type[Exception],
+) -> None:
+    try:
+        parse_travel_session_state_json(payload)  # type: ignore[arg-type]
+    except Exception as error:
+        _assert_marker_error(error, expected_type)
+    else:
+        pytest.fail("expected marker exception")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"{}",
+        b'{"schema_version":null}',
+        b'{"schema_version":"1.0"}',
+        b'{"schema_version":"9.0"}',
+        b'{"schema_version":"9.0","run_id":1,"run_id":2,"canary":"unknown"}',
+        b'{"schema_version":"9.0","nested":{"a":1,"a":2}}',
+        b'{"schema_version":"9.0","bad":NaN}',
+        b'{"schema_version":"9.0","bad":Infinity}',
+        b'{"schema_version":"9.0","bad":-Infinity}',
+    ],
+)
+def test_unknown_version_marker_precedes_other_parse_failures(payload: bytes) -> None:
+    try:
+        parse_travel_session_state_json(payload)
+    except Exception as error:
+        _assert_marker_error(error, UnsupportedWorkflowStateVersionError)
+    else:
+        pytest.fail("expected unsupported-version marker")
+
+
+def _serializer_invalid_factories():
+    def forged_v1():
+        return TravelSessionState.model_construct(
+            schema_version="1.0",
+            run_id=RUN_ID,
+            trace_id=TRACE_ID,
+            phase=WorkflowPhase.REQUIREMENTS,
+            delivery_status=DeliveryStatus.IN_PROGRESS,
+            terminal_code=None,
+            terminal_outcome=None,
+            requirement_state=RequirementDomainState(),
+            requirement_outcome=None,
+            artifact_refs=(),
+        )
+
+    def mutated_state():
+        state = _state(requirement_outcome=_outcomes()[0])
+        state.requirement_state.requirement.destination = object()  # type: ignore[assignment]
+        return state
+
+    def mutated_outcome():
+        state = _state(requirement_outcome=_outcomes()[0])
+        state.requirement_outcome.message = object()  # type: ignore[union-attr,assignment]
+        return state
+
+    def transition_mismatch():
+        state = _state(requirement_outcome=_outcomes()[0])
+        state.requirement_state.confirmation_status = "awaiting_confirmation"
+        return state
+
+    def terminal_invariant():
+        return TravelSessionState.model_construct(
+            schema_version="2.0",
+            run_id=RUN_ID,
+            trace_id=TRACE_ID,
+            phase=WorkflowPhase.REQUIREMENTS,
+            delivery_status=DeliveryStatus.IN_PROGRESS,
+            terminal_code="forged_terminal",
+            terminal_outcome=None,
+            requirement_state=RequirementDomainState(),
+            requirement_outcome=None,
+            artifact_refs=(),
+        )
+
+    def artifact_invariant():
+        first = _ref(UUID("42345678-1234-5678-1234-567812345678"), "artifact")
+        return TravelSessionState.model_construct(
+            schema_version="2.0",
+            run_id=RUN_ID,
+            trace_id=TRACE_ID,
+            phase=WorkflowPhase.REQUIREMENTS,
+            delivery_status=DeliveryStatus.AWAITING_USER,
+            terminal_code=None,
+            terminal_outcome=None,
+            requirement_state=RequirementDomainState(),
+            requirement_outcome=_outcomes()[0],
+            artifact_refs=(first, first),
+        )
+
+    return (forged_v1, mutated_state, mutated_outcome, transition_mismatch, terminal_invariant, artifact_invariant)
+
+
+@pytest.mark.parametrize("state_factory", _serializer_invalid_factories())
+def test_serializer_failures_are_uniform_marker_errors(state_factory) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        try:
+            serialize_travel_session_state(state_factory())
+        except Exception as error:
+            _assert_marker_error(error, WorkflowStateValidationError)
+            assert type(error) is not UnsupportedWorkflowStateVersionError
+        else:
+            pytest.fail("expected serializer validation marker")
 
 
 def test_state_model_construct_and_nested_mutation_cannot_bypass_codec() -> None:
     forged = TravelSessionState.model_construct(
-        schema_version="1.0",
+        schema_version="2.0",
         run_id=RUN_ID,
         trace_id=TRACE_ID,
         phase=WorkflowPhase.REQUIREMENTS,
         delivery_status=DeliveryStatus.IN_PROGRESS,
         terminal_code="forged",
         terminal_outcome=None,
+        requirement_state=RequirementDomainState(),
         requirement_outcome=None,
         artifact_refs=(),
     )
@@ -655,13 +1046,14 @@ def test_terminal_registry_rejects_observable_registration_state_mismatches() ->
 def test_state_error_markers_do_not_expose_payload() -> None:
     secret = "top-secret-requirement"
     forged = TravelSessionState.model_construct(
-        schema_version="1.0",
+        schema_version="2.0",
         run_id=RUN_ID,
         trace_id=TRACE_ID,
         phase=WorkflowPhase.REQUIREMENTS,
         delivery_status=DeliveryStatus.IN_PROGRESS,
         terminal_code="forged",
         terminal_outcome=None,
+        requirement_state=RequirementDomainState(),
         requirement_outcome=NeedClarification(
             requirement=TravelRequirement(),
             metadata=FieldMetadataRegistry(),

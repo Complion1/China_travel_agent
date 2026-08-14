@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 from enum import Enum
 from typing import Annotated, Literal, Optional, Protocol, Tuple
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, model_validator
 
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
@@ -307,6 +309,7 @@ class RequirementInvalidated(BaseModel):
     before_digest: Annotated[str, StringConstraints(min_length=1)]
     after_digest: Annotated[str, StringConstraints(min_length=1)]
     reason: Annotated[str, StringConstraints(min_length=1)]
+    summary: Annotated[str, StringConstraints(min_length=1)]
 
 
 RequirementDomainOutcome = Annotated[
@@ -316,13 +319,92 @@ RequirementDomainOutcome = Annotated[
 ]
 
 
+class RequirementDomainTransition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    state: RequirementDomainState
+    outcome: RequirementDomainOutcome
+
+    @model_validator(mode="after")
+    def validate_consistency(self) -> "RequirementDomainTransition":
+        state = _fresh_model(RequirementDomainState, self.state)
+        outcome = _fresh_model(RequirementDomainOutcome, self.outcome)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "outcome", outcome)
+
+        if isinstance(outcome, NeedClarification):
+            if (
+                state.confirmation_status != "collecting"
+                or state.requirement != outcome.requirement
+                or state.metadata != outcome.metadata
+                or state.issues != outcome.issues
+            ):
+                raise ValueError("need_clarification state mismatch")
+        elif isinstance(outcome, NeedConfirmation):
+            if (
+                state.confirmation_status != "awaiting_confirmation"
+                or state.issues
+                or state.requirement != outcome.requirement
+                or state.metadata != outcome.metadata
+            ):
+                raise ValueError("need_confirmation state mismatch")
+        elif isinstance(outcome, ConfirmedTravelRequirement):
+            if (
+                state.confirmation_status != "confirmed"
+                or state.issues
+                or state.requirement != outcome.requirement
+                or state.metadata != outcome.metadata_without_raw_evidence
+            ):
+                raise ValueError("confirmed state mismatch")
+        elif isinstance(outcome, RequirementInvalidated):
+            if (
+                state.confirmation_status != "awaiting_confirmation"
+                or state.issues
+                or outcome.after_digest != _requirement_digest(state.requirement)
+            ):
+                raise ValueError("invalidated state mismatch")
+
+        return self
+
+
+def _fresh_model(model_type, value):
+    adapter = TypeAdapter(model_type)
+    python_tree = value.model_dump(
+        mode="python",
+        exclude_none=False,
+        by_alias=False,
+        exclude_computed_fields=True,
+    )
+    validated = adapter.validate_python(python_tree, strict=True)
+    payload = validated.model_dump(
+        mode="json",
+        exclude_none=False,
+        by_alias=False,
+        exclude_computed_fields=True,
+    )
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return adapter.validate_json(encoded, strict=True)
+
+
+def _requirement_digest(requirement: TravelRequirement) -> str:
+    return hashlib.sha256(
+        requirement.model_dump_json(exclude_none=False).encode("utf-8")
+    ).hexdigest()
+
+
 # -- §6.2: RequirementTurnInput --
 
 class RequirementTurnInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     schema_version: Literal["1.0"] = "1.0"
     turn_id: UUID
-    user_message: Annotated[str, StringConstraints(min_length=1, max_length=8000)]
+    user_message: Annotated[str, StringConstraints(min_length=1)]
     session_date: date
     timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
     intent: RequirementIntent
@@ -333,7 +415,7 @@ class RequirementConfirmation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     decision: Literal["accept", "revise"]
     revision_text: Optional[
-        Annotated[str, StringConstraints(min_length=1, max_length=8000)]
+        Annotated[str, StringConstraints(min_length=1)]
     ]
 
     @model_validator(mode="after")

@@ -155,7 +155,10 @@ async def test_full_domain_repair_loop_uses_one_session_and_operation():
             current=RequirementDomainState(),
         )
     )
-    assert isinstance(outcome, NeedClarification)
+    assert isinstance(outcome.outcome, NeedClarification)
+    assert isinstance(outcome.state, RequirementDomainState)
+    assert outcome.state.requirement.destination == "杭州"
+    assert outcome.state.requirement == outcome.outcome.requirement
     assert len(runtime.operations) == 1
     assert len(runtime.operations[0].calls) == 2
     assert [event.semantic_call_number for event in sink.events] == [1, 2]

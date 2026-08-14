@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–03 已完成实现与验收，后续模块按冻结规范继续交付；旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–04 已完成实现与验收，后续模块按冻结规范继续交付；旧原型接口不构成兼容要求。
 
 ## 架构基线
 
@@ -34,12 +34,14 @@ CLI Demo
 - [`docs/02_llm_runtime_and_model_profiles_vibe_coding.md`](./docs/02_llm_runtime_and_model_profiles_vibe_coding.md)：模块 02 精确执行契约。
 - [`docs/03_requirement_extraction_adapter.md`](./docs/03_requirement_extraction_adapter.md)：模块 03 需求提取适配合同。
 - [`docs/03_requirement_extraction_adapter_vibe_coding.md`](./docs/03_requirement_extraction_adapter_vibe_coding.md)：模块 03 精确执行契约。
+- [`docs/04_workflow_state_and_artifacts.md`](./docs/04_workflow_state_and_artifacts.md)：模块 04 工作流状态、Artifact Repository、预算与安全事件合同。
+- [`docs/04_workflow_state_and_artifacts_vibe_coding.md`](./docs/04_workflow_state_and_artifacts_vibe_coding.md)：模块 04 精确执行契约与 RSC-T00–RSC-T06 验收路由。
 
 权威层级和冲突处理以主设计第 1 节为准。后续模块必须按路线图中的 `depends_on` 和模块 acceptance gate 开工。`_vibe_coding.md` 专门面向能力较弱的编码模型，必须保留精确文件白名单、符号、算法、阶段 Gate、测试矩阵、停止条件和报告模板，不能压缩成需要模型自行推导的摘要。
 
 ## 当前边界
 
-模块 01、02、03 已完成：完整 unit/contract 与 Docker 离线测试为 `370 passed`，模块 02 正式 live 为 `1/1`，模块 03 正式 live 为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
+模块 01–04 已完成当前实现与 RSC-T00–RSC-T06 验收：RSC-T05 Docker 离线 unit/contract 回归为 `638 passed`；模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`。模块 02 正式 live 为 `1/1`，模块 03 正式 live 为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
 
 模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。LangGraph 从模块 05 开始实现；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前开发没有客户端、FastAPI 或 Web；模块 14 只规划薄 CLI 和 Application Service。
 
@@ -51,7 +53,7 @@ CLI Demo
 
 ## Docker 开发与测试
 
-当前容器只承诺复现已经实现的模块 01–03，不会把尚不存在的 Graph/CLI 主链伪装成可运行服务。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+当前容器只承诺复现已经实现的模块 01–04，不会把尚不存在的 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction` 和 `app.workflow_contracts`，并输出 `modules 01-04 import successfully`；test target 包含当前 tests 树并使用 pytest 的 `no:cacheprovider` 模式。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 

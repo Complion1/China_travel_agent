@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from uuid import UUID, uuid4
+
+from pydantic import TypeAdapter
 
 from app.requirements.dialogue import render_clarification, render_confirmation_summary
 from app.requirements.evidence import verify_evidence
@@ -38,6 +41,7 @@ from app.requirements.models import (
     RequirementConfirmation,
     RequirementDomainOutcome,
     RequirementDomainState,
+    RequirementDomainTransition,
     RequirementErrorCode,
     RequirementExtractionFailed,
     RequirementFieldPath,
@@ -89,7 +93,12 @@ class RequirementDomainService:
         self._clock = clock
         self._merger = RequirementMerger()
 
-    async def process_turn(self, input: RequirementTurnInput) -> RequirementDomainOutcome:
+    async def process_turn(self, input: RequirementTurnInput) -> RequirementDomainTransition:
+        if len(input.user_message) > 8000:
+            return self._transition(
+                input.current.model_copy(deep=True),
+                RequirementExtractionFailed(code=RequirementErrorCode.INPUT_TOO_LONG),
+            )
         extraction_input = ExtractionInput(
             turn_id=input.turn_id,
             user_message=input.user_message,
@@ -100,7 +109,7 @@ class RequirementDomainService:
         )
         extracted = await self._extract_with_one_repair(extraction_input)
         if isinstance(extracted, RequirementExtractionFailed):
-            return extracted
+            return self._transition(input.current.model_copy(deep=True), extracted)
         dto, verified = extracted
 
         receipts = self._evidence_sink.accept(
@@ -108,7 +117,10 @@ class RequirementDomainService:
             evidence=verified,
         )
         if not self._receipts_match(verified, receipts):
-            return RequirementExtractionFailed(code=RequirementErrorCode.EVIDENCE_MISSING)
+            return self._transition(
+                input.current.model_copy(deep=True),
+                RequirementExtractionFailed(code=RequirementErrorCode.EVIDENCE_MISSING),
+            )
 
         try:
             patch, normalizations, pending = self._dto_to_patch(
@@ -149,8 +161,13 @@ class RequirementDomainService:
         self,
         state: RequirementDomainState,
         action: RequirementConfirmation,
-    ) -> RequirementDomainOutcome:
+    ) -> RequirementDomainTransition:
         if action.decision == "revise":
+            if len(action.revision_text or "") > 8000:
+                return self._transition(
+                    state.model_copy(deep=True),
+                    RequirementExtractionFailed(code=RequirementErrorCode.INPUT_TOO_LONG),
+                )
             return await self.process_turn(
                 RequirementTurnInput(
                     schema_version="1.0",
@@ -181,18 +198,21 @@ class RequirementDomainService:
             if not metadata.issues:
                 metadata.status = FieldStatus.CONFIRMED
         summary = render_confirmation_summary(working.requirement)
-        return ConfirmedTravelRequirement(
-            schema_version="1.0",
-            requirement=working.requirement,
-            metadata_without_raw_evidence=working.metadata,
-            confirmation_summary_digest=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+        return self._transition(
+            working,
+            ConfirmedTravelRequirement(
+                schema_version="1.0",
+                requirement=working.requirement,
+                metadata_without_raw_evidence=working.metadata,
+                confirmation_summary_digest=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+            ),
         )
 
     def process_manual_template(
         self,
         state: RequirementDomainState,
         submission: ManualTemplateSubmission,
-    ) -> RequirementDomainOutcome:
+    ) -> RequirementDomainTransition:
         try:
             patch = parse_manual_template(submission)
         except ManualTemplateParseError as exc:
@@ -507,7 +527,7 @@ class RequirementDomainService:
         state: RequirementDomainState,
         before: TravelRequirement,
         result: MergeResult,
-    ) -> RequirementDomainOutcome:
+    ) -> RequirementDomainTransition:
         missing = self._merger.detect_missing_fields(state.requirement)
         needs_interests = (
             state.requirement.preferences.interests is None
@@ -527,36 +547,75 @@ class RequirementDomainService:
             )
 
         if result.changed_fields and state.confirmation_status == "confirmed":
-            return RequirementInvalidated(
-                changed_fields=tuple(RequirementFieldPath(path) for path in result.changed_fields),
-                before_digest=_digest_model(before),
-                after_digest=_digest_model(state.requirement),
-                reason="confirmed_requirement_changed",
+            state.confirmation_status = "awaiting_confirmation"
+            state.issues = ()
+            return self._transition(
+                state,
+                RequirementInvalidated(
+                    changed_fields=tuple(
+                        sorted(
+                            {RequirementFieldPath(path) for path in result.changed_fields},
+                            key=lambda item: item.value,
+                        )
+                    ),
+                    before_digest=_digest_model(before),
+                    after_digest=_digest_model(state.requirement),
+                    reason="confirmed_requirement_changed",
+                    summary=render_confirmation_summary(state.requirement),
+                ),
             )
 
         state.confirmation_status = "awaiting_confirmation"
-        return NeedConfirmation(
-            requirement=state.requirement,
-            metadata=state.metadata,
-            summary=render_confirmation_summary(state.requirement),
+        return self._transition(
+            state,
+            NeedConfirmation(
+                requirement=state.requirement,
+                metadata=state.metadata,
+                summary=render_confirmation_summary(state.requirement),
+            ),
         )
 
-    @staticmethod
     def _need_clarification(
+        self,
         state: RequirementDomainState,
         missing: tuple[str, ...] | list[str],
         *,
         needs_interests: bool = False,
         needs_pace: bool = False,
-    ) -> NeedClarification:
-        return NeedClarification(
-            requirement=state.requirement,
-            metadata=state.metadata,
-            issues=state.issues,
-            message=render_clarification(
-                list(missing),
-                list(state.issues),
-                needs_interests,
-                needs_pace,
+    ) -> RequirementDomainTransition:
+        state.confirmation_status = "collecting"
+        return self._transition(
+            state,
+            NeedClarification(
+                requirement=state.requirement,
+                metadata=state.metadata,
+                issues=state.issues,
+                message=render_clarification(
+                    list(missing),
+                    list(state.issues),
+                    needs_interests,
+                    needs_pace,
+                ),
             ),
         )
+
+    @staticmethod
+    def _transition(
+        state: RequirementDomainState,
+        outcome: RequirementDomainOutcome,
+    ) -> RequirementDomainTransition:
+        transition = RequirementDomainTransition(state=state, outcome=outcome)
+        payload = transition.model_dump(
+            mode="json",
+            exclude_none=False,
+            by_alias=False,
+            exclude_computed_fields=True,
+        )
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        return TypeAdapter(RequirementDomainTransition).validate_json(encoded, strict=True)

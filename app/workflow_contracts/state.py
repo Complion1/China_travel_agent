@@ -7,9 +7,20 @@ from enum import Enum
 from typing import Annotated, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationInfo,
+    model_validator,
+)
 
-from app.requirements import RequirementDomainOutcome
+from app.requirements import (
+    RequirementDomainOutcome,
+    RequirementDomainState,
+    RequirementDomainTransition,
+)
 from app.workflow_contracts.artifacts.models import ArtifactRef
 from app.workflow_contracts.errors import (
     TerminalRegistryConfigurationError,
@@ -26,17 +37,75 @@ from app.workflow_contracts.identifiers import (
 )
 
 
+_REQUIREMENT_STATE_ADAPTER = TypeAdapter(RequirementDomainState)
 _REQUIREMENT_OUTCOME_ADAPTER = TypeAdapter(RequirementDomainOutcome)
 
 
-def _copy_requirement_outcome(value: RequirementDomainOutcome) -> RequirementDomainOutcome:
-    tree = value.model_dump(
-        mode="python",
+def _python_tree(value: object) -> object:
+    if isinstance(value, BaseModel):
+        return value.model_dump(
+            mode="python",
+            exclude_none=False,
+            by_alias=False,
+            exclude_computed_fields=True,
+        )
+    return value
+
+
+def _fresh_requirement_state(
+    value: object,
+    *,
+    json_input: bool = False,
+) -> RequirementDomainState:
+    tree = _python_tree(value)
+    if json_input:
+        first = _REQUIREMENT_STATE_ADAPTER.validate_json(
+            json.dumps(
+                tree,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
+            strict=True,
+        )
+    else:
+        first = _REQUIREMENT_STATE_ADAPTER.validate_python(tree, strict=True)
+    json_tree = first.model_dump(
+        mode="json",
         exclude_none=False,
         by_alias=False,
         exclude_computed_fields=True,
     )
-    first = _REQUIREMENT_OUTCOME_ADAPTER.validate_python(tree, strict=True)
+    payload = json.dumps(
+        json_tree,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return _REQUIREMENT_STATE_ADAPTER.validate_json(payload, strict=True)
+
+
+def _fresh_requirement_outcome(
+    value: object,
+    *,
+    json_input: bool = False,
+) -> RequirementDomainOutcome:
+    tree = _python_tree(value)
+    if json_input:
+        first = _REQUIREMENT_OUTCOME_ADAPTER.validate_json(
+            json.dumps(
+                tree,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
+            strict=True,
+        )
+    else:
+        first = _REQUIREMENT_OUTCOME_ADAPTER.validate_python(tree, strict=True)
     json_tree = first.model_dump(
         mode="json",
         exclude_none=False,
@@ -106,27 +175,61 @@ _PHASE_ORDER = {phase: index for index, phase in enumerate(WorkflowPhase)}
 class TravelSessionState(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
 
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     run_id: UUID
     trace_id: UUID
     phase: WorkflowPhase
     delivery_status: DeliveryStatus
     terminal_code: TerminalCode | None
     terminal_outcome: TerminalOutcome | None
+    requirement_state: RequirementDomainState = Field(repr=False)
     requirement_outcome: RequirementDomainOutcome | None = Field(repr=False)
     artifact_refs: tuple[ArtifactRef, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def strict_requirement_preflight(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "requirement_state" in payload:
+            payload["requirement_state"] = _fresh_requirement_state(
+                payload["requirement_state"],
+                json_input=info.mode == "json",
+            )
+        if payload.get("requirement_outcome") is not None:
+            payload["requirement_outcome"] = _fresh_requirement_outcome(
+                payload["requirement_outcome"],
+                json_input=info.mode == "json",
+            )
+        if info.mode == "json" and isinstance(payload.get("artifact_refs"), list):
+            payload["artifact_refs"] = tuple(payload["artifact_refs"])
+        return payload
 
     @model_validator(mode="after")
     def validate_state_invariants(self) -> "TravelSessionState":
         if self.requirement_outcome is not None:
-            try:
-                object.__setattr__(
-                    self,
-                    "requirement_outcome",
-                    _copy_requirement_outcome(self.requirement_outcome),
-                )
-            except Exception:
-                raise ValueError("invalid requirement outcome") from None
+            transition = RequirementDomainTransition(
+                state=self.requirement_state,
+                outcome=self.requirement_outcome,
+            )
+            object.__setattr__(
+                self,
+                "requirement_state",
+                _fresh_requirement_state(transition.state),
+            )
+            object.__setattr__(
+                self,
+                "requirement_outcome",
+                _fresh_requirement_outcome(transition.outcome),
+            )
+        elif self.requirement_state != RequirementDomainState():
+            raise ValueError("outcome is required after initial state")
+
         if self.delivery_status in _NONTERMINAL_STATUSES:
             if self.terminal_code is not None or self.terminal_outcome is not None:
                 raise ValueError("nonterminal state cannot have terminal fields")
@@ -136,6 +239,15 @@ class TravelSessionState(BaseModel):
         elif self.delivery_status in _TERMINAL_STATUSES:
             if self.terminal_code is None or self.terminal_outcome is None:
                 raise ValueError("terminal state requires terminal fields")
+
+        if self.requirement_outcome is None and (
+            self.phase is not WorkflowPhase.REQUIREMENTS
+            or self.delivery_status is not DeliveryStatus.IN_PROGRESS
+            or self.terminal_code is not None
+            or self.terminal_outcome is not None
+            or self.artifact_refs
+        ):
+            raise ValueError("empty requirement outcome is only valid for initial state")
 
         if self.terminal_outcome is not None:
             if self.terminal_outcome.terminal_code != self.terminal_code:
@@ -323,7 +435,7 @@ def parse_travel_session_state_json(data: bytes) -> TravelSessionState:
         raise WorkflowStateValidationError()
 
     version = tree.get("schema_version")
-    if type(version) is not str or version != "1.0":
+    if type(version) is not str or version != "2.0":
         raise UnsupportedWorkflowStateVersionError()
     if _has_duplicate_key(tree) or _has_invalid_number(tree):
         raise WorkflowStateValidationError()

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from typing import get_args, get_type_hints
 from inspect import iscoroutinefunction, signature
 
 import app.workflow_contracts as root
+from app.requirements import RequirementDomainOutcome, RequirementDomainState
 from app.workflow_contracts import artifacts, budgets, events
 from app.workflow_contracts.artifacts import in_memory as artifact_memory
 from app.workflow_contracts.artifacts import models as artifact_models
@@ -361,6 +363,44 @@ def test_public_enums_registrations_limits_and_dto_fields() -> None:
         "counters",
         "budget_snapshots",
     )
+
+
+def test_travel_session_state_v2_contract_is_exact() -> None:
+    assert tuple(root.TravelSessionState.model_fields) == (
+        "schema_version",
+        "run_id",
+        "trace_id",
+        "phase",
+        "delivery_status",
+        "terminal_code",
+        "terminal_outcome",
+        "requirement_state",
+        "requirement_outcome",
+        "artifact_refs",
+    )
+    fields = root.TravelSessionState.model_fields
+    assert all(field.is_required() for field in fields.values())
+    assert fields["requirement_state"].annotation is RequirementDomainState
+    assert get_type_hints(root.TravelSessionState, include_extras=True)[
+        "requirement_outcome"
+    ] == RequirementDomainOutcome | None
+    assert get_args(fields["schema_version"].annotation) == ("2.0",)
+    assert fields["requirement_state"].repr is False
+    assert fields["requirement_outcome"].repr is False
+    assert root.TravelSessionState.model_config["strict"] is True
+    assert root.TravelSessionState.model_config["frozen"] is True
+    assert root.TravelSessionState.model_config["extra"] == "forbid"
+
+
+def test_state_codec_is_public_and_does_not_export_requirement_types() -> None:
+    assert root.serialize_travel_session_state is state.serialize_travel_session_state
+    assert root.parse_travel_session_state_json is state.parse_travel_session_state_json
+    assert "RequirementDomainState" not in root.__all__
+    assert "RequirementDomainOutcome" not in root.__all__
+    assert "RequirementDomainTransition" not in root.__all__
+    assert not hasattr(root, "RequirementDomainState")
+    assert not hasattr(root, "RequirementDomainOutcome")
+    assert not hasattr(root, "RequirementDomainTransition")
 
 
 def test_public_protocol_signatures_are_exact() -> None:
