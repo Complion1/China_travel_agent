@@ -10,6 +10,12 @@ from app.requirement_subgraph.errors import (
     RequirementSubgraphStateError,
 )
 from app.requirement_subgraph.coordinator import RequirementSubgraphCoordinator
+from app.requirement_subgraph.checkpoint import RequirementCheckpointSerializer
+from app.requirement_subgraph.graph import build_requirement_subgraph
+from app.requirement_subgraph.runtime import (
+    RequirementSubgraphRuntime,
+    create_demo_requirement_subgraph_runtime,
+)
 from app.requirement_subgraph.models import (
     DEMO_REQUIREMENT_SUBGRAPH_COORDINATOR_LIMITS,
     DEMO_REQUIREMENTS_CLARIFICATION_ROUND_LIMIT,
@@ -74,4 +80,8 @@ __all__ = [
     "RequirementSubgraphRunFaultedError",
     "RequirementSubgraphCapacityExceededError",
     "RequirementSubgraphCoordinator",
+    "RequirementCheckpointSerializer",
+    "RequirementSubgraphRuntime",
+    "build_requirement_subgraph",
+    "create_demo_requirement_subgraph_runtime",
 ]

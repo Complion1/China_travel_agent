@@ -15,6 +15,12 @@ from app.requirement_subgraph import (
     RequirementSubgraphRunFaultedError,
     RequirementSubgraphStateError,
 )
+from app.requirement_subgraph import (
+    RequirementCheckpointSerializer,
+    RequirementSubgraphRuntime,
+    build_requirement_subgraph,
+    create_demo_requirement_subgraph_runtime,
+)
 
 
 EXPECTED_T01_T02_EXPORTS = {
@@ -51,6 +57,10 @@ EXPECTED_T01_T02_EXPORTS = {
     "RequirementSubgraphRunFaultedError",
     "RequirementSubgraphCapacityExceededError",
     "RequirementSubgraphCoordinator",
+    "RequirementCheckpointSerializer",
+    "RequirementSubgraphRuntime",
+    "build_requirement_subgraph",
+    "create_demo_requirement_subgraph_runtime",
 }
 
 
@@ -59,9 +69,13 @@ def test_package_root_exports_only_implemented_final_symbols():
     assert set(package.__all__) == {
         name for name in package.__all__ if not name.startswith("_")
     }
-    assert not hasattr(package, "RequirementCheckpointSerializer")
-    assert not hasattr(package, "RequirementSubgraphRuntime")
-    assert not hasattr(package, "build_requirement_subgraph")
+    assert package.RequirementCheckpointSerializer is RequirementCheckpointSerializer
+    assert package.RequirementSubgraphRuntime is RequirementSubgraphRuntime
+    assert package.build_requirement_subgraph is build_requirement_subgraph
+    assert (
+        package.create_demo_requirement_subgraph_runtime
+        is create_demo_requirement_subgraph_runtime
+    )
 
 
 def test_public_dto_and_exception_symbols_are_real_objects():
@@ -69,6 +83,34 @@ def test_public_dto_and_exception_symbols_are_real_objects():
     error = RequirementSubgraphError()
     assert str(error) == "RequirementSubgraphError"
     assert error.args == ()
+
+
+def test_t03_t04_public_controls_have_frozen_signatures_and_no_checkpoint_identity():
+    assert tuple(inspect.signature(build_requirement_subgraph).parameters) == (
+        "coordinator",
+        "checkpointer",
+    )
+    assert tuple(inspect.signature(RequirementSubgraphRuntime.start).parameters) == (
+        "self",
+        "state",
+        "turn",
+    )
+    assert tuple(inspect.signature(RequirementSubgraphRuntime.resume).parameters) == (
+        "self",
+        "run_id",
+        "envelope",
+    )
+    assert tuple(inspect.signature(RequirementSubgraphRuntime.get_state).parameters) == (
+        "self",
+        "run_id",
+    )
+    for method in (
+        RequirementSubgraphRuntime.start,
+        RequirementSubgraphRuntime.resume,
+        RequirementSubgraphRuntime.get_state,
+    ):
+        assert "checkpoint_id" not in inspect.signature(method).parameters
+        assert "checkpoint_ns" not in inspect.signature(method).parameters
 
 
 def test_exception_tree_is_zero_argument_and_exactly_inherited():

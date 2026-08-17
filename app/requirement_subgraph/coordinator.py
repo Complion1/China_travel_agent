@@ -6,7 +6,7 @@ import asyncio
 import hmac
 import json
 import secrets
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Callable, Literal, cast
@@ -143,7 +143,7 @@ class _OperationScope(AbstractAsyncContextManager[object]):
         coordinator: "RequirementSubgraphCoordinator",
         *,
         kind: Literal["start", "resume"],
-        state: TravelSessionState,
+        state: TravelSessionState | None = None,
         turn: RequirementTurnInput | None = None,
         envelope: RequirementResumeEnvelope | None = None,
     ) -> None:
@@ -163,10 +163,12 @@ class _OperationScope(AbstractAsyncContextManager[object]):
                 value = await self._coordinator._enter_start(
                     self, self._state, self._turn
                 )
-            else:
+            elif self._kind == "resume":
                 value = await self._coordinator._enter_resume(
                     self, self._state, self._envelope
                 )
+            else:
+                raise RequirementSubgraphStateError() from None
             self._entered = True
             return value
         finally:
@@ -302,6 +304,22 @@ class RequirementSubgraphCoordinator:
             self._fault(record)
             raise RequirementSubgraphStateError() from None
 
+    @asynccontextmanager
+    async def _runtime_read_scope(self, run_id: UUID):
+        self._ensure_loop()
+        if type(run_id) is not UUID:
+            raise RequirementSubgraphInputError() from None
+        record = self._records.get(run_id)
+        if record is None:
+            raise RequirementSubgraphInputError() from None
+        await record.operation_lock.acquire()
+        try:
+            if record.status == "faulted":
+                raise RequirementSubgraphRunFaultedError() from None
+            yield record
+        finally:
+            record.operation_lock.release()
+
     async def _enter_start(
         self,
         scope: _OperationScope,
@@ -380,14 +398,29 @@ class RequirementSubgraphCoordinator:
         await record.operation_lock.acquire()
         scope._lock_acquired = True
         scope._record = record
+        try:
+            return await self._commit_resume(scope, fresh_state, fresh_envelope)
+        except Exception:
+            await self._release_lease(scope, record)
+            raise
+
+    async def _commit_resume(
+        self,
+        scope: _OperationScope,
+        state: TravelSessionState,
+        envelope: RequirementResumeEnvelope,
+    ) -> Command:
+        record = scope._record
+        if record is None:
+            raise RequirementSubgraphStateError() from None
         wrote_resume = False
         try:
             if record.status == "faulted":
                 raise RequirementSubgraphRunFaultedError() from None
             if record.status != "paused":
                 raise RequirementSubgraphResumeRejectedError() from None
-            self._validate_resume(record, fresh_state, fresh_envelope)
-            record.action_slot = fresh_envelope
+            self._validate_resume(record, state, envelope)
+            record.action_slot = envelope
             record.status = "resume_pending"
             wrote_resume = True
             await self._activate_lease(scope, record)
@@ -398,13 +431,10 @@ class RequirementSubgraphCoordinator:
         except Exception:
             if scope._lease_token is not None:
                 self._fault(record)
-                await self._release_lease(scope, record)
-            else:
-                if wrote_resume:
-                    record.action_slot = None
-                    if record.status == "resume_pending":
-                        record.status = "paused"
-                await self._release_lease(scope, record)
+            elif wrote_resume:
+                record.action_slot = None
+                if record.status == "resume_pending":
+                    record.status = "paused"
             raise
 
     async def _acquire_lease(self, scope: _OperationScope, record: _RunRecord) -> None:
@@ -441,7 +471,10 @@ class RequirementSubgraphCoordinator:
         exception: BaseException | None,
     ) -> bool | None:
         record = scope._record
-        if record is None or scope._lease_token is None:
+        if record is None:
+            return None
+        if scope._lease_token is None:
+            await self._release_lease(scope, record)
             return None
         protocol_error: BaseException | None = None
         if exc_type is None and not record.lease_resolved:

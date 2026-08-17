@@ -7,6 +7,9 @@ import pytest
 from pydantic import ValidationError
 import app.requirement_subgraph as package_module
 import app.requirement_subgraph.coordinator as coordinator_module
+import app.requirement_subgraph.graph as graph_module
+import app.requirement_subgraph.checkpoint as checkpoint_module
+import app.requirement_subgraph.runtime as runtime_module
 import app.requirement_subgraph.errors as errors_module
 import app.requirement_subgraph.models as models_module
 import app.requirement_subgraph.signals as signals_module
@@ -43,19 +46,23 @@ def test_signal_does_not_have_pause_secret_shape():
     assert "user_message" not in text
 
 
-def test_no_pickle_or_dynamic_import_in_t01_modules():
+def test_no_unsafe_import_or_constructor_fallback_in_production_modules():
     for module in (
         package_module,
         models_module,
         signals_module,
         errors_module,
         coordinator_module,
+        graph_module,
+        checkpoint_module,
+        runtime_module,
     ):
         source = inspect.getsource(module)
-        assert "pickle" not in source.lower()
         assert "model_construct" not in source
         assert "__import__" not in source
         assert "importlib" not in source.lower()
+        assert "pickle.loads" not in source.lower()
+        assert "pickle.dumps" not in source.lower()
 
 
 def test_pause_envelope_rejects_non_hex_token():

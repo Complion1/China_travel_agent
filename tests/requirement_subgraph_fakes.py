@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Sequence
 from datetime import date
@@ -12,12 +13,18 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, TypeAdapter
 
 from app.requirements import (
+    ConfirmedTravelRequirement,
     EvidenceReceipt,
+    NeedClarification,
+    NeedConfirmation,
     RequirementConfirmation,
     RequirementDomainService,
     RequirementDomainState,
     RequirementDomainTransition,
+    RequirementErrorCode,
+    RequirementExtractionFailed,
     RequirementIntent,
+    RequirementInvalidated,
     RequirementTurnInput,
     VerifiedFieldEvidence,
 )
@@ -265,6 +272,108 @@ def make_confirmation_interrupt(
     )
 
 
+def _transition_state(
+    state: TravelSessionState,
+    *,
+    confirmation_status: str,
+) -> RequirementDomainState:
+    return RequirementDomainState(
+        schema_version=state.requirement_state.schema_version,
+        requirement=state.requirement_state.requirement,
+        metadata=state.requirement_state.metadata,
+        issues=state.requirement_state.issues,
+        confirmation_status=confirmation_status,
+    )
+
+
+def make_need_clarification_transition(
+    state: TravelSessionState,
+    *,
+    message: str = "请补充",
+) -> RequirementDomainTransition:
+    domain_state = _transition_state(state, confirmation_status="collecting")
+    return RequirementDomainTransition(
+        state=domain_state,
+        outcome=NeedClarification(
+            requirement=domain_state.requirement,
+            metadata=domain_state.metadata,
+            issues=domain_state.issues,
+            message=message,
+        ),
+    )
+
+
+def make_need_confirmation_transition(
+    state: TravelSessionState,
+    *,
+    summary: str = "请确认",
+) -> RequirementDomainTransition:
+    domain_state = _transition_state(
+        state,
+        confirmation_status="awaiting_confirmation",
+    )
+    return RequirementDomainTransition(
+        state=domain_state,
+        outcome=NeedConfirmation(
+            requirement=domain_state.requirement,
+            metadata=domain_state.metadata,
+            summary=summary,
+        ),
+    )
+
+
+def make_confirmed_transition(
+    state: TravelSessionState,
+    *,
+    digest: str = "confirmed-digest",
+) -> RequirementDomainTransition:
+    domain_state = _transition_state(state, confirmation_status="confirmed")
+    return RequirementDomainTransition(
+        state=domain_state,
+        outcome=ConfirmedTravelRequirement(
+            schema_version="1.0",
+            requirement=domain_state.requirement,
+            metadata_without_raw_evidence=domain_state.metadata,
+            confirmation_summary_digest=digest,
+        ),
+    )
+
+
+def make_extraction_failed_transition(
+    state: TravelSessionState,
+    *,
+    code: RequirementErrorCode = RequirementErrorCode.INPUT_TOO_LONG,
+) -> RequirementDomainTransition:
+    return RequirementDomainTransition(
+        state=_transition_state(state, confirmation_status="collecting"),
+        outcome=RequirementExtractionFailed(code=code),
+    )
+
+
+def make_invalidated_transition(
+    state: TravelSessionState,
+    *,
+    summary: str = "已失效",
+) -> RequirementDomainTransition:
+    domain_state = _transition_state(
+        state,
+        confirmation_status="awaiting_confirmation",
+    )
+    after_digest = hashlib.sha256(
+        domain_state.requirement.model_dump_json(exclude_none=False).encode("utf-8")
+    ).hexdigest()
+    return RequirementDomainTransition(
+        state=domain_state,
+        outcome=RequirementInvalidated(
+            changed_fields=(),
+            before_digest="a" * 64,
+            after_digest=after_digest,
+            reason="需求发生变化",
+            summary=summary,
+        ),
+    )
+
+
 __all__ = [
     "AsyncBarrierProbe",
     "PerRunBudgetManagerFactory",
@@ -275,6 +384,11 @@ __all__ = [
     "fresh",
     "make_clarification_interrupt",
     "make_confirmation_interrupt",
+    "make_need_clarification_transition",
+    "make_need_confirmation_transition",
+    "make_confirmed_transition",
+    "make_extraction_failed_transition",
+    "make_invalidated_transition",
     "make_initial_state",
     "make_turn",
 ]
