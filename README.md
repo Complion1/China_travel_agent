@@ -26,7 +26,7 @@ CLI Demo
 
 - [`docs/00_agent_master_design.md`](./docs/00_agent_master_design.md)：产品边界、跨模块架构和全局不变量。
 - [`docs/IMPLEMENTATION_ROADMAP.md`](./docs/IMPLEMENTATION_ROADMAP.md)：组件职责、依赖、工作包和 Gate 的唯一索引。
-- [`docs/IMPLEMENTATION_STATUS.md`](./docs/IMPLEMENTATION_STATUS.md)：当前 HEAD、Prompt hash 和验证结果快照。
+- [`docs/IMPLEMENTATION_STATUS.md`](./docs/IMPLEMENTATION_STATUS.md)：当前实现、提交基线和验证结果快照。
 - [`docs/SHARED_IMPLEMENTATION_RULES.md`](./docs/SHARED_IMPLEMENTATION_RULES.md)：所有模块执行契约共享的工作区、测试、安全和报告规则。
 - [`docs/01_requirement_and_dialogue.md`](./docs/01_requirement_and_dialogue.md)：模块 01 纯需求领域合同。
 - [`docs/01_requirement_and_dialogue_vibe_coding.md`](./docs/01_requirement_and_dialogue_vibe_coding.md)：模块 01 精确执行契约。
@@ -36,6 +36,8 @@ CLI Demo
 - [`docs/03_requirement_extraction_adapter_vibe_coding.md`](./docs/03_requirement_extraction_adapter_vibe_coding.md)：模块 03 精确执行契约。
 - [`docs/04_workflow_state_and_artifacts.md`](./docs/04_workflow_state_and_artifacts.md)：模块 04 工作流状态、Artifact Repository、预算与安全事件合同。
 - [`docs/04_workflow_state_and_artifacts_vibe_coding.md`](./docs/04_workflow_state_and_artifacts_vibe_coding.md)：模块 04 精确执行契约与 RSC-T00–RSC-T06 验收路由。
+- [`docs/05_requirement_subgraph.md`](./docs/05_requirement_subgraph.md)：模块 05 需求子图、interrupt/resume、checkpoint、预算重放与运行时合同。
+- [`docs/05_requirement_subgraph_vibe_coding.md`](./docs/05_requirement_subgraph_vibe_coding.md)：模块 05 精确执行契约与 T00–T05、MODULE-CLOSEOUT 验收路由。
 
 权威层级和冲突处理以主设计第 1 节为准。后续模块必须按路线图中的 `depends_on` 和模块 acceptance gate 开工。`_vibe_coding.md` 专门面向能力较弱的编码模型，必须保留精确文件白名单、符号、算法、阶段 Gate、测试矩阵、停止条件和报告模板，不能压缩成需要模型自行推导的摘要。
 
