@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -19,6 +20,7 @@ from app.requirement_subgraph import (
     RequirementSubgraphResumeRejectedError,
     build_requirement_subgraph,
 )
+from app.requirement_subgraph.errors import RequirementSubgraphStateError
 import app.requirement_subgraph.graph as graph_module
 from app.requirement_subgraph.coordinator import _REQUIREMENT_RESUME_SENTINEL
 from app.requirement_subgraph.graph import _destination_for_outcome
@@ -42,7 +44,9 @@ from app.workflow_contracts import (
     DEMO_EXECUTION_BUDGET_MANAGER_LIMITS,
     ExecutionBudgetLimit,
     ExecutionBudgetPlan,
+    ExecutionBudgetSnapshot,
     InMemoryExecutionBudgetManager,
+    OperationId,
     WorkflowPhase,
 )
 from tests.requirement_subgraph_fakes import (
@@ -481,3 +485,302 @@ async def test_real_module01_extraction_failure_routes_to_domain_failed():
     )
     assert result.result_type == "domain_failed"
     assert result.state.requirement_outcome.code is RequirementErrorCode.EVIDENCE_MISSING
+
+
+def test_graph_binding_and_transition_defensive_contracts():
+    state = make_initial_state()
+    service = ScriptedRequirementDomainService()
+    coordinator = RequirementSubgraphCoordinator(
+        domain_service=service,
+        execution_budget_manager_factory=PerRunBudgetManagerFactory(lambda _run_id: object()),
+        signal_sink=RecordingRequirementSubgraphSignalSink(),
+        limits=RequirementSubgraphCoordinatorLimits(max_runs=1),
+    )
+    graph = build_requirement_subgraph(
+        coordinator=coordinator,
+        checkpointer=InMemorySaver(serde=RequirementCheckpointSerializer()),
+    )
+    class RuntimeMarker:
+        pass
+
+    marker = RuntimeMarker()
+    assert graph_module._binding_for(marker) is None
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._claim_runtime(RuntimeMarker(), marker)  # type: ignore[arg-type]
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._claim_runtime(graph, object())
+    assert caught.value.args == ()
+
+    graph_module._claim_runtime(graph, marker)
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._claim_runtime(graph, RuntimeMarker())
+    assert caught.value.args == ()
+
+    transition = make_need_clarification_transition(state)
+    assert graph_module._fresh_transition(transition) == transition
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._fresh_transition(object())
+    assert caught.value.args == ()
+
+
+def test_graph_private_state_construction_maps_invalid_outcomes_and_fresh_failures(monkeypatch):
+    state = make_initial_state()
+    transition = make_need_clarification_transition(state)
+    next_state = graph_module._state_after_transition(state, transition)
+    assert next_state.delivery_status.value == "awaiting_user"
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._destination_for_outcome(object())  # type: ignore[arg-type]
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._state_after_transition(
+            state,
+            SimpleNamespace(outcome=object(), state=state.requirement_state),  # type: ignore[arg-type]
+        )
+    assert caught.value.args == ()
+
+    def fail_fresh(_model_type, _value):
+        raise ValueError("invalid fresh state")
+
+    monkeypatch.setattr(graph_module, "_fresh_model", fail_fresh)
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._state_after_transition(state, transition)
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._budget_rejected_state(state)
+    assert caught.value.args == ()
+
+
+def test_graph_pause_and_result_helpers_fail_closed_on_invalid_shapes(monkeypatch):
+    state = make_initial_state()
+    waiting = graph_module._state_after_transition(
+        state,
+        make_need_clarification_transition(state),
+    )
+    interrupt_dto = graph_module._interrupt_for_state(waiting)
+    assert graph_module._pause_payload(interrupt_dto)["interrupt_type"] == "clarification"
+
+    class WrongTree:
+        def model_dump(self, **_kwargs):
+            return []
+
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._pause_payload(WrongTree())  # type: ignore[arg-type]
+    assert caught.value.args == ()
+
+    class BrokenTree:
+        def model_dump(self, **_kwargs):
+            raise ValueError("broken")
+
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._pause_payload(BrokenTree())  # type: ignore[arg-type]
+    assert caught.value.args == ()
+
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._interrupt_for_state(state)
+    assert caught.value.args == ()
+
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._terminal_result_command(object(), waiting)  # type: ignore[arg-type]
+    assert caught.value.args == ()
+
+    monkeypatch.setattr(graph_module, "_fresh_model", lambda *_args: (_ for _ in ()).throw(ValueError()))
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        graph_module._fresh_transition(make_need_clarification_transition(state))
+    assert caught.value.args == ()
+
+
+@pytest.mark.asyncio
+async def test_graph_replay_and_wait_nodes_reject_protocol_distortions(monkeypatch):
+    state = make_initial_state()
+    waiting = graph_module._state_after_transition(
+        state,
+        make_need_clarification_transition(state),
+    )
+    interrupt_dto = graph_module._interrupt_for_state(waiting)
+
+    class ReplayStub:
+        def _ensure_current_pause(self, *, state, interrupt):
+            return "a" * 32, "b" * 32, interrupt
+
+        def _take_resume(self):
+            return None
+
+        def _take_pause_for_replay(self):
+            return "b" * 32, interrupt_dto
+
+        def _node_replayed_operation(self):
+            return None
+
+    stub = ReplayStub()
+    monkeypatch.setattr(graph_module, "interrupt", lambda _value: "wrong")
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        await graph_module._replay_pause(waiting, coordinator=stub)  # type: ignore[arg-type]
+    assert caught.value.args == ()
+
+    monkeypatch.setattr(graph_module, "interrupt", lambda _value: _REQUIREMENT_RESUME_SENTINEL)
+    stub._take_pause_for_replay = lambda: ("c" * 32, interrupt_dto)
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        await graph_module._replay_pause(waiting, coordinator=stub)  # type: ignore[arg-type]
+    assert caught.value.args == ()
+
+    class WaitStub:
+        async def _consume_budget(self, _request):
+            raise AssertionError("budget must not be called")
+
+    async def no_resume(_state, *, coordinator):
+        return "b" * 32, interrupt_dto, None
+
+    monkeypatch.setattr(graph_module, "_replay_pause", no_resume)
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        await graph_module._await_clarification(waiting, coordinator=WaitStub())  # type: ignore[arg-type]
+    assert caught.value.args == ()
+
+    async def wrong_resume(_state, *, coordinator):
+        return (
+            "b" * 32,
+            interrupt_dto,
+            RequirementResumeEnvelope.model_construct(
+                resume=RequirementConfirmationResume.model_construct()
+            ),
+        )
+
+    monkeypatch.setattr(graph_module, "_replay_pause", wrong_resume)
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        await graph_module._await_clarification(waiting, coordinator=WaitStub())  # type: ignore[arg-type]
+    assert caught.value.args == ()
+
+
+def test_graph_builder_requires_exact_coordinator():
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        build_requirement_subgraph(coordinator=object(), checkpointer=None)  # type: ignore[arg-type]
+    assert caught.value.args == ()
+
+
+@pytest.mark.asyncio
+async def test_graph_wait_nodes_reject_wrong_resume_and_budget_outcome_shapes():
+    initial = make_initial_state()
+    clarification_state = graph_module._state_after_transition(
+        initial,
+        make_need_clarification_transition(initial),
+    )
+    confirmation_state = graph_module._state_after_transition(
+        initial,
+        make_need_confirmation_transition(initial),
+    )
+    clarification_interrupt = graph_module._interrupt_for_state(clarification_state)
+    confirmation_interrupt = graph_module._interrupt_for_state(confirmation_state)
+
+    async def no_resume(_state, *, coordinator):
+        return "b" * 32, confirmation_interrupt, None
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(graph_module, "_replay_pause", no_resume)
+
+        class Stub:
+            async def _consume_budget(self, _request):
+                return graph_module.WorkflowBudgetConsumed.model_construct(disposition="wrong")
+
+            def _set_latest_state(self, _state):
+                return None
+
+            def _set_local_result(self, _result):
+                return None
+
+        async def bad_clarification_resume(_state, *, coordinator):
+            return (
+                "b" * 32,
+                clarification_interrupt,
+                RequirementResumeEnvelope(
+                    pause_token="a" * 32,
+                    resume=RequirementClarificationResume(turn=make_turn(clarification_state)),
+                ),
+            )
+
+        monkeypatch.setattr(graph_module, "_replay_pause", bad_clarification_resume)
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            await graph_module._await_clarification(clarification_state, coordinator=Stub())  # type: ignore[arg-type]
+        assert caught.value.args == ()
+
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            await graph_module._await_confirmation(confirmation_state, coordinator=Stub())  # type: ignore[arg-type]
+        assert caught.value.args == ()
+
+        async def clarification_resume(_state, *, coordinator):
+            return (
+                "b" * 32,
+                confirmation_interrupt,
+                RequirementResumeEnvelope(
+                    pause_token="a" * 32,
+                    resume=RequirementClarificationResume(turn=make_turn(confirmation_state)),
+                ),
+            )
+
+        monkeypatch.setattr(graph_module, "_replay_pause", clarification_resume)
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            await graph_module._await_confirmation(confirmation_state, coordinator=Stub())  # type: ignore[arg-type]
+        assert caught.value.args == ()
+
+        async def invalid_action(_state, *, coordinator):
+            return (
+                "b" * 32,
+                confirmation_interrupt,
+                RequirementResumeEnvelope.model_construct(
+                    resume=RequirementConfirmationResume.model_construct(action=object())
+                ),
+            )
+
+        monkeypatch.setattr(graph_module, "_replay_pause", invalid_action)
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            await graph_module._await_confirmation(confirmation_state, coordinator=Stub())  # type: ignore[arg-type]
+        assert caught.value.args == ()
+
+        async def revise_with_bad_budget(_state, *, coordinator):
+            return (
+                "b" * 32,
+                confirmation_interrupt,
+                RequirementResumeEnvelope(
+                    pause_token="a" * 32,
+                    resume=RequirementConfirmationResume(
+                        action=RequirementConfirmation(decision="revise", revision_text="改"),
+                    ),
+                ),
+            )
+
+        monkeypatch.setattr(graph_module, "_replay_pause", revise_with_bad_budget)
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            await graph_module._await_confirmation(confirmation_state, coordinator=Stub())  # type: ignore[arg-type]
+        assert caught.value.args == ()
+
+        operation = OperationId(
+            run_id=confirmation_state.run_id,
+            phase=WorkflowPhase.REQUIREMENTS,
+            logical_step="clarification_round_" + "b" * 32,
+        )
+        rejected = graph_module.WorkflowBudgetExceeded(
+            disposition="rejected",
+            operation_id=operation,
+            key=graph_module.REQUIREMENTS_CLARIFICATION_ROUND_KEY,
+            amount=1,
+            snapshot=ExecutionBudgetSnapshot(
+                schema_version="1.0",
+                run_id=confirmation_state.run_id,
+                key=graph_module.REQUIREMENTS_CLARIFICATION_ROUND_KEY,
+                limit=0,
+                consumed=0,
+                remaining=0,
+            ),
+        )
+
+        class RejectedStub(Stub):
+            async def _consume_budget(self, _request):
+                return rejected
+
+        result = await graph_module._await_confirmation(
+            confirmation_state,
+            coordinator=RejectedStub(),  # type: ignore[arg-type]
+        )
+        assert result.goto == END
+    finally:
+        monkeypatch.undo()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -1352,3 +1353,383 @@ def test_coordinator_binds_first_event_loop_and_rejects_second_loop():
                 pass
 
     asyncio.run(second())
+
+
+def _install_manual_lease(coordinator, state, *, manager=None):
+    record = coordinator_module._RunRecord(
+        run_id=state.run_id,
+        trace_id=state.trace_id,
+        manager=manager or ScriptedExecutionBudgetManager(),
+        loop=asyncio.get_running_loop(),
+        latest_state=state,
+    )
+    lease = coordinator_module._Lease(state.run_id, 1)
+    record.active_lease = lease
+    coordinator._records[state.run_id] = record
+    token = coordinator_module._CURRENT_LEASE.set(lease)
+    return record, token
+
+
+def test_coordinator_constructor_and_fresh_helpers_reject_invalid_contracts(monkeypatch):
+    service = ScriptedRequirementDomainService()
+    factory = PerRunBudgetManagerFactory(lambda _run_id: ScriptedExecutionBudgetManager())
+    sink = RecordingRequirementSubgraphSignalSink()
+    limits = RequirementSubgraphCoordinatorLimits(max_runs=1)
+    with pytest.raises(RequirementSubgraphConfigurationError) as caught:
+        RequirementSubgraphCoordinator(
+            domain_service=object(),
+            execution_budget_manager_factory=factory,
+            signal_sink=sink,
+            limits=limits,
+        )
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphConfigurationError) as caught:
+        RequirementSubgraphCoordinator(
+            domain_service=service,
+            execution_budget_manager_factory=object(),  # type: ignore[arg-type]
+            signal_sink=sink,
+            limits=limits,
+        )
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphConfigurationError) as caught:
+        RequirementSubgraphCoordinator(
+            domain_service=service,
+            execution_budget_manager_factory=factory,
+            signal_sink=object(),  # type: ignore[arg-type]
+            limits=limits,
+        )
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphConfigurationError) as caught:
+        RequirementSubgraphCoordinator(
+            domain_service=service,
+            execution_budget_manager_factory=factory,
+            signal_sink=sink,
+            limits=object(),  # type: ignore[arg-type]
+        )
+    assert caught.value.args == ()
+
+    state = make_initial_state()
+    coordinator_for_validation, _, _ = _coordinator()
+    with pytest.raises(RequirementSubgraphInputError) as caught:
+        coordinator_for_validation._validate_initial_state(
+            state,
+            make_turn(state).model_copy(
+                update={
+                    "current": RequirementDomainState(
+                        confirmation_status="awaiting_confirmation"
+                    )
+                }
+            ),
+        )
+    assert caught.value.args == ()
+    assert coordinator_module._fresh_exact(
+        type(state), state, RequirementSubgraphInputError
+    ) == state
+    with pytest.raises(RequirementSubgraphInputError) as caught:
+        coordinator_module._fresh_exact(type(state), {}, RequirementSubgraphInputError)
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphInputError) as caught:
+        coordinator_module._fresh_union(
+            NeedClarification | NeedConfirmation,
+            object(),
+            RequirementSubgraphInputError,
+        )
+    assert caught.value.args == ()
+    waiting = _waiting_state(state)
+    assert coordinator_module._fresh_union(
+        NeedClarification | NeedConfirmation,
+        waiting.requirement_outcome,
+        RequirementSubgraphInputError,
+    ) == waiting.requirement_outcome
+
+    def fail_fresh(_model_type, _value):
+        raise ValueError("fresh failure")
+
+    monkeypatch.setattr(coordinator_module, "_fresh_model", fail_fresh)
+    with pytest.raises(RequirementSubgraphInputError) as caught:
+        coordinator_module._fresh_exact(type(state), state, RequirementSubgraphInputError)
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphInputError) as caught:
+        coordinator_module._fresh_union(
+            NeedClarification | NeedConfirmation,
+            waiting.requirement_outcome,
+            RequirementSubgraphInputError,
+        )
+    assert caught.value.args == ()
+
+
+def test_coordinator_requires_running_loop_for_ensure_loop():
+    coordinator, _, _ = _coordinator()
+    with pytest.raises(RequirementSubgraphConfigurationError) as caught:
+        coordinator._ensure_loop()
+    assert caught.value.args == ()
+
+
+@pytest.mark.asyncio
+async def test_operation_scope_invalid_kind_clears_complete_input_slots():
+    coordinator, _, _ = _coordinator()
+    scope = coordinator_module._OperationScope(coordinator, kind="invalid")  # type: ignore[arg-type]
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        await scope.__aenter__()
+    assert caught.value.args == ()
+    assert scope._state is None
+    assert scope._turn is None
+    assert scope._envelope is None
+
+
+@pytest.mark.asyncio
+async def test_coordinator_internal_protocol_guards_cover_zero_side_effect_failures():
+    initial = make_initial_state()
+    coordinator, sink, factory = _coordinator()
+    waiting = _waiting_state(initial)
+    interrupt = coordinator_module.RequirementClarificationInterrupt(message="请补充")
+
+    record, token = _install_manual_lease(coordinator, initial)
+    try:
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            await coordinator._commit_resume(
+                coordinator_module._OperationScope(coordinator, kind="resume"),
+                initial,
+                _resume_envelope(waiting, "a" * 32),
+            )
+        assert caught.value.args == ()
+    finally:
+        coordinator_module._CURRENT_LEASE.reset(token)
+        coordinator._records.pop(initial.run_id, None)
+
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        coordinator._record_for_state(object(), error_type=RequirementSubgraphStateError)
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        coordinator._record_for_state(initial, error_type=RequirementSubgraphStateError)
+    assert caught.value.args == ()
+
+    record, token = _install_manual_lease(coordinator, initial)
+    try:
+        assert coordinator._current_record() is record
+        saved_lease = record.active_lease
+        record.active_lease = None
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._require_lease(record)
+        assert caught.value.args == ()
+        record.status = "running"
+        record.active_lease = saved_lease
+        record.lease_resolved = True
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._mark_resolved(record)
+        assert caught.value.args == ()
+        record.status = "running"
+        record.lease_resolved = False
+        record.active_lease = saved_lease
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._parse_interrupt(object())
+        assert caught.value.args == ()
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._parse_interrupt({"interrupt_type": "unknown"})
+        assert caught.value.args == ()
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._copy_result(object())
+        assert caught.value.args == ()
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._emit(object())  # type: ignore[arg-type]
+        assert caught.value.args == ()
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._take_turn()
+        assert caught.value.args == ()
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._take_resume()
+        assert caught.value.args == ()
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._take_pause_for_replay()
+        assert caught.value.args == ()
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._node_replayed_operation()
+        assert caught.value.args == ()
+    finally:
+        coordinator._fault(record)
+        record.active_lease = None
+        coordinator_module._CURRENT_LEASE.reset(token)
+        coordinator._records.pop(initial.run_id, None)
+
+    record, token = _install_manual_lease(coordinator, initial)
+    try:
+        wrong_key = ExecutionBudgetKey(
+            scope=ExecutionBudgetScope.PHASE,
+            name="other.budget",
+            phase=WorkflowPhase.REQUIREMENTS,
+        )
+        request = BudgetConsumeRequest(
+            operation_id=OperationId(
+                run_id=initial.run_id,
+                phase=WorkflowPhase.REQUIREMENTS,
+                logical_step="clarification_round_" + "a" * 32,
+            ),
+            key=wrong_key,
+            amount=1,
+        )
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            await coordinator._consume_budget(request)
+        assert caught.value.args == ()
+    finally:
+        record.active_lease = None
+        coordinator_module._CURRENT_LEASE.reset(token)
+        coordinator._records.pop(initial.run_id, None)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_rejects_invalid_budget_result_before_signal():
+    initial = make_initial_state()
+    manager = ScriptedExecutionBudgetManager(outcomes=[object()])
+    factory = PerRunBudgetManagerFactory(lambda _run_id: manager)
+    coordinator, sink, _ = _coordinator(factory=factory)
+    request = BudgetConsumeRequest(
+        operation_id=OperationId(
+            run_id=initial.run_id,
+            phase=WorkflowPhase.REQUIREMENTS,
+            logical_step="clarification_round_" + "a" * 32,
+        ),
+        key=REQUIREMENTS_CLARIFICATION_ROUND_KEY,
+        amount=1,
+    )
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        async with coordinator.start_operation(state=initial, turn=make_turn(initial)):
+            await coordinator._consume_budget(request)
+    assert caught.value.args == ()
+    assert len(sink.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_coordinator_validates_pause_resume_and_secret_defensive_paths(monkeypatch):
+    initial = make_initial_state()
+    coordinator, _, _ = _coordinator()
+    interrupt = coordinator_module.RequirementClarificationInterrupt(message="请补充")
+    waiting, _ = await _start_and_pause(coordinator, initial)
+    record = coordinator._records[initial.run_id]
+
+    wrong_turn = make_turn(waiting).model_copy(
+        update={"current": RequirementDomainState(confirmation_status="awaiting_confirmation")}
+    )
+    wrong_envelope = RequirementResumeEnvelope(
+        pause_token=record.pause_token,
+        resume=RequirementClarificationResume(turn=wrong_turn),
+    )
+    with pytest.raises(RequirementSubgraphResumeRejectedError) as caught:
+        coordinator._validate_resume(record, waiting, wrong_envelope)
+    assert caught.value.args == ()
+
+    confirmed = _confirmed_state(initial)
+    record.latest_state = confirmed
+    with pytest.raises(RequirementSubgraphResumeRejectedError) as caught:
+        coordinator._validate_resume(record, confirmed, wrong_envelope)
+    assert caught.value.args == ()
+
+    coordinator._fault(record)
+    with pytest.raises(RequirementSubgraphRunFaultedError) as caught:
+        coordinator._record_for_state(initial, error_type=RequirementSubgraphStateError)
+    assert caught.value.args == ()
+
+    coordinator, _, _ = _coordinator()
+    record, token = _install_manual_lease(coordinator, initial)
+    try:
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._ensure_current_pause(state=waiting, interrupt=interrupt)
+        assert caught.value.args == ()
+    finally:
+        coordinator._fault(record)
+        record.active_lease = None
+        coordinator_module._CURRENT_LEASE.reset(token)
+
+    coordinator, _, _ = _coordinator()
+    record, token = _install_manual_lease(coordinator, initial)
+    try:
+        record.status = "resume_pending"
+        record.pause_token = "a" * 32
+        record.operation_nonce = "b" * 32
+        record.interrupt_descriptor = interrupt
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._ensure_current_pause(
+                state=initial,
+                interrupt=coordinator_module.RequirementClarificationInterrupt(message="wrong"),
+            )
+        assert caught.value.args == ()
+    finally:
+        record.active_lease = None
+        coordinator_module._CURRENT_LEASE.reset(token)
+
+    coordinator, _, _ = _coordinator()
+    record, token = _install_manual_lease(coordinator, initial)
+    try:
+        record.status = "paused"
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._ensure_current_pause(state=initial, interrupt=interrupt)
+        assert caught.value.args == ()
+    finally:
+        record.active_lease = None
+        coordinator_module._CURRENT_LEASE.reset(token)
+
+    coordinator, _, _ = _coordinator()
+    record, token = _install_manual_lease(coordinator, initial)
+    try:
+        monkeypatch.setattr(
+            coordinator_module,
+            "_new_secret_hex",
+            SequenceSecretHex(["a" * 32, "a" * 32, "b" * 32]),
+        )
+        token_value, nonce, _ = coordinator._ensure_current_pause(
+            state=initial,
+            interrupt=interrupt,
+        )
+        assert token_value != nonce
+    finally:
+        record.active_lease = None
+        coordinator_module._CURRENT_LEASE.reset(token)
+
+    coordinator, _, _ = _coordinator()
+    record, token = _install_manual_lease(coordinator, initial)
+    try:
+        monkeypatch.setattr(
+            coordinator_module,
+            "_new_secret_hex",
+            SequenceSecretHex(["g" * 32, "h" * 32]),
+        )
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._ensure_current_pause(state=initial, interrupt=interrupt)
+        assert caught.value.args == ()
+    finally:
+        record.active_lease = None
+        coordinator_module._CURRENT_LEASE.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_scope_cleanup_and_local_result_mismatch_fault():
+    initial = make_initial_state()
+    coordinator, _, _ = _coordinator()
+    scope = coordinator_module._OperationScope(coordinator, kind="start")
+    assert await coordinator._exit_scope(scope, exc_type=None, exception=None) is None
+
+    waiting = _waiting_state(initial)
+    record, token = _install_manual_lease(coordinator, initial)
+    try:
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._set_local_result(
+                RequirementSubgraphConfirmed(state=_confirmed_state(initial))
+            )
+        assert caught.value.args == ()
+    finally:
+        record.active_lease = None
+        coordinator_module._CURRENT_LEASE.reset(token)
+
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        coordinator._current_record()
+    assert caught.value.args == ()
+
+    missing = make_initial_state()
+    token = coordinator_module._CURRENT_LEASE.set(
+        coordinator_module._Lease(missing.run_id, 1)
+    )
+    try:
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            coordinator._current_record()
+        assert caught.value.args == ()
+    finally:
+        coordinator_module._CURRENT_LEASE.reset(token)

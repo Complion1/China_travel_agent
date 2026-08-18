@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command, Interrupt
 
 from app.requirement_subgraph import (
     RequirementCheckpointSerializer,
@@ -24,6 +25,7 @@ from app.requirement_subgraph import (
     create_demo_requirement_subgraph_runtime,
 )
 from app.requirement_subgraph.errors import RequirementSubgraphStateError
+import app.requirement_subgraph.runtime as runtime_module
 from app.requirements import RequirementDomainService
 from tests.requirement_subgraph_fakes import (
     PerRunBudgetManagerFactory,
@@ -422,3 +424,77 @@ async def test_start_rejects_non_exact_public_dto_before_graph_side_effects():
     with pytest.raises(RequirementSubgraphInputError):
         await runtime.start(state=state.model_dump(), turn=make_turn(state))  # type: ignore[arg-type]
     assert service.process_calls == []
+
+
+def test_runtime_private_state_and_snapshot_helpers_have_exact_error_mapping():
+    state = make_initial_state()
+    assert runtime_module._fresh_state(state) == state
+    assert runtime_module._fresh_state(state.model_dump(mode="python")) == state
+    for value in (object(), {"broken": True}):
+        with pytest.raises(RequirementSubgraphStateError) as caught:
+            runtime_module._fresh_state(value)
+        assert caught.value.args == ()
+
+    with pytest.raises(RequirementSubgraphInputError) as caught:
+        runtime_module._thread_config("not-a-uuid")  # type: ignore[arg-type]
+    assert caught.value.args == ()
+    assert runtime_module._thread_config(state.run_id)["configurable"]["thread_id"] == str(state.run_id)
+
+    assert runtime_module._interrupt_from_snapshot(SimpleNamespace(tasks=())) is None
+    assert runtime_module._interrupt_from_snapshot(SimpleNamespace(tasks=(SimpleNamespace(interrupts=()),))) is None
+    assert runtime_module._interrupt_from_snapshot(
+        SimpleNamespace(tasks=(SimpleNamespace(interrupts=(Interrupt(value={"ok": True}, id="a"),)),))
+    ) == {"ok": True}
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        runtime_module._interrupt_from_snapshot(
+            SimpleNamespace(tasks=(SimpleNamespace(interrupts=(object(),)),))
+        )
+    assert caught.value.args == ()
+
+
+@pytest.mark.asyncio
+async def test_runtime_snapshot_and_resume_command_guards_map_to_state_error(monkeypatch):
+    state = make_initial_state()
+    service = ScriptedRequirementDomainService(
+        process_results=[make_need_clarification_transition(state)]
+    )
+    runtime = create_demo_requirement_subgraph_runtime(domain_service=service)
+    original_aget_state = runtime._graph.aget_state
+
+    async def broken_aget_state(_config):
+        raise ValueError("checkpoint unavailable")
+
+    monkeypatch.setattr(runtime._graph, "aget_state", broken_aget_state)
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        await runtime._snapshot(state.run_id)
+    assert caught.value.args == ()
+    monkeypatch.setattr(runtime._graph, "aget_state", original_aget_state)
+
+    paused = await runtime.start(state=state, turn=make_turn(state))
+    envelope = RequirementResumeEnvelope(
+        pause_token=paused.pause.pause_token,
+        resume=RequirementClarificationResume(turn=make_turn(paused.state)),
+    )
+    with pytest.raises(RequirementSubgraphInputError) as caught:
+        await runtime.resume(run_id="not-a-uuid", envelope=envelope)  # type: ignore[arg-type]
+    assert caught.value.args == ()
+    with pytest.raises(RequirementSubgraphInputError) as caught:
+        await runtime.get_state(run_id="not-a-uuid")  # type: ignore[arg-type]
+    assert caught.value.args == ()
+    original_resume = runtime._coordinator.resume_operation
+
+    def wrong_command(*, state, envelope):
+        class Scope:
+            async def __aenter__(self):
+                return Command(resume="wrong")
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return None
+
+        return Scope()
+
+    monkeypatch.setattr(runtime._coordinator, "resume_operation", wrong_command)
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        await runtime.resume(run_id=state.run_id, envelope=envelope)
+    assert caught.value.args == ()
+    monkeypatch.setattr(runtime._coordinator, "resume_operation", original_resume)

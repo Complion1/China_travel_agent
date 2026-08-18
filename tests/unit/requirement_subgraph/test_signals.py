@@ -165,3 +165,15 @@ def test_noop_sink_returns_none_after_fresh_validation():
     assert sink.accept(StartAccepted(run_id=RUN_ID, trace_id=TRACE_ID)) is None
     with pytest.raises(RequirementSubgraphStateError):
         sink.accept({"signal_type": "start_accepted"})  # type: ignore[arg-type]
+
+
+def test_noop_sink_maps_invalid_typed_signal_to_zero_argument_state_error():
+    signal = StartAccepted.model_construct(
+        schema_version="1.0",
+        signal_type="start_accepted",
+        run_id="not-a-uuid",
+        trace_id="not-a-uuid",
+    )
+    with pytest.raises(RequirementSubgraphStateError) as caught:
+        NoOpRequirementSubgraphSignalSink().accept(signal)
+    assert caught.value.args == ()

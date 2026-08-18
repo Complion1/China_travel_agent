@@ -25,8 +25,10 @@ from app.workflow_contracts import (
     ExecutionBudgetScope,
     ExecutionBudgetSnapshot,
     OperationId,
+    TerminalOutcome,
     WorkflowPhase,
 )
+from app.workflow_contracts.state import TerminalCategory
 from app.requirement_subgraph import (
     DEMO_REQUIREMENT_SUBGRAPH_COORDINATOR_LIMITS,
     DEMO_REQUIREMENTS_CLARIFICATION_ROUND_LIMIT,
@@ -570,3 +572,52 @@ def test_invalidated_state_requires_digest_and_resume_branch_is_confirmation():
         ),
     )
     assert result.pause.interrupt.source_outcome_type == "invalidated"
+
+
+def test_paused_result_rejects_terminal_state_wrong_delivery_and_non_waiting_outcome():
+    clarification = _clarification_state()
+    pause = RequirementPauseEnvelope(
+        pause_token="c" * 32,
+        interrupt=RequirementClarificationInterrupt(message="请补充需求"),
+    )
+    with pytest.raises(ValidationError):
+        RequirementSubgraphPaused(
+            state=clarification.model_copy(
+                update={
+                    "delivery_status": DeliveryStatus.FAILED,
+                    "terminal_code": "input_invalid",
+                    "terminal_outcome": TerminalOutcome(
+                        schema_version="1.0",
+                        terminal_code="input_invalid",
+                        category=TerminalCategory.INPUT,
+                        recoverable=True,
+                        user_action_code="retry_input",
+                        trace_id=clarification.trace_id,
+                    ),
+                }
+            ),
+            pause=pause,
+        )
+    with pytest.raises(ValidationError):
+        RequirementSubgraphPaused(
+            state=clarification.model_copy(update={"delivery_status": DeliveryStatus.IN_PROGRESS}),
+            pause=pause,
+        )
+    with pytest.raises(ValidationError):
+        confirmed_domain_state = RequirementDomainState(confirmation_status="confirmed")
+        confirmed_outcome = ConfirmedTravelRequirement(
+            schema_version="1.0",
+            requirement=confirmed_domain_state.requirement,
+            metadata_without_raw_evidence=confirmed_domain_state.metadata,
+            confirmation_summary_digest="digest",
+        )
+        RequirementSubgraphPaused(
+            state=make_initial_state().model_copy(
+                update={
+                    "delivery_status": DeliveryStatus.AWAITING_USER,
+                    "requirement_state": confirmed_domain_state,
+                    "requirement_outcome": confirmed_outcome,
+                }
+            ),
+            pause=pause,
+        )

@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–04 已完成实现与验收，后续模块按冻结规范继续交付；旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–05 已完成当前实现与离线验收，后续模块按冻结规范继续交付；旧原型接口不构成兼容要求。
 
 ## 架构基线
 
@@ -41,9 +41,9 @@ CLI Demo
 
 ## 当前边界
 
-模块 01–04 已完成当前实现与 RSC-T00–RSC-T06 验收：RSC-T05 Docker 离线 unit/contract 回归为 `638 passed`；模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`。模块 02 正式 live 为 `1/1`，模块 03 正式 live 为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
+模块 01–05 已完成当前实现与离线验收：模块 05 unit `232 passed`、contract `65 passed`，line `97.7777777778%`、branch `95.0000000000%`、combined `97.0491803279%`；完整 Docker 离线 unit/contract 回归为 `935 passed`。模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`；模块 01、03、04 的本轮受影响回归分别为 `182`、`78`、`235 passed`。模块 02 正式 live 为 `1/1`，模块 03 历史正式 live 为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
 
-模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。LangGraph 从模块 05 开始实现；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前开发没有客户端、FastAPI 或 Web；模块 14 只规划薄 CLI 和 Application Service。
+模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。模块 05 实现需求子图、同进程 interrupt/resume 和严格 checkpoint；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前开发没有客户端、FastAPI 或 Web；模块 14 只规划薄 CLI 和 Application Service。
 
 安装、环境变量、运行命令和 live probe 命令必须以对应模块文档为准，不允许从旧原型 README 推断。
 
@@ -53,7 +53,7 @@ CLI Demo
 
 ## Docker 开发与测试
 
-当前容器只承诺复现已经实现的模块 01–04，不会把尚不存在的 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction` 和 `app.workflow_contracts`，并输出 `modules 01-04 import successfully`；test target 包含当前 tests 树并使用 pytest 的 `no:cacheprovider` 模式。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+当前容器只承诺复现已经实现的模块 01–05，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction`、`app.workflow_contracts` 和 `app.requirement_subgraph`，并输出 `modules 01-05 import successfully`；test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
