@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–05 已完成并进入稳定基线；模块 06 的实现、离线验收、独立代码审查和当前源码 live/M2 资格已通过，当前仍待独立收尾审查、用户提交授权及后续提交/合并；旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–06 已完成并进入本地 `main` 稳定基线；模块 06 的实现、离线验收、独立代码审查、当前源码 live/M2 资格、MODULE-CLOSEOUT、提交和本地 fast-forward 合并均已完成。模块 07 尚未开始；旧原型接口不构成兼容要求。
 
 ## 架构基线
 
@@ -99,4 +99,4 @@ docker compose --profile production down
 
 本地开发默认密码只用于隔离开发环境；任何共享或生产环境都必须通过 Secret 或外部环境变量覆盖。百度地图默认使用远程 Streamable HTTP MCP 地址，不需要额外启动 `baidu-mcp` 容器。
 
-本次收尾验收完成后直接等待用户明确的 commit 授权；用户已决定不另执行独立 closeout 审查。获准提交及后续合并后才进入 Module 07。Module 06 当前未提交、未合并，也未宣称最终 COMPLETE。
+模块 06 设计提交为 `3412dcc5760e072ba549a8e8cfd997d60294df04`，最终实现与收尾提交为 `b8d1dc0493add91ed150d3fb1f8778f8fe22de09`；用户决定免除该模块的独立 closeout 审查，并已明确授权提交及合并到本地 `main`。push、PR 和 deploy 均未执行。下一步从最新本地 `main` 开始 Module 07 的需求澄清与设计。
