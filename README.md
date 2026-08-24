@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–05 已完成当前实现与离线验收，后续模块按冻结规范继续交付；旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–05 已完成并进入稳定基线；模块 06 的实现、离线验收、独立代码审查和当前源码 live/M2 资格已通过，当前仍待独立收尾审查、用户提交授权及后续提交/合并；旧原型接口不构成兼容要求。
 
 ## 架构基线
 
@@ -38,12 +38,16 @@ CLI Demo
 - [`docs/04_workflow_state_and_artifacts_vibe_coding.md`](./docs/04_workflow_state_and_artifacts_vibe_coding.md)：模块 04 精确执行契约与 RSC-T00–RSC-T06 验收路由。
 - [`docs/05_requirement_subgraph.md`](./docs/05_requirement_subgraph.md)：模块 05 需求子图、interrupt/resume、checkpoint、预算重放与运行时合同。
 - [`docs/05_requirement_subgraph_vibe_coding.md`](./docs/05_requirement_subgraph_vibe_coding.md)：模块 05 精确执行契约与 T00–T05、MODULE-CLOSEOUT 验收路由。
+- [`docs/06_baidu_map_adapter_and_mcp_gateway.md`](./docs/06_baidu_map_adapter_and_mcp_gateway.md)：模块 06 百度地图 typed adapter、MCP Gateway、规范化、限流和资格合同。
+- [`docs/06_baidu_map_adapter_and_mcp_gateway_vibe_coding.md`](./docs/06_baidu_map_adapter_and_mcp_gateway_vibe_coding.md)：模块 06 精确执行契约、live 资格和 MODULE-CLOSEOUT 路由。
 
 权威层级和冲突处理以主设计第 1 节为准。后续模块必须按路线图中的 `depends_on` 和模块 acceptance gate 开工。`_vibe_coding.md` 专门面向能力较弱的编码模型，必须保留精确文件白名单、符号、算法、阶段 Gate、测试矩阵、停止条件和报告模板，不能压缩成需要模型自行推导的摘要。
 
 ## 当前边界
 
 模块 01–05 已完成当前实现与离线验收：模块 05 unit `232 passed`、contract `65 passed`，line `97.7777777778%`、branch `95.0000000000%`、combined `97.0491803279%`；完整 Docker 离线 unit/contract 回归为 `935 passed`。模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`；模块 01、03、04 的本轮受影响回归分别为 `182`、`78`、`235 passed`。模块 02 正式 live 为 `1/1`，模块 03 历史正式 live 为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
+
+模块 06 提供百度地图 typed adapter、七项核心 MCP Gateway 能力、技术限流、生命周期和安全边界。本次 closeout 最终离线快照为：Module 06 + M2 offline `222 passed`；coverage `221 passed`，line `1945/2002`（`97.15%`）、branch `544/570`（`95.44%`）、combined `2489/2572`（`96.77%`）；Module 04 回归 `235 passed`；完整 unit/contract `1156 passed`。当前源码七项核心 live 和 M2 live 已通过，地图调起当前为 `NOT_AVAILABLE/NOT_IN_MANIFEST`；不在此记录地址、坐标、UID、天气、路线、指令或 Secret。
 
 模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。模块 05 实现需求子图、同进程 interrupt/resume 和严格 checkpoint；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前开发没有客户端、FastAPI 或 Web；模块 14 只规划薄 CLI 和 Application Service。
 
@@ -55,7 +59,7 @@ CLI Demo
 
 ## Docker 开发与测试
 
-当前容器只承诺复现已经实现的模块 01–05，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction`、`app.workflow_contracts` 和 `app.requirement_subgraph`，并输出 `modules 01-05 import successfully`；test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+当前容器只承诺复现已经实现的模块 01–06，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction`、`app.workflow_contracts`、`app.requirement_subgraph` 和 `app.baidu_map`，并输出 `modules 01-06 import successfully`；test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
@@ -78,6 +82,8 @@ docker compose run --rm runtime
 docker compose --profile test run --rm test
 ```
 
+模块 06 百度地图 live、地图调起和 M2 live 资格命令及独立授权要求只以 [`docs/06_baidu_map_adapter_and_mcp_gateway.md`](./docs/06_baidu_map_adapter_and_mcp_gateway.md) 和配套执行契约为准；README 不提供读取或输出 Secret 的命令。
+
 真实 DeepSeek 测试会产生外部 API 调用，只在明确需要时运行：
 
 ```powershell
@@ -92,3 +98,5 @@ docker compose --profile production down
 ```
 
 本地开发默认密码只用于隔离开发环境；任何共享或生产环境都必须通过 Secret 或外部环境变量覆盖。百度地图默认使用远程 Streamable HTTP MCP 地址，不需要额外启动 `baidu-mcp` 容器。
+
+本次收尾验收完成后直接等待用户明确的 commit 授权；用户已决定不另执行独立 closeout 审查。获准提交及后续合并后才进入 Module 07。Module 06 当前未提交、未合并，也未宣称最终 COMPLETE。

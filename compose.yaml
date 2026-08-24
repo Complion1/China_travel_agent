@@ -5,8 +5,6 @@ x-agent-environment: &agent-environment
   HOME: /tmp
   XDG_CACHE_HOME: /tmp/.cache
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-  BAIDU_MAPS_API_KEY: ${BAIDU_MAPS_API_KEY:-}
-  BAIDU_MAPS_MCP_URL: ${BAIDU_MAPS_MCP_URL:-https://mcp.map.baidu.com/mcp}
 
 x-agent-security: &agent-security
   init: true
@@ -28,7 +26,9 @@ services:
     build:
       <<: *agent-build
       target: runtime
-    environment: *agent-environment
+    environment:
+      <<: *agent-environment
+      BAIDU_MAPS_API_KEY: ${BAIDU_MAPS_API_KEY:-}
 
   test:
     <<: *agent-security
@@ -57,6 +57,21 @@ services:
       - no:cacheprovider
       - tests/live/llm_runtime
       - tests/live/requirement_extraction
+
+  baidu-map-live-test:
+    <<: *agent-security
+    profiles: ["live"]
+    image: china-travel-agent:module06-live-${MODULE06_LIVE_IMAGE_TAG:-not-authorized}
+    build:
+      <<: *agent-build
+      target: test
+    environment:
+      TZ: Asia/Shanghai
+      HOME: /tmp/module06-home
+      XDG_CACHE_HOME: /tmp/module06-cache
+      BAIDU_MAPS_API_KEY: ${BAIDU_MAPS_API_KEY:-__BAIDU_MAPS_API_KEY_REQUIRED__}
+    cap_drop:
+      - ALL
 
   postgres:
     profiles: ["production"]
