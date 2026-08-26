@@ -25,8 +25,8 @@ COPY scripts ./scripts
 USER appuser
 
 # The end-to-end CLI is not implemented yet. Keep the runtime target honest by
-# validating only the six production packages that currently exist.
-CMD ["python", "-c", "import app.requirements, app.llm_runtime, app.requirement_extraction, app.workflow_contracts, app.requirement_subgraph, app.baidu_map; print('modules 01-06 import successfully')"]
+# validating only the seven production packages that currently exist.
+CMD ["python", "-c", "import app.requirements, app.llm_runtime, app.requirement_extraction, app.workflow_contracts, app.requirement_subgraph, app.baidu_map, app.hotel_selection; print('modules 01-07 import successfully')"]
 
 
 FROM runtime AS test

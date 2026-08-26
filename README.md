@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–06 已完成并进入本地 `main` 稳定基线；模块 06 的实现、离线验收、独立代码审查、当前源码 live/M2 资格、MODULE-CLOSEOUT、提交和本地 fast-forward 合并均已完成。模块 07 尚未开始；旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–06 已完成并进入本地 `main` 稳定基线；模块 06 的实现、离线验收、独立代码审查、当前源码 live/M2 资格、MODULE-CLOSEOUT、提交和本地 fast-forward 合并均已完成。模块 07 已在 `feature/module-07-hotel-selection` 完成 07-1～07-6 实现、统一 Gate、实施后独立代码审查和本次 MODULE-CLOSEOUT 收尾 Gate，当前状态为 `MODULE07_CLOSEOUT_GATES_PASSED_AWAITING_INDEPENDENT_REVIEW`；实现与测试仍为未提交的 24 个 untracked 文件，尚未 commit 或合并本地 `main`，push、PR、deploy 均未执行，独立 closeout 审查待执行。旧原型接口不构成兼容要求。
 
 ## 架构基线
 
@@ -59,7 +59,7 @@ CLI Demo
 
 ## Docker 开发与测试
 
-当前容器只承诺复现已经实现的模块 01–06，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction`、`app.workflow_contracts`、`app.requirement_subgraph` 和 `app.baidu_map`，并输出 `modules 01-06 import successfully`；test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+当前容器承诺复现已经实现的模块 01–07，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction`、`app.workflow_contracts`、`app.requirement_subgraph`、`app.baidu_map` 和 `app.hotel_selection`，并输出 `modules 01-07 import successfully`；test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
@@ -99,4 +99,12 @@ docker compose --profile production down
 
 本地开发默认密码只用于隔离开发环境；任何共享或生产环境都必须通过 Secret 或外部环境变量覆盖。百度地图默认使用远程 Streamable HTTP MCP 地址，不需要额外启动 `baidu-mcp` 容器。
 
-模块 06 设计提交为 `3412dcc5760e072ba549a8e8cfd997d60294df04`，最终实现与收尾提交为 `b8d1dc0493add91ed150d3fb1f8778f8fe22de09`；用户决定免除该模块的独立 closeout 审查，并已明确授权提交及合并到本地 `main`。push、PR 和 deploy 均未执行。下一步从最新本地 `main` 开始 Module 07 的需求澄清与设计。
+模块 06 设计提交为 `3412dcc5760e072ba549a8e8cfd997d60294df04`，最终实现与收尾提交为 `b8d1dc0493add91ed150d3fb1f8778f8fe22de09`；用户决定免除该模块的独立 closeout 审查，并已明确授权提交及合并到本地 `main`。push、PR 和 deploy 均未执行。
+
+## Module 07 当前收尾快照
+
+Module 07 的确定性酒店候选发现与人工选择实现已完成 07-1～07-6，实施后独立只读审查 P0/P1/P2/P3 均为 0，MODULE-CLOSEOUT 收尾 Gate 已通过，当前等待独立 closeout 审查。当前分支为 `feature/module-07-hotel-selection`，HEAD 为 `3e1397c587bc9cf1e7b960f4c4bfabba88387012`；实现与测试仍是未提交的 24 个 untracked 文件，commit 和本地 `main` 合并尚未执行，push、PR、deploy 均未执行。
+
+Module 07 统一 Gate：`204 passed`；line `655/655 = 100.00%`、branch `194/194 = 100.00%`、combined `100.00%`；互补完整 unit/contract 回归 `1156 passed`，允许 7 条既有上游 Pydantic warnings，compileall 通过。Module 07 无新增依赖、无数据库 migration，不记录业务 query、目的地、UID、地址、坐标、Secret 或供应商原始 payload。
+
+收尾镜像 tag：runtime `china-travel-agent:module07-closeout-runtime`；test `china-travel-agent:module07-closeout-test`。最终 image ID 以本页状态快照和实际 `docker image inspect` 为准。
