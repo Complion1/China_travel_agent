@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–07 已完成并进入本地 `main` 稳定基线；模块 07 的 07-1～07-6 实现、统一 Gate、实施后独立代码审查、MODULE-CLOSEOUT、独立 closeout 审查、提交和本地 fast-forward 合并均已完成。当前分支 `feature/module-07-post-merge-doc-sync` 只同步合并后的说明事实；push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–07 已完成并进入本地 `main` 稳定基线；模块 08 的候选研究循环已在 `feature/module-08-candidate-research` 完成实现、离线 Gate、独立代码审查和 MODULE-CLOSEOUT，当前等待 commit 授权，尚未合并。Module 08 coverage 的真实结果及用户接受的一次性演示例外见实施状态快照；push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
 
 ## 架构基线
 
@@ -40,6 +40,10 @@ CLI Demo
 - [`docs/05_requirement_subgraph_vibe_coding.md`](./docs/05_requirement_subgraph_vibe_coding.md)：模块 05 精确执行契约与 T00–T05、MODULE-CLOSEOUT 验收路由。
 - [`docs/06_baidu_map_adapter_and_mcp_gateway.md`](./docs/06_baidu_map_adapter_and_mcp_gateway.md)：模块 06 百度地图 typed adapter、MCP Gateway、规范化、限流和资格合同。
 - [`docs/06_baidu_map_adapter_and_mcp_gateway_vibe_coding.md`](./docs/06_baidu_map_adapter_and_mcp_gateway_vibe_coding.md)：模块 06 精确执行契约、live 资格和 MODULE-CLOSEOUT 路由。
+- [`docs/07_hotel_candidate_selection.md`](./docs/07_hotel_candidate_selection.md)：模块 07 酒店候选发现、证据聚合与人工选择合同。
+- [`docs/07_hotel_candidate_selection_vibe_coding.md`](./docs/07_hotel_candidate_selection_vibe_coding.md)：模块 07 精确执行契约与 MODULE-CLOSEOUT 路由。
+- [`docs/08_candidate_research_loop.md`](./docs/08_candidate_research_loop.md)：模块 08 受控候选研究循环、证据、预算、Artifact 与 replay 合同。
+- [`docs/08_candidate_research_loop_vibe_coding.md`](./docs/08_candidate_research_loop_vibe_coding.md)：模块 08 精确执行契约、Docker Gate 与 MODULE-CLOSEOUT 路由。
 
 权威层级和冲突处理以主设计第 1 节为准。后续模块必须按路线图中的 `depends_on` 和模块 acceptance gate 开工。`_vibe_coding.md` 专门面向能力较弱的编码模型，必须保留精确文件白名单、符号、算法、阶段 Gate、测试矩阵、停止条件和报告模板，不能压缩成需要模型自行推导的摘要。
 
@@ -48,6 +52,8 @@ CLI Demo
 模块 01–05 已完成当前实现与离线验收：模块 05 unit `232 passed`、contract `65 passed`，line `97.7777777778%`、branch `95.0000000000%`、combined `97.0491803279%`；完整 Docker 离线 unit/contract 回归为 `935 passed`。模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`；模块 01、03、04 的本轮受影响回归分别为 `182`、`78`、`235 passed`。模块 02 正式 live 为 `1/1`，模块 03 历史正式 live 为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
 
 模块 06 提供百度地图 typed adapter、七项核心 MCP Gateway 能力、技术限流、生命周期和安全边界。本次 closeout 最终离线快照为：Module 06 + M2 offline `222 passed`；coverage `221 passed`，line `1945/2002`（`97.15%`）、branch `544/570`（`95.44%`）、combined `2489/2572`（`96.77%`）；Module 04 回归 `235 passed`；完整 unit/contract `1156 passed`。当前源码七项核心 live 和 M2 live 已通过，地图调起当前为 `NOT_AVAILABLE/NOT_IN_MANIFEST`；不在此记录地址、坐标、UID、天气、路线、指令或 Secret。
+
+模块 08 提供受控候选研究循环、initial/supplemental、候选证据、预算、Artifact、replay、并发与失败边界。代码最终版 Module 08 Gate 为 `317 passed`，上游 acceptance 为 `12 passed`，互补 unit/contract 为 `1360 passed`；唯一 coverage 为 line `83.3743%`、branch `69.7895%`、combined `79.3255%`。branch/combined 未达到默认 80%，用户已明确接受仅绑定当前代码哈希的一次性演示例外；这不是数值达标或默认门槛下调。Module 08 无新增依赖和数据库 migration，未执行 live provider、网络或 Secret 测试。
 
 模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。模块 05 实现需求子图、同进程 interrupt/resume 和严格 checkpoint；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前开发没有客户端、FastAPI 或 Web；模块 14 只规划薄 CLI 和 Application Service。
 
@@ -59,7 +65,7 @@ CLI Demo
 
 ## Docker 开发与测试
 
-当前容器承诺复现已经实现的模块 01–07，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction`、`app.workflow_contracts`、`app.requirement_subgraph`、`app.baidu_map` 和 `app.hotel_selection`，并输出 `modules 01-07 import successfully`；test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+当前容器承诺复现已经实现的模块 01–08，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction`、`app.workflow_contracts`、`app.requirement_subgraph`、`app.baidu_map`、`app.hotel_selection` 和 `app.candidate_research`，并输出 `modules 01-08 import successfully`；test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
@@ -108,3 +114,9 @@ Module 07 的确定性酒店候选发现与人工选择实现已完成 07-1～07
 Module 07 统一 Gate：`204 passed`；line `655/655 = 100.00%`、branch `194/194 = 100.00%`、combined `100.00%`；互补完整 unit/contract 回归 `1156 passed`，允许 7 条既有上游 Pydantic warnings，compileall 通过。Module 07 无新增依赖、无数据库 migration，不记录业务 query、目的地、UID、地址、坐标、Secret 或供应商原始 payload。
 
 收尾镜像：runtime `china-travel-agent:module07-closeout-runtime`（`sha256:06ccfaaae4cc61f7b34840e800fa3c338e6d22e01bcf5bdc5593e67c055a5a4a`）；test `china-travel-agent:module07-closeout-test`（`sha256:7bc3a39e1ff1aabdaa7ad717f0ebb2d35c4a5a03253bc49128fa1334e7eb54b4`）。Module 07 commit 和本地合并已执行；push、PR、deploy 均未执行。
+
+## Module 08 完成快照
+
+Module 08 的受控候选研究实现已完成 08-1～08-6、生产缺陷修复、独立代码审查和 MODULE-CLOSEOUT。最终代码保持四类 `1.0` Artifact、双 Prompt hash、6/48/12 预算、最多 3 并发、128 候选容量、initial/supplemental/replay/singleflight/close 生命周期及上游公共边界；无新增依赖、migration、live provider、HTTP/SDK 私有访问或 Secret。
+
+MODULE-CLOSEOUT 只同步两份 Module 08 设计中的用户验收例外、README、实施状态和 Docker runtime import 自检；没有修改 Module 08 生产代码或测试。当前状态为 `MODULE08_READY_FOR_COMMIT_AUTHORIZATION`；commit、merge、push、PR 和 deploy 均未执行，后续操作仍需分别授权。
