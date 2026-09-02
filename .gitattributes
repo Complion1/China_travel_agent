@@ -1,0 +1,7 @@
+app/candidate_research/** text eol=lf
+tests/contract/candidate_research/** text eol=lf
+tests/unit/candidate_research/** text eol=lf
+tests/support/candidate_research_fakes.py text eol=lf
+tests/support/run_module08_coverage.py text eol=lf
+docs/08_candidate_research_loop.md text eol=lf
+docs/08_candidate_research_loop_vibe_coding.md text eol=lf

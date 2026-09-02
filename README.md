@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–07 已完成并进入本地 `main` 稳定基线；模块 08 的候选研究循环已在 `feature/module-08-candidate-research` 完成实现、离线 Gate、独立代码审查和 MODULE-CLOSEOUT，当前等待 commit 授权，尚未合并。Module 08 coverage 的真实结果及用户接受的一次性演示例外见实施状态快照；push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–08 已完成并进入本地 `main` 稳定基线；Module 08 的候选研究循环实现、离线 Gate、独立代码审查、MODULE-CLOSEOUT、提交和本地 fast-forward 合并均已完成。Module 08 coverage 的真实结果及用户接受的一次性演示例外见实施状态快照；push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
 
 ## 架构基线
 
@@ -119,4 +119,4 @@ Module 07 统一 Gate：`204 passed`；line `655/655 = 100.00%`、branch `194/19
 
 Module 08 的受控候选研究实现已完成 08-1～08-6、生产缺陷修复、独立代码审查和 MODULE-CLOSEOUT。最终代码保持四类 `1.0` Artifact、双 Prompt hash、6/48/12 预算、最多 3 并发、128 候选容量、initial/supplemental/replay/singleflight/close 生命周期及上游公共边界；无新增依赖、migration、live provider、HTTP/SDK 私有访问或 Secret。
 
-MODULE-CLOSEOUT 只同步两份 Module 08 设计中的用户验收例外、README、实施状态和 Docker runtime import 自检；没有修改 Module 08 生产代码或测试。当前状态为 `MODULE08_READY_FOR_COMMIT_AUTHORIZATION`；commit、merge、push、PR 和 deploy 均未执行，后续操作仍需分别授权。
+MODULE-CLOSEOUT 只同步两份 Module 08 设计中的用户验收例外、README、实施状态和 Docker runtime import 自检；没有修改 Module 08 生产代码或测试。最终实现与收尾提交为 `da2d1eadc09d5abac8f86054054c58d637de22db`，本地 `main` 已从 `7285fc2489b6a490bd38a65f1fb16b371159b094` fast-forward 到该提交，没有产生 merge commit。当前状态为 `MODULE08_COMPLETE_ON_LOCAL_MAIN`；push、PR 和 deploy 均未执行。
