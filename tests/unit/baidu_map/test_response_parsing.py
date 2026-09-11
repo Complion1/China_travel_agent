@@ -464,6 +464,27 @@ def test_place_search_no_result_filter_limit_and_absolute_capacity() -> None:
     success = parse_place_search({"status": 0, "results": [raw_place, {**raw_place, "uid": "u2"}]}, request, NOW)
     assert tuple(place.uid for place in success.places) == ("u",)
     assert success.places[0].category == "only-tag"
+    real_provider_shape = {
+        **raw_place,
+        "tag": None,
+        "detail_info": {
+            "tag": "酒店",
+            "classified_poi_tag": "酒店;经济型",
+        },
+    }
+    success = parse_place_search(
+        {"status": 0, "results": [real_provider_shape]}, request, NOW
+    )
+    assert success.places[0].category == "酒店"
+    classified_only = {
+        **raw_place,
+        "tag": None,
+        "detail_info": {"classified_poi_tag": "旅游景点;博物馆"},
+    }
+    success = parse_place_search(
+        {"status": 0, "results": [classified_only]}, request, NOW
+    )
+    assert success.places[0].category == "旅游景点;博物馆"
     with pytest.raises(BaiduMapResponseError):
         parse_place_search({"status": 0, "results": [raw_place] * 51}, request, NOW)
 

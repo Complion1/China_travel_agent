@@ -56,7 +56,7 @@ ITINERARY_PLANNING_PROFILE = ModelProfile(
     role=ModelRole.ITINERARY_PLANNING,
     read_timeout_seconds=120,
     semantic_invocation_limit=12,
-    max_request_utf8_bytes=393_216,
+    max_request_utf8_bytes=524_288,
     max_output_tokens=49_152,
 )
 

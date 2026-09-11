@@ -19,6 +19,7 @@ from app.llm_runtime.protocols import (
 )
 from app.llm_runtime.provider import (
     LangChainDeepSeekAdapter,
+    _canonical_model_name,
     _classify_exception,
     _failure_from_exception,
     _normalize_response,
@@ -135,6 +136,14 @@ def test_normalizes_actual_langchain_message_and_include_raw():
         "raw": make_message(), "parsed": {"status": "ok"}, "parsing_error": None,
     })
     assert wrapped.content == '{"status":"ok"}'
+
+
+def test_normalizes_current_provider_flash_alias_at_response_boundary():
+    message = make_message()
+    message.response_metadata["model_name"] = "deepseek-flash"
+    response = make_adapter()._unwrap_raw(message)
+    assert response.model_name == "deepseek-v4-flash"
+    assert _canonical_model_name("unknown-model") == "unknown-model"
 
 
 @pytest.mark.parametrize("bad", [
@@ -484,6 +493,15 @@ async def test_adapter_json_tool_continuation_and_model_listing(monkeypatch):
     )
     assert adapter.invoke_tool_continuation(continuation).tool_calls
     assert (await adapter.ainvoke_tool_continuation(continuation)).tool_calls
+
+
+@pytest.mark.asyncio
+async def test_model_listing_normalizes_and_deduplicates_current_flash_alias(monkeypatch):
+    adapter = make_adapter()
+    model = FakeModel(make_message(), models=("deepseek-flash", "deepseek-v4-flash", "unknown-provider-model"))
+    monkeypatch.setattr(adapter, "_build_model", lambda profile: model)
+    assert adapter.list_models() == ("deepseek-v4-flash", "unknown-provider-model")
+    assert await adapter.alist_models() == ("deepseek-v4-flash", "unknown-provider-model")
 
 
 @pytest.mark.asyncio

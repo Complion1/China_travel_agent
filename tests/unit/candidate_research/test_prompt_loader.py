@@ -16,6 +16,16 @@ def test_frozen_prompt_resources_load_and_hash():
     assert observation.endswith("\n") and not observation.endswith("\n\n")
     assert loader.ACTION_PROMPT_CONTENT_DIGEST == "sha256:" + loader.ACTION_PROMPT_SHA256
     assert loader.OBSERVATION_PROMPT_CONTENT_DIGEST == "sha256:" + loader.OBSERVATION_PROMPT_SHA256
+    assert "interests_locked" in action
+    assert "Do not repeat an effective Search or Details request" in action
+    assert "exactly one property named output" in action
+    assert "do not return outcome_type at the top level" in action
+    assert "candidate's evidence_handles" in observation
+    assert "shared by those defaulted candidates" in observation
+    assert "When requirements is empty, requirement_group_updates must be empty" in observation
+    assert "accepted_search is controller-validated" in observation
+    assert "current_evidence_handles identifies" in observation
+    assert "do not repeat unchanged judgments" in observation
 
 
 @pytest.mark.parametrize("resource_name,expected", [

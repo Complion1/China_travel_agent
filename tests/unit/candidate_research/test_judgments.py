@@ -1,8 +1,9 @@
 import pytest
 
 from app.candidate_research import (
-    EvidenceHandle, JudgmentPatch, RoleJudgmentUpdate, ResearchRole,
-    RoleVerdict, RoleReasonCode,
+    EvidenceHandle, JudgmentPatch, MatchVerdict, RequirementGroupJudgmentUpdate,
+    RequirementReasonCode, RequirementVerdictException, RoleJudgmentUpdate,
+    ResearchRole, RoleVerdict, RoleReasonCode,
 )
 from app.candidate_research.judgments import (
     apply_judgment_patch, evidence_handle_indexes, evidence_ref_directory, merge_judgment_patch,
@@ -17,14 +18,25 @@ def _patch(handle="c:0", evidence="e:0", verdict=RoleVerdict.SUPPORTED):
     )
 
 
+def _validate(patch=None, *, candidate_handles=("c:0",), evidence_handles=("e:0",), candidate_evidence_handles=None):
+    if candidate_evidence_handles is None:
+        candidate_evidence_handles = {handle: evidence_handles for handle in candidate_handles}
+    return validate_judgment_patch(
+        patch=patch or _patch(),
+        candidate_handles=candidate_handles,
+        evidence_handles=evidence_handles,
+        candidate_evidence_handles=candidate_evidence_handles,
+    )
+
+
 def test_handle_visibility_fresh_validation_and_zero_based_directory():
-    patch = validate_judgment_patch(patch=_patch(), candidate_handles=("c:0",), evidence_handles=("e:0",))
+    patch = _validate()
     assert patch.role_updates[0].candidate_handle == "c:0"
     assert evidence_handle_indexes((EvidenceHandle(handle_id="e:0"),), ("e:0",)) == (0,)
     with pytest.raises(ValueError):
-        validate_judgment_patch(patch=_patch(handle="c:9"), candidate_handles=("c:0",), evidence_handles=("e:0",))
+        _validate(_patch(handle="c:9"))
     with pytest.raises(ValueError):
-        validate_judgment_patch(patch=_patch(evidence="e:48"), candidate_handles=("c:0",), evidence_handles=("e:48",))
+        _validate(_patch(evidence="e:48"), evidence_handles=("e:48",))
 
 
 def test_merge_updates_existing_semantic_key_without_duplicates():
@@ -40,13 +52,78 @@ def test_evidence_directory_preserves_zero_based_order():
     refs = []
     assert evidence_ref_directory(refs) == {}
     with pytest.raises(ValueError):
-        validate_judgment_patch(patch=_patch(), candidate_handles=("c:0", "c:0"), evidence_handles=("e:0",))
+        _validate(candidate_handles=("c:0", "c:0"))
 
 
 @pytest.mark.parametrize("candidate_handles,evidence_handles", [((), ("e:0",)), (("c:0",), ()), (("c:0",), ("e:0", "e:0"))])
 def test_judgment_handle_directories_reject_missing_or_duplicate_visibility(candidate_handles, evidence_handles):
     with pytest.raises(ValueError):
-        validate_judgment_patch(patch=_patch(), candidate_handles=candidate_handles, evidence_handles=evidence_handles)
+        _validate(candidate_handles=candidate_handles, evidence_handles=evidence_handles)
+
+
+def test_candidate_updates_reject_globally_visible_evidence_owned_by_another_candidate():
+    with pytest.raises(ValueError, match="does not belong"):
+        _validate(
+            _patch(evidence="e:1"),
+            candidate_handles=("c:0", "c:1"),
+            evidence_handles=("e:0", "e:1"),
+            candidate_evidence_handles={"c:0": ("e:0",), "c:1": ("e:1",)},
+        )
+
+
+def test_candidate_evidence_directory_must_cover_candidates_and_global_evidence():
+    with pytest.raises(ValueError, match="cover visible candidates"):
+        _validate(candidate_evidence_handles={})
+    with pytest.raises(ValueError, match="invalid candidate evidence directory"):
+        _validate(candidate_evidence_handles={"c:0": ("e:1",)})
+
+
+def test_requirement_group_exception_uses_its_own_evidence_instead_of_default_evidence():
+    patch = JudgmentPatch(
+        role_updates=(),
+        interest_updates=(),
+        meal_updates=(),
+        requirement_group_updates=(
+            RequirementGroupJudgmentUpdate(
+                requirement_group_id="group:1",
+                requirement_kind="avoid",
+                evaluated_candidate_handles=("c:0", "c:1"),
+                default_verdict=MatchVerdict.NO_MATCH,
+                default_reason_code=RequirementReasonCode.DETAILS_DISAMBIGUATED,
+                default_evidence_handles=(EvidenceHandle(handle_id="e:0"),),
+                exceptions=(
+                    RequirementVerdictException(
+                        candidate_handle="c:1",
+                        verdict=MatchVerdict.CONFIRMED,
+                        reason_code=RequirementReasonCode.DETAILS_DISAMBIGUATED,
+                        evidence_handles=(EvidenceHandle(handle_id="e:1"),),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert _validate(
+        patch,
+        candidate_handles=("c:0", "c:1"),
+        evidence_handles=("e:0", "e:1"),
+        candidate_evidence_handles={"c:0": ("e:0",), "c:1": ("e:1",)},
+    ) == patch
+
+    invalid_default = patch.model_copy(
+        update={
+            "requirement_group_updates": (
+                patch.requirement_group_updates[0].model_copy(update={"exceptions": ()}),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="does not belong"):
+        _validate(
+            invalid_default,
+            candidate_handles=("c:0", "c:1"),
+            evidence_handles=("e:0", "e:1"),
+            candidate_evidence_handles={"c:0": ("e:0",), "c:1": ("e:1",)},
+        )
 
 
 @pytest.mark.parametrize("handle", ("c:1", "c:0"))

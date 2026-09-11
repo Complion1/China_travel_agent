@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from app.baidu_map import (
     BaiduMapAdapter,
@@ -220,6 +220,40 @@ class _ModelOperationPort(Protocol):
 
 class _RuntimePort(Protocol):
     def start_operation(self, role: ModelRole) -> _ModelOperationPort: ...
+
+
+class _ActionModelEnvelope(BaseModel):
+    """Object-root schema required by the shared structured-output runtime."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    output: ActionModelOutcome
+
+
+def _filter_search_coverage(
+    search: SearchCoverageState,
+    eligible_ordinals: Sequence[int],
+) -> SearchCoverageState:
+    """Remove candidates that later ceased to be eligible from saved coverage."""
+    eligible = set(eligible_ordinals)
+    records = tuple(
+        SearchCoverageRecord(
+            **{
+                **_python_model(record),
+                "eligible_candidate_ordinals": tuple(
+                    ordinal
+                    for ordinal in record.eligible_candidate_ordinals
+                    if ordinal in eligible
+                ),
+            }
+        )
+        for record in search.records
+    )
+    return SearchCoverageState(
+        records=records,
+        initial_city_attraction_search_done=search.initial_city_attraction_search_done,
+        initial_hotel_restaurant_nearby_done=search.initial_hotel_restaurant_nearby_done,
+    )
 
 
 @dataclass(slots=True)
@@ -1455,6 +1489,8 @@ class CandidateResearchService:
         return {
             "destination": run.destination,
             "effective_interests": tuple(item.value for item in run.effective_interests),
+            "interests_locked": run.interests_frozen,
+            "agent_may_select_interests": run.agent_decides_interests,
             "objectives": tuple(_json_model(item) for item in objectives),
             "requirements": tuple(requirements),
             "candidates": tuple(candidates),
@@ -1679,7 +1715,7 @@ class CandidateResearchService:
 
     async def _invoke_action(self, run: _Run, prompt: PromptEnvelope) -> tuple[object, ArtifactInvocationMetadataSnapshot] | LLMResearchFailure | ControlResearchFailure:
         try:
-            result = await run.operation.ainvoke_structured(prompt, ActionModelOutcome)
+            result = await run.operation.ainvoke_structured(prompt, _ActionModelEnvelope)
         except (RuntimeError, TypeError, ValueError, AttributeError):
             run.semantic_invocations += 1
             run.provider_attempts_complete = False
@@ -1708,7 +1744,12 @@ class CandidateResearchService:
         run.provider_attempts += result.metadata.provider_attempts
         self._add_usage(run, result.metadata)
         try:
-            fresh = TypeAdapter(ActionModelOutcome).validate_json(json.dumps(_json_model(result.value), ensure_ascii=False, sort_keys=True, separators=(",", ":")), strict=True)
+            raw_output = (
+                result.value.output
+                if isinstance(result.value, _ActionModelEnvelope)
+                else result.value
+            )
+            fresh = TypeAdapter(ActionModelOutcome).validate_json(json.dumps(_json_model(raw_output), ensure_ascii=False, sort_keys=True, separators=(",", ":")), strict=True)
         except (ValidationError, TypeError, ValueError):
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
         if isinstance(fresh, ProposedActionBatch):
@@ -1758,6 +1799,9 @@ class CandidateResearchService:
         by_id = {item.objective_id: item for item in objectives}
         if len(actions) > 8 or len(actions) > len(slot.place_observation_operation_ids):
             return "capacity"
+        fingerprints = tuple(action_fingerprint(action, run.destination) for action in actions)
+        if len(set(fingerprints)) != len(fingerprints):
+            return "duplicate"
         known_uids = {item.core.uid for item in run.state.candidates}
         if tuple(actions[index].ordinal for index in range(len(actions))) != tuple(range(len(actions))):
             return "ordinal"
@@ -2106,6 +2150,14 @@ class CandidateResearchService:
             run.usage[name] = run.usage.get(name, 0) + getattr(metadata.usage, name)
 
     async def _judgment(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int) -> LLMResearchFailure | ControlResearchFailure | _JudgmentReplayIndeterminate | None:
+        def candidate_evidence_directory() -> dict[str, tuple[str, ...]]:
+            return {
+                candidate_handle(item.admission_ordinal): tuple(
+                    f"e:{index}" for index in item.observation_indexes
+                )
+                for item in run.state.candidates
+            }
+
         existing = await self._repository.lookup(operation_id=slot.judgment_operation_id)
         if isinstance(existing, ArtifactFound):
             ref = existing.ref
@@ -2151,7 +2203,12 @@ class CandidateResearchService:
                 patch = self._public_judgment_patch(record.patch)
                 visible_candidates = tuple(candidate_handle(item.admission_ordinal) for item in run.state.candidates)
                 visible_evidence = tuple(f"e:{index}" for index in range(len(run.observation_refs)))
-                patch = validate_judgment_patch(patch=patch, candidate_handles=visible_candidates, evidence_handles=visible_evidence)
+                patch = validate_judgment_patch(
+                    patch=patch,
+                    candidate_handles=visible_candidates,
+                    evidence_handles=visible_evidence,
+                    candidate_evidence_handles=candidate_evidence_directory(),
+                )
             except (ValidationError, TypeError, ValueError):
                 return _JudgmentReplayIndeterminate()
             run.last_judgment_patch = patch
@@ -2164,7 +2221,9 @@ class CandidateResearchService:
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.BUDGET_ERROR)
         refs = tuple(run.observation_refs)
         try:
-            prompt_payload = await self._judgment_context(run, refs)
+            prompt_payload = await self._judgment_context(
+                run, refs, current_iteration_index=iteration_index
+            )
         except ArtifactRepositoryError:
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.ARTIFACT_ERROR)
         prompt = build_observation_prompt(prompt_payload)
@@ -2203,7 +2262,12 @@ class CandidateResearchService:
             run.last_judgment_patch = patch
             visible_candidates = tuple(candidate_handle(item.admission_ordinal) for item in run.state.candidates)
             visible_evidence = tuple(f"e:{index}" for index in range(len(refs)))
-            patch = validate_judgment_patch(patch=patch, candidate_handles=visible_candidates, evidence_handles=visible_evidence)
+            patch = validate_judgment_patch(
+                patch=patch,
+                candidate_handles=visible_candidates,
+                evidence_handles=visible_evidence,
+                candidate_evidence_handles=candidate_evidence_directory(),
+            )
             known_groups = {group.group_id for group in run.state.requirement_group_states}
             if any(item.requirement_group_id not in known_groups for item in patch.requirement_group_updates):
                 raise ValueError("unknown requirement group")
@@ -2218,18 +2282,48 @@ class CandidateResearchService:
         run.state = self._apply_patch(run.state, patch)
         return None
 
-    async def _judgment_context(self, run: _Run, refs: Sequence[ArtifactRef]) -> dict[str, object]:
+    async def _judgment_context(
+        self,
+        run: _Run,
+        refs: Sequence[ArtifactRef],
+        *,
+        current_iteration_index: int,
+    ) -> dict[str, object]:
         """Expose only normalized observation facts and candidate context."""
         evidence: list[dict[str, object]] = []
+        current_evidence_handles: list[str] = []
+        search_by_observation = {
+            record.observation_index: record for record in run.state.search_coverage.records
+        }
         for index, ref in enumerate(refs):
             read = await self._repository.get(ref, expected_model=CandidateResearchPlaceObservationArtifact)
             if read.ref != ref or read.content.run_id != run.run_id or _digest(_json_model(read.content)) != ref.content_hash:
                 raise ArtifactRepositoryError()
+            handle = f"e:{index}"
+            if read.content.iteration_index != current_iteration_index:
+                continue
+            current_evidence_handles.append(handle)
+            search = search_by_observation.get(index)
+            accepted_search = None
+            if search is not None:
+                accepted_search = {
+                    "objective_kind": search.objective_kind.value,
+                    "role": (
+                        search.role.value
+                        if search.role is not None
+                        else ResearchRole.ATTRACTION.value
+                        if search.objective_kind is ResearchObjectiveKind.INTEREST_COVERAGE
+                        else None
+                    ),
+                    "interest": search.interest.value if search.interest is not None else None,
+                    "meal_intent": search.meal_intent.value if search.meal_intent is not None else None,
+                }
             evidence.append({
-                "handle": f"e:{index}",
+                "handle": handle,
                 "action_ordinal": read.content.action_ordinal,
                 "tool": read.content.tool.value,
                 "action_fingerprint": read.content.action_fingerprint,
+                "accepted_search": accepted_search,
                 "result": _json_model(read.content.result),
             })
         candidates = tuple({
@@ -2239,6 +2333,7 @@ class CandidateResearchService:
             "address": item.core.address,
             "coordinate": _json_model(item.core.coordinate),
             "provider_category": item.core.provider_category,
+            "evidence_handles": tuple(f"e:{index}" for index in item.observation_indexes),
             "state": item.state.value,
             "roles": tuple({"role": role.role.value, "verdict": role.verdict.value} for role in item.roles),
             "interests": tuple(value.value for value in item.interests),
@@ -2250,7 +2345,12 @@ class CandidateResearchService:
             "requirement_group_id": group_id,
             "requirement_item_ids": item_ids,
         } for kind, group_id, item_ids in run.requirement_specs)
-        return {"candidates": candidates, "requirements": requirements, "evidence": tuple(evidence)}
+        return {
+            "candidates": candidates,
+            "requirements": requirements,
+            "evidence": tuple(evidence),
+            "current_evidence_handles": tuple(current_evidence_handles),
+        }
 
     def _resolve_patch(
         self,
@@ -2441,13 +2541,18 @@ class CandidateResearchService:
 
     @staticmethod
     def _core_equal(left: ArtifactCandidateCoreSnapshot, right: ArtifactCandidateCoreSnapshot) -> bool:
+        def provider_coordinate(value: float) -> str:
+            # Baidu place-details currently returns six decimal places while
+            # place-search may return additional binary-float precision.
+            return format(value, ".6f")
+
         return (
             left.uid == right.uid
             and left.name == right.name
             and left.address == right.address
             and left.coordinate.coordinate_system == right.coordinate.coordinate_system
-            and left.coordinate.latitude == right.coordinate.latitude
-            and left.coordinate.longitude == right.coordinate.longitude
+            and provider_coordinate(left.coordinate.latitude) == provider_coordinate(right.coordinate.latitude)
+            and provider_coordinate(left.coordinate.longitude) == provider_coordinate(right.coordinate.longitude)
             and left.provider_category == right.provider_category
         )
 
@@ -2577,7 +2682,10 @@ class CandidateResearchService:
     ) -> CandidateSetStateSnapshot:
         eligible = tuple(item for item in candidates if item.state is CandidateState.ELIGIBLE)
         counts = ArtifactResearchCountSummarySnapshot(attraction_count=sum(any(role.role is ResearchRole.ATTRACTION and role.verdict is RoleVerdict.SUPPORTED for role in item.roles) for item in eligible), attraction_target=state.counts.attraction_target, restaurant_count=sum(any(role.role is ResearchRole.RESTAURANT and role.verdict is RoleVerdict.SUPPORTED for role in item.roles) for item in eligible), restaurant_target=state.counts.restaurant_target, unique_eligible_count=len(eligible), admitted_slots=len(candidates), candidate_capacity=128)
-        search = search or state.search_coverage
+        search = _filter_search_coverage(
+            search or state.search_coverage,
+            tuple(item.admission_ordinal for item in eligible),
+        )
         requirement_groups = requirement_groups if requirement_groups is not None else state.requirement_group_states
         covered_interests = tuple(item for item in state.effective_interests if any(item in candidate.interests for candidate in eligible) and any(record.interest is item for record in search.records))
         covered_meals = tuple(item for item in MealIntent if any(item in candidate.meal_intents for candidate in eligible) and any(record.meal_intent is item for record in search.records))
@@ -2912,7 +3020,11 @@ class CandidateResearchService:
                 evidence_indexes=self._related_gap_indexes(run, "area_coverage_missing", role=ResearchRole.RESTAURANT), role=ResearchRole.RESTAURANT,
                 anchor=ArtifactResearchAnchorSnapshot(anchor_type="hotel", uid=None), radius_km=3,
             ))
-        missing_details = tuple(item.core.uid for item in run.state.candidates if item.state is CandidateState.ELIGIBLE and item.details.status != "success")
+        missing_details = tuple(
+            item.core.uid
+            for item in run.state.candidates
+            if item.state is CandidateState.ELIGIBLE and item.details.status != "success"
+        ) if run.state.coverage.details_success_count < run.state.coverage.details_target else ()
         if missing_details:
             result.append(ArtifactCandidateDetailsMissingSummary(
                 gap_type="candidate_details_missing", gap_id="gap:details",

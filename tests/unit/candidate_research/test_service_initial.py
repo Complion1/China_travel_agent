@@ -26,6 +26,7 @@ from app.candidate_research import (
     RoleReasonCode,
     RoleVerdict,
     ResearchRole,
+    ResearchObjectiveKind,
     RequirementGroupJudgmentUpdate,
     RequirementReasonCode,
     RequirementVerdictException,
@@ -36,7 +37,14 @@ from app.candidate_research import (
     SearchAreaMode,
 )
 from app.candidate_research.errors import CandidateResearchConfigurationError
-from app.candidate_research.artifacts import CandidateSetStateSnapshot
+from app.candidate_research.artifacts import (
+    ArtifactCandidateCoreSnapshot,
+    ArtifactCoordinateSnapshot,
+    CandidateSetStateSnapshot,
+    SearchCoverageRecord,
+    SearchCoverageState,
+)
+from app.candidate_research.service import _filter_search_coverage
 from app.requirements import ConfirmedTravelRequirement, FieldMetadataRegistry, InterestTag, TravelPreferences, TravelRequirement, TravelTimeWindow
 from app.workflow_contracts import OperationId, WorkflowPhase
 from app.baidu_map import BaiduCoordinate, BaiduMapTimeoutError, MapCapability, PlaceDetails, PlaceDetailsSuccess, PlaceSearchSuccess, PlaceSummary
@@ -80,6 +88,67 @@ def test_constructor_is_keyword_only_and_public() -> None:
 def test_constructor_rejects_missing_public_ports() -> None:
     with pytest.raises(CandidateResearchConfigurationError):
         CandidateResearchService(runtime=object(), map_adapter=_Map(), artifact_repository=_Repository(), budget_manager=_Budget())
+
+
+def test_search_coverage_drops_candidates_that_later_cease_to_be_eligible() -> None:
+    search = SearchCoverageState(
+        records=(
+            SearchCoverageRecord(
+                objective_id="objective:history",
+                objective_kind=ResearchObjectiveKind.INITIAL_CITY_ATTRACTION,
+                action_fingerprint="sha256:" + "a" * 64,
+                observation_index=0,
+                role=ResearchRole.ATTRACTION,
+                interest=None,
+                meal_intent=None,
+                eligible_candidate_ordinals=(0, 1, 2),
+            ),
+        ),
+        initial_city_attraction_search_done=True,
+        initial_hotel_restaurant_nearby_done=False,
+    )
+
+    filtered = _filter_search_coverage(search, (0, 2))
+
+    assert filtered.records[0].eligible_candidate_ordinals == (0, 2)
+    assert search.records[0].eligible_candidate_ordinals == (0, 1, 2)
+
+
+def test_core_comparison_accepts_baidu_search_details_coordinate_precision_only() -> None:
+    search = ArtifactCandidateCoreSnapshot(
+        uid="uid-1",
+        name="工联美食广场",
+        address="延安路292号",
+        coordinate=ArtifactCoordinateSnapshot(
+            coordinate_system="bd09ll",
+            latitude=30.26103757730365,
+            longitude=120.17104720809715,
+        ),
+        provider_category="美食;其他",
+    )
+    details = ArtifactCandidateCoreSnapshot(
+        **{
+            **search.model_dump(mode="python"),
+            "coordinate": {
+                "coordinate_system": "bd09ll",
+                "latitude": 30.261038,
+                "longitude": 120.171047,
+            },
+        }
+    )
+    moved = ArtifactCandidateCoreSnapshot(
+        **{
+            **search.model_dump(mode="python"),
+            "coordinate": {
+                "coordinate_system": "bd09ll",
+                "latitude": 30.261138,
+                "longitude": 120.171047,
+            },
+        }
+    )
+
+    assert CandidateResearchService._core_equal(search, details)
+    assert not CandidateResearchService._core_equal(search, moved)
 
 
 def _request(run_id, *, place_width: int = 1, slot_count: int = 6):
@@ -148,6 +217,8 @@ async def test_public_initial_rejects_invalid_action_and_persists_actual_batch()
     repository.seed(hotel_ref, hotel_artifact)
     service = CandidateResearchService(runtime=runtime, map_adapter=FakeMapAdapter(), artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
     result = await service.research_initial(request)
+    assert operation.schemas[0].model_json_schema()["type"] == "object"
+    assert set(operation.schemas[0].model_json_schema()["properties"]) == {"output"}
     assert result.failure.code.value == "action_batch_invalid"
     assert len(repository.put_requests) == 2
     action_payload = repository.contents[repository.refs[request.operation_plan.iteration_slots[0].action_operation_id].artifact_id]
@@ -326,6 +397,27 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
     result = await service.research_initial(request)
 
     assert isinstance(result, CandidateResearchCompleted)
+    judgment_context = json.loads(operation.prompts[1].user_text)
+    assert judgment_context["current_evidence_handles"] == [
+        item["handle"] for item in judgment_context["evidence"]
+    ]
+    assert judgment_context["evidence"][0]["accepted_search"]["role"] == "attraction"
+    assert any(
+        item["accepted_search"] is not None
+        and item["accepted_search"]["interest"] == "人文"
+        for item in judgment_context["evidence"]
+    )
+    assert judgment_context["candidates"][0]["evidence_handles"]
+    second_judgment_context = json.loads(operation.prompts[3].user_text)
+    assert second_judgment_context["current_evidence_handles"] == [
+        item["handle"] for item in second_judgment_context["evidence"]
+    ]
+    assert second_judgment_context["current_evidence_handles"] == [
+        "e:8", "e:9", "e:10", "e:11"
+    ]
+    assert not set(second_judgment_context["current_evidence_handles"]) & set(
+        judgment_context["current_evidence_handles"]
+    )
     assert result.counts.attraction_count == 6
     assert result.counts.restaurant_count == 4
     assert result.counts.unique_eligible_count == 10
@@ -333,6 +425,10 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
     assert result.coverage.covered_meals == (MealIntent.LUNCH, MealIntent.DINNER)
     assert result.coverage.resolved_must_item_count == result.coverage.must_item_count == 0
     assert result.coverage.details_success_count == result.coverage.details_target == 4
+    assert all(
+        gap.gap_type != "candidate_details_missing"
+        for gap in service._gaps(service._runs[run_id], request)
+    )
     assert map_adapter.call_count == 12
     assert operation.call_count == 4
     assert {item.artifact_type for item in repository.put_requests} >= {
@@ -379,6 +475,34 @@ async def test_public_initial_action_validation_rejects_each_structural_shape(mu
     maps = FakeMapAdapter()
     service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=maps, artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
     result = await service.research_initial(request)
+    assert result.failure.code.value == "action_batch_invalid"
+    assert maps.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_public_initial_rejects_same_batch_duplicate_before_map_calls() -> None:
+    run_id = uuid4()
+    request, hotel_ref, hotel_artifact, _ = _request(run_id, place_width=2)
+    operation = FakeModelOperation()
+
+    def response(_count: int):
+        first = _first_objective_action(operation)
+        second = first.model_copy(update={"ordinal": 1})
+        return structured(ProposedActionBatch(actions=(first, second)))
+
+    operation.responses.append(response)
+    repository = FakeRepository()
+    repository.seed(hotel_ref, hotel_artifact)
+    maps = FakeMapAdapter()
+    service = CandidateResearchService(
+        runtime=FakeRuntime(operation),
+        map_adapter=maps,
+        artifact_repository=repository,
+        budget_manager=FakeBudgetManager(run_id),
+    )
+
+    result = await service.research_initial(request)
+
     assert result.failure.code.value == "action_batch_invalid"
     assert maps.call_count == 0
 

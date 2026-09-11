@@ -22,7 +22,13 @@ def _fresh_patch(patch: JudgmentPatch) -> JudgmentPatch:
     return TypeAdapter(JudgmentPatch).validate_json(encoded, strict=True)
 
 
-def validate_judgment_patch(*, patch: JudgmentPatch, candidate_handles: Sequence[str], evidence_handles: Sequence[str]) -> JudgmentPatch:
+def validate_judgment_patch(
+    *,
+    patch: JudgmentPatch,
+    candidate_handles: Sequence[str],
+    evidence_handles: Sequence[str],
+    candidate_evidence_handles: Mapping[str, Sequence[str]],
+) -> JudgmentPatch:
     fresh = _fresh_patch(patch)
     candidates = set(candidate_handles)
     evidence = set(evidence_handles)
@@ -32,10 +38,25 @@ def validate_judgment_patch(*, patch: JudgmentPatch, candidate_handles: Sequence
         raise ValueError("invalid candidate handle directory")
     if any(evidence_handle(int(item[2:])) != item for item in evidence if item.startswith("e:") and item[2:].isdigit()) or any(not (item.startswith("e:") and item[2:].isdigit()) for item in evidence):
         raise ValueError("invalid evidence handle directory")
+    if set(candidate_evidence_handles) != candidates:
+        raise ValueError("candidate evidence directory must cover visible candidates")
+    owned_evidence: dict[str, set[str]] = {}
+    for handle, values in candidate_evidence_handles.items():
+        sequence = tuple(values)
+        owned = set(sequence)
+        if len(owned) != len(sequence) or not owned.issubset(evidence):
+            raise ValueError("invalid candidate evidence directory")
+        owned_evidence[handle] = owned
+
+    def require_owned(candidate: str, handles: Sequence[EvidenceHandle]) -> None:
+        if any(item.handle_id not in owned_evidence[candidate] for item in handles):
+            raise ValueError("evidence handle does not belong to candidate")
+
     seen: set[str] = set()
     for update in (*fresh.role_updates, *fresh.interest_updates, *fresh.meal_updates):
         if update.candidate_handle not in candidates:
             raise ValueError("unknown candidate handle")
+        require_owned(update.candidate_handle, update.evidence_handles)
         for item in update.evidence_handles:
             if item.handle_id not in evidence:
                 raise ValueError("unknown evidence handle")
@@ -45,6 +66,13 @@ def validate_judgment_patch(*, patch: JudgmentPatch, candidate_handles: Sequence
             raise ValueError("unknown evaluated candidate handle")
         if any(item.candidate_handle not in candidates for item in update.exceptions):
             raise ValueError("unknown exception candidate handle")
+        exception_candidates = {item.candidate_handle for item in update.exceptions}
+        for candidate in update.evaluated_candidate_handles:
+            if candidate in exception_candidates:
+                continue
+            require_owned(candidate, update.default_evidence_handles)
+        for exception in update.exceptions:
+            require_owned(exception.candidate_handle, exception.evidence_handles)
         for item in (*update.default_evidence_handles, *(handle for exception in update.exceptions for handle in exception.evidence_handles)):
             if item.handle_id not in evidence:
                 raise ValueError("unknown evidence handle")

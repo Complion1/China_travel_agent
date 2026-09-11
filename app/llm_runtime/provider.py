@@ -24,6 +24,11 @@ from app.llm_runtime.settings import DeepSeekSettings
 _KNOWN_FINISH_REASONS = frozenset(
     {"stop", "tool_calls", "length", "content_filter", "insufficient_system_resource"}
 )
+_PROVIDER_MODEL_ALIASES = {"deepseek-flash": "deepseek-v4-flash"}
+
+
+def _canonical_model_name(model_name: str) -> str:
+    return _PROVIDER_MODEL_ALIASES.get(model_name, model_name)
 
 
 def _classify_status(status_code: int) -> tuple[str, bool]:
@@ -173,6 +178,7 @@ def _normalize_response(raw: Mapping[str, Any]) -> ProviderResponse | ProviderFa
     model_name = raw.get("model")
     if finish_reason not in _KNOWN_FINISH_REASONS or not isinstance(model_name, str) or not model_name:
         return _malformed()
+    model_name = _canonical_model_name(model_name)
     usage = _normalized_usage(raw.get("usage") if isinstance(raw.get("usage"), Mapping) else None)
     if usage is None:
         return _malformed()
@@ -328,6 +334,7 @@ class LangChainDeepSeekAdapter:
         model_name = metadata.get("model_name", metadata.get("model"))
         if usage is None or finish_reason not in _KNOWN_FINISH_REASONS or not isinstance(model_name, str) or not model_name:
             return _malformed()
+        model_name = _canonical_model_name(model_name)
         tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", []))
         if tool_calls is None:
             return _malformed()
@@ -356,11 +363,11 @@ class LangChainDeepSeekAdapter:
 
     def list_models(self) -> tuple[str, ...]:
         page = self._build_model(REQUIREMENT_EXTRACTION_PROFILE).root_client.models.list()
-        return tuple(model.id for model in page.data)
+        return tuple(dict.fromkeys(_canonical_model_name(model.id) for model in page.data))
 
     async def alist_models(self) -> tuple[str, ...]:
         page = await self._build_model(REQUIREMENT_EXTRACTION_PROFILE).root_async_client.models.list()
-        return tuple(model.id for model in page.data)
+        return tuple(dict.fromkeys(_canonical_model_name(model.id) for model in page.data))
 
     @staticmethod
     def _close_sync_client(client: Any) -> None:

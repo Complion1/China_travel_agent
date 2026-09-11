@@ -43,8 +43,8 @@ def _read_prompt(resource_name: str, expected_sha256: str) -> str:
 
 
 # Values are intentionally literals: changing a resource without changing code fails closed.
-ACTION_PROMPT_SHA256 = "b618a9840d52a1fa26b74906f6b3eceac370ec550cc2e7600672ee9ee5539b82"
-OBSERVATION_PROMPT_SHA256 = "51780cc5a21c5ee7d85c254417a56aa38f9222aee879771834e1e704a3f095ea"
+ACTION_PROMPT_SHA256 = "e418faa407bc716bfca1192f05248095fe681f47168ffd55d7b017269af374e4"
+OBSERVATION_PROMPT_SHA256 = "db587f2cbf3d8faecc6b8d8fcffba0a670525e26ca32a1f73551f0c8faacdbcc"
 ACTION_PROMPT_CONTENT_DIGEST = "sha256:" + ACTION_PROMPT_SHA256
 OBSERVATION_PROMPT_CONTENT_DIGEST = "sha256:" + OBSERVATION_PROMPT_SHA256
 

@@ -73,6 +73,56 @@ services:
     cap_drop:
       - ALL
 
+  module09-live-test:
+    <<: *agent-security
+    profiles: ["live"]
+    image: china-travel-agent:module09-live-${MODULE09_LIVE_IMAGE_TAG:-local}
+    build:
+      <<: *agent-build
+      target: test
+    environment:
+      TZ: Asia/Shanghai
+      HOME: /tmp/module09-home
+      XDG_CACHE_HOME: /tmp/module09-cache
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-__DEEPSEEK_API_KEY_REQUIRED__}
+      BAIDU_MAPS_API_KEY: ${BAIDU_MAPS_API_KEY:-__BAIDU_MAPS_API_KEY_REQUIRED__}
+    cap_drop:
+      - ALL
+    command:
+      - python
+      - -m
+      - pytest
+      - -q
+      - -p
+      - no:cacheprovider
+      - tests/live/itinerary_planning/test_live_planning.py
+
+  module070809-live-test:
+    <<: *agent-security
+    profiles: ["live"]
+    image: china-travel-agent:module070809-live-${MODULE070809_LIVE_IMAGE_TAG:-local}
+    build:
+      <<: *agent-build
+      target: test
+    environment:
+      TZ: Asia/Shanghai
+      HOME: /tmp/module070809-home
+      XDG_CACHE_HOME: /tmp/module070809-cache
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-__DEEPSEEK_API_KEY_REQUIRED__}
+      BAIDU_MAPS_API_KEY: ${BAIDU_MAPS_API_KEY:-__BAIDU_MAPS_API_KEY_REQUIRED__}
+      MODULE070809_LIVE_RUNS: "1"
+    cap_drop:
+      - ALL
+    command:
+      - python
+      - -m
+      - pytest
+      - -q
+      - -s
+      - -p
+      - no:cacheprovider
+      - tests/live/travel_pipeline/test_live_modules_07_08_09.py
+
   postgres:
     profiles: ["production"]
     image: ${POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:16-alpine}

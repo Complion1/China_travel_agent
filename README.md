@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–08 已完成并进入本地 `main` 稳定基线；Module 08 的候选研究循环实现、离线 Gate、独立代码审查、MODULE-CLOSEOUT、提交和本地 fast-forward 合并均已完成。Module 08 coverage 的真实结果及用户接受的一次性演示例外见实施状态快照；push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–08 已完成并进入本地 `main` 稳定基线；Module 09 的结构化输入 Demo 已在 `feature/module-09-itinerary-planning` 工作树完成实现、离线 Gate 和三次真实 DeepSeek Flash/百度地图 E2E，MODULE-CLOSEOUT 已在工作树封板，代码尚未提交或合并。生产 LLM Profile 继续使用 DeepSeek V4 Flash。各模块的真实结果与边界见实施状态快照；push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
 
 ## 架构基线
 
@@ -44,16 +44,20 @@ CLI Demo
 - [`docs/07_hotel_candidate_selection_vibe_coding.md`](./docs/07_hotel_candidate_selection_vibe_coding.md)：模块 07 精确执行契约与 MODULE-CLOSEOUT 路由。
 - [`docs/08_candidate_research_loop.md`](./docs/08_candidate_research_loop.md)：模块 08 受控候选研究循环、证据、预算、Artifact 与 replay 合同。
 - [`docs/08_candidate_research_loop_vibe_coding.md`](./docs/08_candidate_research_loop_vibe_coding.md)：模块 08 精确执行契约、Docker Gate 与 MODULE-CLOSEOUT 路由。
+- [`docs/09_itinerary_planning_loop.md`](./docs/09_itinerary_planning_loop.md)：模块 09 结构化输入、受控规划循环、路线证据、Artifact 和 replay 合同。
+- [`docs/09_itinerary_planning_loop_vibe_coding.md`](./docs/09_itinerary_planning_loop_vibe_coding.md)：模块 09 精确执行契约、Docker Gate、真实联网资格和 MODULE-CLOSEOUT 路由。
 
 权威层级和冲突处理以主设计第 1 节为准。后续模块必须按路线图中的 `depends_on` 和模块 acceptance gate 开工。`_vibe_coding.md` 专门面向能力较弱的编码模型，必须保留精确文件白名单、符号、算法、阶段 Gate、测试矩阵、停止条件和报告模板，不能压缩成需要模型自行推导的摘要。
 
 ## 当前边界
 
-模块 01–05 已完成当前实现与离线验收：模块 05 unit `232 passed`、contract `65 passed`，line `97.7777777778%`、branch `95.0000000000%`、combined `97.0491803279%`；完整 Docker 离线 unit/contract 回归为 `935 passed`。模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`；模块 01、03、04 的本轮受影响回归分别为 `182`、`78`、`235 passed`。模块 02 正式 live 为 `1/1`，模块 03 历史正式 live 为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
+模块 01–05 已完成当前实现与离线验收：模块 05 unit `232 passed`、contract `65 passed`，line `97.7777777778%`、branch `95.0000000000%`、combined `97.0491803279%`；完整 Docker 离线 unit/contract 回归为 `935 passed`。模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`；模块 01、03、04 的本轮受影响回归分别为 `182`、`78`、`235 passed`。模块 02 的 DeepSeek V4 Flash capability live 已通过，模块 03 的 Flash live 资格为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
 
 模块 06 提供百度地图 typed adapter、七项核心 MCP Gateway 能力、技术限流、生命周期和安全边界。本次 closeout 最终离线快照为：Module 06 + M2 offline `222 passed`；coverage `221 passed`，line `1945/2002`（`97.15%`）、branch `544/570`（`95.44%`）、combined `2489/2572`（`96.77%`）；Module 04 回归 `235 passed`；完整 unit/contract `1156 passed`。当前源码七项核心 live 和 M2 live 已通过，地图调起当前为 `NOT_AVAILABLE/NOT_IN_MANIFEST`；不在此记录地址、坐标、UID、天气、路线、指令或 Secret。
 
 模块 08 提供受控候选研究循环、initial/supplemental、候选证据、预算、Artifact、replay、并发与失败边界。代码最终版 Module 08 Gate 为 `317 passed`，上游 acceptance 为 `12 passed`，互补 unit/contract 为 `1360 passed`；唯一 coverage 为 line `83.3743%`、branch `69.7895%`、combined `79.3255%`。branch/combined 未达到默认 80%，用户已明确接受仅绑定当前代码哈希的一次性演示例外；这不是数值达标或默认门槛下调。Module 08 无新增依赖和数据库 migration，未执行 live provider、网络或 Secret 测试。
+
+模块 09 提供结构化输入范围内的受控行程规划、initial/resume、六工具循环、真实路线证据、严格提交 Gate、Artifact、预算和 replay。生产 LLM Profile 锁定为 `deepseek-v4-flash`；Provider 仅把服务端当前返回的 `deepseek-flash` 归一化为该公共规范名。离线 Module 09 Gate、互补 unit/contract、coverage 和 compileall 已通过；同时调用 DeepSeek Flash 与百度地图 Route Matrix/Directions 的公共 `plan_initial` E2E 已用最终源码连续通过三次。文本作息、活动时刻/时长、交通限制等未被上游结构化的功能继续延期，不宣称已满足；完整 Demo 主链仍由后续 Module 13/14 装配。
 
 模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。模块 05 实现需求子图、同进程 interrupt/resume 和严格 checkpoint；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前开发没有客户端、FastAPI 或 Web；模块 14 只规划薄 CLI 和 Application Service。
 
@@ -65,7 +69,7 @@ CLI Demo
 
 ## Docker 开发与测试
 
-当前容器承诺复现已经实现的模块 01–08，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入 `app.requirements`、`app.llm_runtime`、`app.requirement_extraction`、`app.workflow_contracts`、`app.requirement_subgraph`、`app.baidu_map`、`app.hotel_selection` 和 `app.candidate_research`，并输出 `modules 01-08 import successfully`；test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+当前容器承诺复现已经实现的模块 01–09，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入模块 01–09 的九个生产包，并输出 `modules 01-09 import successfully`；test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
@@ -94,6 +98,12 @@ docker compose --profile test run --rm test
 
 ```powershell
 docker compose --profile live run --rm live-test
+```
+
+Module 09 的真实 E2E 会同时调用 DeepSeek 和百度地图，只用于重新资格，不能作为默认离线测试运行：
+
+```powershell
+docker compose --profile live run --rm module09-live-test
 ```
 
 PostgreSQL 是 Production v1 的预留服务，当前模块不会连接它。需要单独验证数据库容器时运行：

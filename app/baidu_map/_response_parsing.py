@@ -297,7 +297,13 @@ def _place_summary(raw_value: object, capability: MapCapability) -> PlaceSummary
             incomplete = True
         else:
             longitude = _number(location["lng"], capability, minimum=-180, maximum=180)
-    category = _optional_text(raw.get("tag"), capability)
+    category_value = raw.get("tag")
+    if category_value is None and raw.get("detail_info") is not None:
+        detail = _object(raw["detail_info"], capability)
+        category_value = detail.get("tag")
+        if category_value is None:
+            category_value = detail.get("classified_poi_tag")
+    category = _optional_text(category_value, capability)
     if incomplete:
         return None
     assert uid is not None and name is not None and address is not None
