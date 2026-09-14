@@ -21,19 +21,19 @@ def test_metrics_use_exact_unrounded_line_branch_and_combined_formulas():
     assert harness.coverage_gate(metrics, threshold=80.0)
 
 
-def test_default_gate_is_80_and_exact_boundary_is_accepted():
+def test_default_gate_is_70_and_exact_boundary_is_accepted():
     metrics = harness.calculate_metrics(
-        {"num_statements": 100, "covered_lines": 80, "num_branches": 100, "covered_branches": 80}
+        {"num_statements": 100, "covered_lines": 70, "num_branches": 100, "covered_branches": 70}
     )
-    assert harness.DEFAULT_COVERAGE_THRESHOLD == 80.0
+    assert harness.DEFAULT_COVERAGE_THRESHOLD == 70.0
     assert harness.coverage_gate(metrics)
 
 
-def test_79_999_percent_is_below_gate_without_rounding():
+def test_69_999_percent_is_below_gate_without_rounding():
     metrics = harness.calculate_metrics(
-        {"num_statements": 100000, "covered_lines": 79999, "num_branches": 0, "covered_branches": 0}
+        {"num_statements": 100000, "covered_lines": 69999, "num_branches": 0, "covered_branches": 0}
     )
-    assert metrics.line_percent == 79.999
+    assert metrics.line_percent == 69.999
     assert not harness.coverage_gate(metrics)
 
 

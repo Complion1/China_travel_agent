@@ -2931,7 +2931,7 @@ class CandidateResearchService:
             return False
         if state.counts.attraction_count < state.counts.attraction_target or state.counts.restaurant_count < state.counts.restaurant_target:
             return False
-        if state.coverage.details_success_count < state.coverage.details_target or any(item.state is CandidateState.CONFLICTED for item in state.candidates):
+        if state.coverage.details_success_count < state.coverage.details_target:
             return False
         by_ordinal = {item.admission_ordinal: item for item in state.candidates}
         for group in state.requirement_group_states:

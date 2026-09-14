@@ -1092,8 +1092,6 @@ def _candidate_set_state_complete(state: CandidateSetStateSnapshot) -> bool:
         return False
     if state.coverage.details_success_count < state.coverage.details_target:
         return False
-    if any(candidate.state is CandidateState.CONFLICTED for candidate in state.candidates):
-        return False
     by_ordinal = {candidate.admission_ordinal: candidate for candidate in state.candidates}
     for group in state.requirement_group_states:
         overrides = {item.candidate_ordinal: item for item in group.exceptions}

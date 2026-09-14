@@ -31,9 +31,9 @@ from .models import (
 
 
 FINGERPRINT_VERSION = "planning-fp-v1"
-INITIAL_CONTEXT_FINGERPRINT_VERSION = "planning-fp-v2"
-RESUME_FINGERPRINT_VERSION = "planning-resume-fp-v3"
-CAPABILITY_SCOPE = "module09-structured-demo-v1"
+INITIAL_CONTEXT_FINGERPRINT_VERSION = "planning-fp-v3"
+RESUME_FINGERPRINT_VERSION = "planning-resume-fp-v4"
+CAPABILITY_SCOPE = "module09-structured-demo-v2"
 
 
 def _normal(value: object) -> object:

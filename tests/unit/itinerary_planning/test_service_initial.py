@@ -66,7 +66,10 @@ from app.itinerary_planning import (
     ItineraryPlanningUsageError,
 )
 from app.itinerary_planning.models import (
+    BackupOption,
     CalculateRouteMatrixArgs,
+    DayPlan,
+    ItineraryDraft,
     PlanningDayKind,
     ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
     ITINERARY_PLANNING_ITERATION_BUDGET_KEY,
@@ -87,6 +90,7 @@ from app.itinerary_planning.models import (
     HotelLocationRef,
     RequestCandidateSupplementArgs,
     SubmitItineraryArgs,
+    ScheduledVisit,
     TimeInterval,
     TransportSemantic,
     VisitKind,
@@ -157,8 +161,19 @@ def _confirmed() -> ConfirmedTravelRequirement:
             destination="杭州",
             time_window=TravelTimeWindow(
                 sightseeing_start_date="2026-09-03", sightseeing_end_date="2026-09-03", sightseeing_days=1,
+                arrival=TravelTimeWindowArrival(
+                    hub_name="杭州东站", hub_type=HubType.RAILWAY_STATION,
+                    local_datetime="2026-09-02 18:00",
+                ),
+                departure=TravelTimeWindowDeparture(
+                    hub_name="杭州东站", hub_type=HubType.RAILWAY_STATION,
+                    local_datetime="2026-09-04 18:00",
+                ),
             ),
-            preferences=TravelPreferences(interests=[InterestTag.CULTURE, InterestTag.NATURE]),
+            preferences=TravelPreferences(
+                interests=[InterestTag.CULTURE, InterestTag.NATURE],
+                agent_decides_pace=True,
+            ),
         ),
         metadata_without_raw_evidence=FieldMetadataRegistry(),
         confirmation_summary_digest="sha256:" + "c" * 64,
@@ -373,6 +388,93 @@ def _seed_requirement_groups(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    (
+        "destination_missing",
+        "start_missing",
+        "end_missing",
+        "days_missing",
+        "days_over_limit",
+        "days_mismatch",
+        "arrival_hub_missing",
+        "arrival_type_missing",
+        "arrival_time_missing",
+        "arrival_after_start",
+        "departure_hub_missing",
+        "departure_type_missing",
+        "departure_time_missing",
+        "departure_before_end",
+        "pace_missing",
+        "pace_conflicting",
+        "interests_missing",
+        "interests_conflicting",
+    ),
+)
+async def test_initial_rejects_invalid_supported_module01_fields_before_upstream_reads(
+    case: str,
+) -> None:
+    service, request, runtime, operation, repository = _fixture(
+        ToolTurnCompleted(final_text="不应进入规划循环", metadata=_metadata()),
+    )
+    requirement = request.confirmed.requirement
+    window = requirement.time_window
+    preferences = requirement.preferences
+    if case == "destination_missing":
+        requirement = requirement.model_copy(update={"destination": None})
+    elif case == "start_missing":
+        window = window.model_copy(update={"sightseeing_start_date": None})
+    elif case == "end_missing":
+        window = window.model_copy(update={"sightseeing_end_date": None})
+    elif case == "days_missing":
+        window = window.model_copy(update={"sightseeing_days": None})
+    elif case == "days_over_limit":
+        window = window.model_copy(update={"sightseeing_days": 61})
+    elif case == "days_mismatch":
+        window = window.model_copy(update={"sightseeing_days": 2})
+    elif case == "arrival_hub_missing":
+        window = window.model_copy(update={"arrival": window.arrival.model_copy(update={"hub_name": None})})
+    elif case == "arrival_type_missing":
+        window = window.model_copy(update={"arrival": window.arrival.model_copy(update={"hub_type": None})})
+    elif case == "arrival_time_missing":
+        window = window.model_copy(update={"arrival": window.arrival.model_copy(update={"local_datetime": None})})
+    elif case == "arrival_after_start":
+        window = window.model_copy(update={"arrival": window.arrival.model_copy(update={"local_datetime": "2026-09-04 09:00"})})
+    elif case == "departure_hub_missing":
+        window = window.model_copy(update={"departure": window.departure.model_copy(update={"hub_name": None})})
+    elif case == "departure_type_missing":
+        window = window.model_copy(update={"departure": window.departure.model_copy(update={"hub_type": None})})
+    elif case == "departure_time_missing":
+        window = window.model_copy(update={"departure": window.departure.model_copy(update={"local_datetime": None})})
+    elif case == "departure_before_end":
+        window = window.model_copy(update={"departure": window.departure.model_copy(update={"local_datetime": "2026-09-02 18:00"})})
+    elif case == "pace_missing":
+        preferences = preferences.model_copy(update={"pace": None, "agent_decides_pace": False})
+    elif case == "pace_conflicting":
+        preferences = preferences.model_copy(update={"pace": TravelPace.NORMAL, "agent_decides_pace": True})
+    elif case == "interests_missing":
+        preferences = preferences.model_copy(update={"interests": None, "agent_decides_interests": False})
+    elif case == "interests_conflicting":
+        preferences = preferences.model_copy(update={"agent_decides_interests": True})
+    else:
+        raise AssertionError(case)
+    requirement = requirement.model_copy(update={"time_window": window, "preferences": preferences})
+    confirmed = request.confirmed.model_copy(update={"requirement": requirement})
+
+    result = await service.plan_initial(request.model_copy(update={"confirmed": confirmed}))
+
+    assert isinstance(result, ItineraryPlanningFailed), result.model_dump(mode="json")
+    assert result.failure.code is PlanningFailureCode.INPUT_INVALID
+    assert repository.get_calls == []
+    assert repository.put_requests == []
+    assert runtime.start_count == 0
+    assert operation.call_count == 0
+    assert not service._map_adapter.geocode_calls
+    assert not service._map_adapter.matrix_calls
+    assert not service._map_adapter.directions_calls
+
+
+@pytest.mark.asyncio
 async def test_missing_confirmed_must_group_is_rejected_before_any_side_effect() -> None:
     service, request, runtime, operation, repository = _fixture(
         ToolTurnCompleted(final_text="不应进入规划循环", metadata=_metadata()),
@@ -473,6 +575,56 @@ async def test_initial_ordinary_text_returns_incomplete_and_exact_terminal_repla
     assert len(repository.put_requests) == 2
     assert '"direction_slots_total":0' in operation.prompts[0].user_text
     assert '"remaining_direction_slots":0' in operation.prompts[0].user_text
+
+
+@pytest.mark.asyncio
+async def test_initial_projects_supported_structured_fields_but_not_deferred_text() -> None:
+    service, request, _, operation, _ = _fixture(
+        ToolTurnCompleted(final_text="结束", metadata=_metadata()),
+    )
+    preferences = request.confirmed.requirement.preferences.model_copy(update={
+        "transport_preferences": "DEFERRED_TRANSPORT_SENTINEL",
+        "hotel_preferences": "DEFERRED_HOTEL_SENTINEL",
+        "daily_time_preferences": "DEFERRED_DAILY_SENTINEL",
+        "free_text_notes": "DEFERRED_NOTES_SENTINEL",
+    })
+    constraints = request.confirmed.requirement.constraints.model_copy(update={
+        "mobility_constraints": "DEFERRED_MOBILITY_SENTINEL",
+        "dietary_restrictions": "DEFERRED_DIET_SENTINEL",
+    })
+    requirement = request.confirmed.requirement.model_copy(update={
+        "preferences": preferences,
+        "constraints": constraints,
+    })
+    request = request.model_copy(update={
+        "confirmed": request.confirmed.model_copy(update={"requirement": requirement}),
+    })
+
+    result = await service.plan_initial(request)
+
+    assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
+    context_text = operation.prompts[0].user_text
+    context = json.loads(
+        context_text.split("BEGIN_TYPED_PLANNING_DATA\n", 1)[1].split(
+            "\nEND_TYPED_PLANNING_DATA", 1
+        )[0]
+    )
+    assert context["destination"] == "杭州"
+    assert context["sightseeing_start_date"] == "2026-09-03"
+    assert context["sightseeing_end_date"] == "2026-09-03"
+    assert context["sightseeing_days"] == 1
+    assert context["agent_decides_pace"] is True
+    assert context["confirmed"]["arrival"]["local_datetime"] == "2026-09-02 18:00"
+    assert context["confirmed"]["departure"]["local_datetime"] == "2026-09-04 18:00"
+    for sentinel in (
+        "DEFERRED_TRANSPORT_SENTINEL",
+        "DEFERRED_HOTEL_SENTINEL",
+        "DEFERRED_DAILY_SENTINEL",
+        "DEFERRED_NOTES_SENTINEL",
+        "DEFERRED_MOBILITY_SENTINEL",
+        "DEFERRED_DIET_SENTINEL",
+    ):
+        assert sentinel not in context_text
 
 
 @pytest.mark.asyncio
@@ -894,8 +1046,14 @@ async def test_confirmed_hubs_are_geocoded_in_order_and_persisted_as_observation
         ToolTurnCompleted(final_text="结束", metadata=_metadata()),
     )
     window = request.confirmed.requirement.time_window.model_copy(update={
-        "arrival": TravelTimeWindowArrival(hub_name="杭州东站", hub_type=HubType.RAILWAY_STATION),
-        "departure": TravelTimeWindowDeparture(hub_name="杭州东站", hub_type=HubType.RAILWAY_STATION),
+        "arrival": TravelTimeWindowArrival(
+            hub_name="杭州东站", hub_type=HubType.RAILWAY_STATION,
+            local_datetime="2026-09-02 18:00",
+        ),
+        "departure": TravelTimeWindowDeparture(
+            hub_name="杭州东站", hub_type=HubType.RAILWAY_STATION,
+            local_datetime="2026-09-04 18:00",
+        ),
     })
     confirmed = request.confirmed.model_copy(update={
         "requirement": request.confirmed.requirement.model_copy(update={"time_window": window}),
@@ -1116,7 +1274,7 @@ _R16_POLICY_CASES = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ("supported", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
+@pytest.mark.parametrize("case", ("supported", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
 async def test_service_completed_requires_real_non_transit_day_meals_routes_and_backups(case: str) -> None:
     service, request, _, operation, repository = _fixture()
     if case == "must_valid":
@@ -1289,7 +1447,7 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
     if case in _R16_POLICY_CASES:
         preferences = request.confirmed.requirement.preferences.model_copy(update={
             "pace": TravelPace.RELAXED if case.startswith("r16_pace_") else None,
-            "agent_decides_pace": False,
+            "agent_decides_pace": not case.startswith("r16_pace_"),
             "daily_time_preferences": (
                 None
                 if "daily_source_missing" in case
@@ -1450,6 +1608,15 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
     if case in {"unapproved_early_window", "r12_fake_user_anchor", "r12_fake_verified_anchor"}:
         visits = (visits[0].model_copy(update={"start_at": datetime(2026, 9, 3, 5, 30, tzinfo=shanghai), "end_at": datetime(2026, 9, 3, 6, 30, tzinfo=shanghai)}), *visits[1:])
         route_values[1] = route_values[1].model_copy(update={"start_at": datetime(2026, 9, 3, 5, tzinfo=shanghai), "end_at": datetime(2026, 9, 3, 5, 30, tzinfo=shanghai)})
+    if case == "expanded_default_window":
+        route_values[1] = route_values[1].model_copy(update={
+            "start_at": datetime(2026, 9, 3, 7, 30, tzinfo=shanghai),
+            "end_at": datetime(2026, 9, 3, 8, 0, tzinfo=shanghai),
+        })
+        route_values[4] = route_values[4].model_copy(update={
+            "start_at": datetime(2026, 9, 3, 21, 30, tzinfo=shanghai),
+            "end_at": datetime(2026, 9, 3, 22, 0, tzinfo=shanghai),
+        })
     if case in _R07_MEAL_CASES:
         _, dinner_start_hour, _ = _R07_MEAL_CASES[case]
         dinner_start = datetime(2026, 9, 3, dinner_start_hour, tzinfo=shanghai)
@@ -1476,10 +1643,11 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
             "start_at": dinner_end,
             "end_at": dinner_end + timedelta(minutes=30),
         })
-    day_open_end_hour = 22 if case in _R07_MEAL_CASES or case in _R08_MEAL_CASES or case in _R09_MEAL_SOURCE_CASES or case in _R10_MEAL_SOURCE_CASES or case in _R11_MEAL_SOURCE_CASES else 21
+    day_open_start = datetime(2026, 9, 3, 7, 30, tzinfo=shanghai) if case == "expanded_default_window" else datetime(2026, 9, 3, 9, tzinfo=shanghai)
+    day_open_end = datetime(2026, 9, 3, 22, tzinfo=shanghai) if case == "expanded_default_window" or case in _R07_MEAL_CASES or case in _R08_MEAL_CASES or case in _R09_MEAL_SOURCE_CASES or case in _R10_MEAL_SOURCE_CASES or case in _R11_MEAL_SOURCE_CASES else datetime(2026, 9, 3, 21, tzinfo=shanghai)
     proposal = ProposedItineraryDraft(
         arrival_transfer=ProposedBoundaryTransfer(transfer_kind="arrival", hub_handle="hub-location-arrival", hotel_handle="hotel-handle", route_leg=route_values[0]),
-            days=(ProposedDayPlan(date=date(2026, 9, 3), day_kind=PlanningDayKind.PARTIAL if case in _R05_BOUNDARY_CASES else PlanningDayKind.FULL, theme="杭州文化慢游", open_intervals=(TimeInterval(start_at=datetime(2026, 9, 3, 9, tzinfo=shanghai), end_at=datetime(2026, 9, 3, day_open_end_hour, tzinfo=shanghai)),), visits=visits, route_legs=tuple(route_values[1:5]), backups=backup_values),),
+            days=(ProposedDayPlan(date=date(2026, 9, 3), day_kind=PlanningDayKind.PARTIAL if case in _R05_BOUNDARY_CASES else PlanningDayKind.FULL, theme="杭州文化慢游", open_intervals=(TimeInterval(start_at=day_open_start, end_at=day_open_end),), visits=visits, route_legs=tuple(route_values[1:5]), backups=backup_values),),
         departure_transfer=ProposedBoundaryTransfer(transfer_kind="departure", hub_handle="hub-location-departure", hotel_handle="hotel-handle", route_leg=route_values[5]),
         upstream_gap_ids=(),
     )
@@ -2285,7 +2453,7 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
         assert result.budgets.direction_calls_consumed == 6
         return
 
-    if case not in {"supported", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "must_valid"}:
+    if case not in {"supported", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "must_valid"}:
         assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
         assert replay == result
         if case == "meal_intent_mismatch_feedback":
@@ -2362,8 +2530,74 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
         persisted = (await repository.get(result.itinerary_ref, expected_model=__import__("app.itinerary_planning", fromlist=["ItineraryPlanningArtifact"]).ItineraryPlanningArtifact)).content.record
         assert persisted.draft is not None
         assert persisted.draft.days[0].visits[0].must_group_ids == (_expected_must_groups(request.confirmed)[0].group_id,)
+    if case == "expanded_default_window":
+        assert result.itinerary_ref is not None
+        persisted = (await repository.get(result.itinerary_ref, expected_model=__import__("app.itinerary_planning", fromlist=["ItineraryPlanningArtifact"]).ItineraryPlanningArtifact)).content.record
+        assert persisted.draft is not None
+        day = persisted.draft.days[0]
+        local_start = day.open_intervals[0].start_at_utc.astimezone(shanghai)
+        local_end = day.open_intervals[0].end_at_utc.astimezone(shanghai)
+        outbound = day.route_legs[0].interval.start_at_utc.astimezone(shanghai)
+        returned = day.route_legs[-1].interval.end_at_utc.astimezone(shanghai)
+        assert (local_start.hour, local_start.minute) == (7, 30)
+        assert (local_end.hour, local_end.minute) == (22, 0)
+        assert outbound == local_start
+        assert returned == local_end
     if case == "runtime_supported":
         assert provider.call_count == 4
+
+
+def test_rejected_prefix_accepts_a_later_attraction_as_the_backup_core() -> None:
+    service, _, _, _, _ = _fixture()
+    visits = (
+        ScheduledVisit.model_construct(
+            visit_id="first-attraction",
+            visit_kind=VisitKind.ATTRACTION,
+            must_group_ids=(),
+        ),
+        ScheduledVisit.model_construct(
+            visit_id="lunch",
+            visit_kind=VisitKind.LUNCH,
+            must_group_ids=(),
+        ),
+        ScheduledVisit.model_construct(
+            visit_id="later-attraction",
+            visit_kind=VisitKind.ATTRACTION,
+            must_group_ids=(),
+        ),
+        ScheduledVisit.model_construct(
+            visit_id="dinner",
+            visit_kind=VisitKind.DINNER,
+            must_group_ids=(),
+        ),
+    )
+    backups = (
+        BackupOption.model_construct(
+            backup_kind="attraction",
+            core_visit_id="later-attraction",
+        ),
+        BackupOption.model_construct(
+            backup_kind="lunch",
+            core_visit_id="lunch",
+        ),
+    )
+    prefix = ItineraryDraft.model_construct(
+        days=(
+            DayPlan.model_construct(
+                date=date(2026, 9, 18),
+                visits=visits,
+                backups=backups,
+            ),
+        ),
+    )
+    run = SimpleNamespace(draft=None, pending_gaps=[])
+
+    assert service._retain_prefix(run, prefix) is True
+    assert run.draft is prefix
+    assert [
+        (gap.backup_kind, gap.core_visit_id)
+        for gap in run.pending_gaps
+    ] == [("dinner", "dinner")]
 
 
 @pytest.mark.asyncio

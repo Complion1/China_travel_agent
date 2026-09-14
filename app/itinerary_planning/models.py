@@ -1461,7 +1461,12 @@ class ItineraryPlanningFailed(_Model):
                 "itinerary_planning.directions_observation",
                 "itinerary_planning.itinerary",
             }
-            if self.failure_artifact_ref.artifact_type not in allowed or self.failure_artifact_ref.schema_version != "1.0":
+            expected_schema_version = (
+                "3.0"
+                if self.failure_artifact_ref.artifact_type == "itinerary_planning.model_action"
+                else "1.0"
+            )
+            if self.failure_artifact_ref.artifact_type not in allowed or self.failure_artifact_ref.schema_version != expected_schema_version:
                 raise ValueError("failure artifact ref must be a Module 09 artifact")
         if (self.retryable, self.possible_duplicate) != (self.failure.retryable, self.failure.possible_duplicate):
             raise ValueError("top-level failure flags must equal failure")

@@ -939,10 +939,10 @@ ItineraryRecord: TypeAlias = Annotated[
 
 
 class ItineraryPlanningModelActionArtifact(_ArtifactModel):
-    schema_version: Literal["2.0"]
+    schema_version: Literal["3.0"]
     request_digest: ArtifactDigest
     invocation_index: Annotated[int, Field(ge=0, le=11)]
-    prompt_version: Literal["planning-v2"]
+    prompt_version: Literal["planning-v3"]
     prompt_hash: ArtifactDigest
     action_kind: Literal["tool_calls", "final_text", "llm_failure"]
     call_summaries: Annotated[tuple[ModelCallSummary, ...], Field(min_length=0, max_length=71)]
@@ -975,7 +975,7 @@ class ItineraryPlanningHubGeocodeObservationArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _observation(self) -> ItineraryPlanningHubGeocodeObservationArtifact:
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version != "2.0":
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version != "3.0":
             raise ValueError("observation must reference a model action")
         if self.observation_status == "success":
             if self.success_candidate is None or self.ambiguous_candidates or self.provenance is None or self.provenance.capability is not MapCapability.GEOCODING or not self.provenance.verified or self.map_failure is not None:
@@ -1010,7 +1010,7 @@ class ItineraryPlanningRouteMatrixObservationArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _observation(self) -> ItineraryPlanningRouteMatrixObservationArtifact:
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version != "2.0":
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version != "3.0":
             raise ValueError("observation must reference a model action")
         actual = tuple((cell.origin_index, cell.destination_index) for cell in self.cells)
         if self.observation_status == "success":
@@ -1055,7 +1055,7 @@ class ItineraryPlanningDirectionsObservationArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _observation(self) -> ItineraryPlanningDirectionsObservationArtifact:
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version != "2.0":
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version != "3.0":
             raise ValueError("observation must reference a model action")
         if tuple(item.alternative_index for item in self.alternatives) != tuple(range(len(self.alternatives))):
             raise ValueError("directions alternatives must keep provider order")
@@ -1110,7 +1110,7 @@ class ArtifactRefDirectories(_ArtifactModel):
                 raise ValueError(f"{name} refs must be unique")
             artifact_type, phase = expected[name]
             for ref in refs:
-                expected_schema_version = "2.0" if name == "model_action" else "1.0"
+                expected_schema_version = "3.0" if name == "model_action" else "1.0"
                 if ref.schema_version != expected_schema_version or ref.artifact_type != artifact_type or ref.operation_id.phase is not phase or ref.operation_id.run_id != run_id:
                     raise ValueError(f"{name} ref type/version/run mismatch")
             all_refs.extend(refs)
@@ -1124,7 +1124,7 @@ def _refs_for_directory(directories: ArtifactRefDirectories, directory: str) -> 
 
 
 def _validate_ref(ref: ArtifactRef, *, artifact_type: str, run_id) -> None:
-    expected_schema_version = "2.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
+    expected_schema_version = "3.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
     if ref.schema_version != expected_schema_version or ref.artifact_type != artifact_type or ref.operation_id.run_id != run_id:
         raise ValueError("artifact reference mismatch")
 
@@ -1622,7 +1622,7 @@ def _from_failure_snapshot(value: PlanningFailureSnapshot) -> PlanningFailure:
 
 
 ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS: tuple[ArtifactSchemaRegistration, ...] = (
-    ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="2.0", model=ItineraryPlanningModelActionArtifact),
+    ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="3.0", model=ItineraryPlanningModelActionArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.hub_geocode_observation", schema_version="1.0", model=ItineraryPlanningHubGeocodeObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.route_matrix_observation", schema_version="1.0", model=ItineraryPlanningRouteMatrixObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.directions_observation", schema_version="1.0", model=ItineraryPlanningDirectionsObservationArtifact),

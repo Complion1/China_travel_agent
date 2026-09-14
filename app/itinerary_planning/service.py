@@ -196,8 +196,9 @@ from .policy import (
     validate_effective_policy,
     validate_unique_main_and_backup_uids,
     boundary_processing_minutes,
+    default_open_interval,
 )
-from .prompt_loader import load_planning_prompt
+from .prompt_loader import PLANNING_PROMPT_VERSION, load_planning_prompt
 from .prompting import HandleDirectory, make_planning_prompt
 from .tooling import (
     _ARGS_BY_TOOL,
@@ -352,6 +353,58 @@ def _confirmed_digest(confirmed: ConfirmedTravelRequirement) -> str:
     return _canonical_hash(confirmed.model_dump(mode="json", exclude_none=False))
 
 
+def _validate_supported_confirmed_requirement(
+    confirmed: ConfirmedTravelRequirement,
+) -> None:
+    """Validate the Module 01 structured fields consumed by Module 09."""
+
+    requirement = confirmed.requirement
+    window = requirement.time_window
+    arrival = window.arrival
+    departure = window.departure
+    required = (
+        requirement.destination,
+        window.sightseeing_start_date,
+        window.sightseeing_end_date,
+        window.sightseeing_days,
+        arrival.hub_name,
+        arrival.hub_type,
+        arrival.local_datetime,
+        departure.hub_name,
+        departure.hub_type,
+        departure.local_datetime,
+    )
+    if any(value is None for value in required):
+        raise ValueError("confirmed planning requirement is incomplete")
+
+    days = window.sightseeing_days
+    if type(days) is not int or not 1 <= days <= 60:
+        raise ValueError("confirmed sightseeing days are invalid")
+    try:
+        start_date = date.fromisoformat(cast(str, window.sightseeing_start_date))
+        end_date = date.fromisoformat(cast(str, window.sightseeing_end_date))
+        arrival_at = datetime.strptime(cast(str, arrival.local_datetime), "%Y-%m-%d %H:%M")
+        departure_at = datetime.strptime(cast(str, departure.local_datetime), "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise ValueError("confirmed planning dates are invalid") from None
+    if end_date < start_date or (end_date - start_date).days + 1 != days:
+        raise ValueError("confirmed sightseeing range is inconsistent")
+    if arrival_at.date() > start_date or departure_at.date() < end_date:
+        raise ValueError("confirmed boundary times do not cover sightseeing dates")
+
+    preferences = requirement.preferences
+    if preferences.pace is None:
+        if not preferences.agent_decides_pace:
+            raise ValueError("confirmed pace is missing")
+    elif preferences.agent_decides_pace:
+        raise ValueError("confirmed pace choice is inconsistent")
+    if preferences.interests is None:
+        if not preferences.agent_decides_interests:
+            raise ValueError("confirmed interests are missing")
+    elif preferences.agent_decides_interests:
+        raise ValueError("confirmed interest choice is inconsistent")
+
+
 def _requirement_stable_id(prefix: str, tree: dict[str, object]) -> str:
     digest = _canonical_hash(tree)
     return f"{prefix}:{digest[7:23]}"
@@ -469,7 +522,7 @@ class ItineraryPlanningService:
     ) -> None:
         try:
             prompt = load_planning_prompt()
-            if prompt.version != "planning-v2" or not prompt.sha256.startswith("sha256:"):
+            if prompt.version != PLANNING_PROMPT_VERSION or not prompt.sha256.startswith("sha256:"):
                 raise ItineraryPlanningConfigurationError()
         except ItineraryPlanningConfigurationError:
             raise
@@ -649,7 +702,7 @@ class ItineraryPlanningService:
             for operation_id, artifact_type, expected in operation_ids:
                 lookup = await self._repository.lookup(operation_id=operation_id)
                 if isinstance(lookup, ArtifactFound):
-                    expected_schema_version = "2.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
+                    expected_schema_version = "3.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
                     if lookup.ref.operation_id != operation_id or lookup.ref.schema_version != expected_schema_version or lookup.ref.artifact_type != artifact_type:
                         return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
                     read = await self._repository.get(lookup.ref, expected_model=expected)
@@ -696,9 +749,13 @@ class ItineraryPlanningService:
         if request.operation_plan.run_id in self._runs:
             return self._failed(None, None, PlanningFailureCode.REQUEST_MISMATCH)
         try:
+            confirmed = cast(ConfirmedTravelRequirement, _fresh(request.confirmed, ConfirmedTravelRequirement))
+            _validate_supported_confirmed_requirement(confirmed)
+        except (TypeError, ValueError, AttributeError):
+            return self._failed(None, None, PlanningFailureCode.INPUT_INVALID)
+        try:
             hotel = await self._read_upstream(request.hotel_selection_ref, HotelSelectionArtifact, "hotel.selection")
             candidate_artifact = await self._read_upstream(request.candidate_set_ref, CandidateResearchArtifact, "candidate_research.candidate_set")
-            confirmed = cast(ConfirmedTravelRequirement, _fresh(request.confirmed, ConfirmedTravelRequirement))
             state = getattr(candidate_artifact.record, "state", None)
             if (
                 getattr(candidate_artifact.record, "record_type", None) not in {"completed", "incomplete"}
@@ -990,7 +1047,7 @@ class ItineraryPlanningService:
             raise ValueError("artifact operation phase mismatch")
         if type(content) is not expected:
             raise ValueError("artifact model mismatch")
-        artifact_schema_version = "2.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
+        artifact_schema_version = "3.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
         request = ArtifactWriteRequest(
             operation_id=operation_id, artifact_type=artifact_type, schema_version=artifact_schema_version,
             content=content.model_dump(mode="json", exclude_none=False, by_alias=False, exclude_computed_fields=True),
@@ -1054,8 +1111,8 @@ class ItineraryPlanningService:
         operation_id = run.plan.terminal_action_operation_id if terminal_only else self._iteration_slot(run, run.iterations).action_operation_id
         from .artifacts import ItineraryPlanningModelActionArtifact
         action = ItineraryPlanningModelActionArtifact(
-            schema_version="2.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
-            prompt_version="planning-v2", prompt_hash=load_planning_prompt().sha256, action_kind=kind,
+            schema_version="3.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
+            prompt_version=PLANNING_PROMPT_VERSION, prompt_hash=load_planning_prompt().sha256, action_kind=kind,
             call_summaries=tuple(self._action_summary(call, i) for i, call in enumerate(calls)),
             invocation_metadata=metadata, disposition=disposition,
         )
@@ -1936,8 +1993,9 @@ class ItineraryPlanningService:
             for leg in day.route_legs:
                 validate_route(leg)
 
-            lower = datetime.combine(day.date, datetime.min.time(), tzinfo=ZoneInfo("Asia/Shanghai")) + timedelta(hours=9)
-            upper = lower + timedelta(hours=12)
+            default_interval = default_open_interval(day.date)
+            lower = default_interval.start_at
+            upper = default_interval.end_at
             if any(interval.start_at < lower or interval.end_at > upper for interval in (*day.open_intervals, *(visit.interval for visit in day.visits), *(leg.interval for leg in day.route_legs))):
                 raise _BusinessRejected("default_daily_window")
 
@@ -2060,20 +2118,51 @@ class ItineraryPlanningService:
         run.draft = prefix
         run.pending_gaps = [gap for gap in run.pending_gaps if not isinstance(gap, BackupUnavailableGap)]
         for day in prefix.days:
-            for visit in day.visits:
-                kinds = []
-                if visit == next((item for item in day.visits if item.visit_kind in {VisitKind.ATTRACTION, VisitKind.ATTRACTION_LUNCH, VisitKind.ATTRACTION_DINNER}), None):
-                    kinds.append("attraction")
-                if visit.visit_kind in {VisitKind.LUNCH, VisitKind.ATTRACTION_LUNCH}:
-                    kinds.append("lunch")
-                if visit.visit_kind in {VisitKind.DINNER, VisitKind.ATTRACTION_DINNER}:
-                    kinds.append("dinner")
-                for kind in kinds:
-                    if not any(item.backup_kind == kind and item.core_visit_id == visit.visit_id for item in day.backups):
-                        run.pending_gaps.append(BackupUnavailableGap(
-                            gap_id=f"backup-{day.date}-{kind}", evidence_refs=(), date=day.date,
-                            backup_kind=kind, core_visit_id=visit.visit_id, reason="no_nearby",
-                        ))
+            role_visits = (
+                (
+                    "attraction",
+                    tuple(
+                        visit
+                        for visit in day.visits
+                        if visit.visit_kind
+                        in {
+                            VisitKind.ATTRACTION,
+                            VisitKind.ATTRACTION_LUNCH,
+                            VisitKind.ATTRACTION_DINNER,
+                        }
+                    ),
+                ),
+                (
+                    "lunch",
+                    tuple(
+                        visit
+                        for visit in day.visits
+                        if visit.visit_kind in {VisitKind.LUNCH, VisitKind.ATTRACTION_LUNCH}
+                    ),
+                ),
+                (
+                    "dinner",
+                    tuple(
+                        visit
+                        for visit in day.visits
+                        if visit.visit_kind in {VisitKind.DINNER, VisitKind.ATTRACTION_DINNER}
+                    ),
+                ),
+            )
+            for kind, visits in role_visits:
+                if not visits:
+                    continue
+                visit_ids = {visit.visit_id for visit in visits}
+                if any(
+                    item.backup_kind == kind and item.core_visit_id in visit_ids
+                    for item in day.backups
+                ):
+                    continue
+                core = visits[0]
+                run.pending_gaps.append(BackupUnavailableGap(
+                    gap_id=f"backup-{day.date}-{kind}", evidence_refs=(), date=day.date,
+                    backup_kind=kind, core_visit_id=core.visit_id, reason="no_nearby",
+                ))
         return True
 
     def _revalidate_saved_prefix(self, run: _Run) -> None:

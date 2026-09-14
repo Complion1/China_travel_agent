@@ -50,6 +50,7 @@ from app.itinerary_planning import (
     ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
     ITINERARY_PLANNING_ITERATION_BUDGET_KEY,
     ItineraryPlanningArtifact,
+    ItineraryPlanningCandidateSupplementRequested,
     ItineraryPlanningCompleted,
     ItineraryPlanningInitialRequest,
     ItineraryPlanningOperationPlan,
@@ -443,6 +444,43 @@ def _time_text(interval) -> str:
     return f"{start}-{end}"
 
 
+def _day_report(day, candidate_names: dict[str, str]) -> dict[str, object]:
+    visit_names = {
+        item.visit_id: candidate_names.get(item.location.uid, item.location.uid)
+        for item in day.visits
+    }
+    return {
+        "date": str(day.date),
+        "theme": day.theme,
+        "visits": [
+            {
+                "time": _time_text(item.interval),
+                "kind": item.visit_kind.value,
+                "name": candidate_names.get(item.location.uid, item.location.uid),
+            }
+            for item in day.visits
+        ],
+        "route_legs": [
+            {
+                "time": _time_text(item.interval),
+                "mode": item.transport_semantic.value,
+                "distance_m": item.distance_m,
+                "duration_s": item.duration_s,
+            }
+            for item in day.route_legs
+        ],
+        "backups": [
+            {
+                "kind": item.backup_kind,
+                "core_visit_id": item.core_visit_id,
+                "core_name": visit_names.get(item.core_visit_id),
+                "name": candidate_names.get(item.candidate.uid, item.candidate.uid),
+            }
+            for item in day.backups
+        ],
+    }
+
+
 async def _qualify_once(run_number: int) -> dict[str, object]:
     run_id = uuid4()
     confirmed = _confirmed()
@@ -606,6 +644,14 @@ async def _qualify_once(run_number: int) -> dict[str, object]:
             candidate_names = {
                 candidate.core.uid: candidate.core.name for candidate in candidate_state.candidates
             }
+            candidate_directory_report = [
+                {"uid": candidate.core.uid, "name": candidate.core.name}
+                for candidate in candidate_state.candidates
+            ]
+            print(
+                "MODULE070809_CANDIDATE_DIRECTORY="
+                + json.dumps(candidate_directory_report, ensure_ascii=False)
+            )
 
             planning_service = _ObservedPlanningService(
                 runtime=runtime,
@@ -628,9 +674,87 @@ async def _qualify_once(run_number: int) -> dict[str, object]:
             finally:
                 await planning_service.aclose()
 
+            terminal_report = None
+            if not isinstance(planning, ItineraryPlanningCompleted):
+                planning_ref = (
+                    planning.planning_ref
+                    if isinstance(planning, ItineraryPlanningCandidateSupplementRequested)
+                    else getattr(planning, "itinerary_ref", None)
+                )
+                planning_artifact = (
+                    (
+                        await repository.get(
+                            planning_ref, expected_model=ItineraryPlanningArtifact
+                        )
+                    ).content
+                    if planning_ref is not None
+                    else None
+                )
+                terminal_record = None if planning_artifact is None else planning_artifact.record
+                retained_draft = (
+                    terminal_record.state.draft
+                    if terminal_record is not None
+                    and terminal_record.record_type
+                    in {"in_progress", "awaiting_candidate_supplement"}
+                    else (
+                        terminal_record.draft
+                        if terminal_record is not None
+                        and terminal_record.record_type in {"completed", "incomplete"}
+                        else None
+                    )
+                )
+                day_reports = (
+                    [_day_report(day, candidate_names) for day in retained_draft.days]
+                    if retained_draft is not None
+                    else []
+                )
+                visit_names = {
+                    item.visit_id: candidate_names.get(item.location.uid, item.location.uid)
+                    for day in (() if retained_draft is None else retained_draft.days)
+                    for item in day.visits
+                }
+                gaps = []
+                for gap in getattr(planning, "gaps", ()):
+                    gap_report = gap.model_dump(mode="json")
+                    core_visit_id = getattr(gap, "core_visit_id", None)
+                    if core_visit_id is not None:
+                        gap_report["core_candidate_name"] = visit_names.get(core_visit_id)
+                    gaps.append(gap_report)
+                terminal_report = {
+                    "qualification_run": run_number,
+                    "model": "deepseek-v4-flash",
+                    "outcome": planning.outcome_type,
+                    "hotel": {
+                        "selected": selected_hotel.name,
+                        "address": selected_hotel.address,
+                        "candidate_count": len(hotels.candidates),
+                    },
+                    "candidate_research": {
+                        "eligible": research.counts.unique_eligible_count,
+                        "attractions": research.counts.attraction_count,
+                        "restaurants": research.counts.restaurant_count,
+                        "details": research.coverage.details_success_count,
+                        "iterations": research.budgets.iterations_consumed,
+                    },
+                    "candidate_directory": candidate_directory_report,
+                    "itinerary": {"days": day_reports},
+                    "gaps": gaps,
+                    "live_calls": final_counts,
+                    "llm_calls": {
+                        "candidate_research": research_llm_calls,
+                        "itinerary_planning": final_tool_calls,
+                    },
+                    "exact_replay_equal": planning_replay == planning,
+                }
+                print(
+                    "MODULE070809_LIVE_RESULT="
+                    + json.dumps(terminal_report, ensure_ascii=False, default=str)
+                )
+
             assert isinstance(planning, ItineraryPlanningCompleted), json.dumps(
                 {
                     "outcome": planning.model_dump(mode="json"),
+                    "live_result": terminal_report,
                     "action_batches": planning_service.action_batches,
                     "action_rejections": planning_service.action_rejections,
                     "submit_attempts": planning_service.submit_attempts,
@@ -690,26 +814,7 @@ async def _qualify_once(run_number: int) -> dict[str, object]:
                     "iterations": research.budgets.iterations_consumed,
                 },
                 "itinerary": {
-                    "date": str(day.date),
-                    "theme": day.theme,
-                    "visits": [
-                        {
-                            "time": _time_text(item.interval),
-                            "kind": item.visit_kind.value,
-                            "name": candidate_names[item.location.uid],
-                        }
-                        for item in day.visits
-                    ],
-                    "route_legs": [
-                        {
-                            "time": _time_text(item.interval),
-                            "mode": item.transport_semantic.value,
-                            "distance_m": item.distance_m,
-                            "duration_s": item.duration_s,
-                        }
-                        for item in day.route_legs
-                    ],
-                    "backups": [candidate_names[item.candidate.uid] for item in day.backups],
+                    **_day_report(day, candidate_names),
                 },
                 "live_calls": final_counts,
                 "llm_calls": {

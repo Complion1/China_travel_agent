@@ -835,5 +835,65 @@ async def test_plan_initial_completes_with_real_deepseek_and_baidu_maps() -> Non
             assert persisted.record.draft is not None
             assert len(persisted.record.draft.days) == 1
             assert len(persisted.record.draft.days[0].visits) >= 3
+
+            candidate_artifact = (
+                await repository.get(
+                    request.candidate_set_ref,
+                    expected_model=CandidateResearchArtifact,
+                )
+            ).content
+            candidate_names = {
+                candidate.core.uid: candidate.core.name
+                for candidate in candidate_artifact.record.state.candidates
+            }
+            day = persisted.record.draft.days[0]
+            visit_names = {
+                visit.visit_id: candidate_names.get(visit.location.uid, visit.location.uid)
+                for visit in day.visits
+            }
+
+            def interval_text(interval) -> str:
+                start = interval.start_at_utc.astimezone().strftime("%H:%M")
+                end = interval.end_at_utc.astimezone().strftime("%H:%M")
+                return f"{start}-{end}"
+
+            live_report = {
+                "model": "deepseek-v4-flash",
+                "outcome": result.outcome_type,
+                "open_intervals": [interval_text(item) for item in day.open_intervals],
+                "visits": [
+                    {
+                        "time": interval_text(visit.interval),
+                        "kind": visit.visit_kind.value,
+                        "name": candidate_names.get(visit.location.uid, visit.location.uid),
+                    }
+                    for visit in day.visits
+                ],
+                "route_legs": [
+                    {
+                        "time": interval_text(leg.interval),
+                        "mode": leg.transport_semantic.value,
+                        "distance_m": leg.distance_m,
+                        "duration_s": leg.duration_s,
+                    }
+                    for leg in day.route_legs
+                ],
+                "backups": [
+                    {
+                        "kind": backup.backup_kind,
+                        "core_name": visit_names.get(backup.core_visit_id),
+                        "name": candidate_names.get(backup.candidate.uid, backup.candidate.uid),
+                    }
+                    for backup in day.backups
+                ],
+                "llm_tool_turns": provider.tool_turns,
+                "matrix_calls": observed_map.matrix_calls,
+                "direction_calls": observed_map.direction_calls,
+                "exact_replay_equal": replay == result,
+            }
+            print(
+                "MODULE09_LIVE_RESULT="
+                + json.dumps(live_report, ensure_ascii=False, separators=(",", ":"))
+            )
     finally:
         await llm_runtime.aclose()

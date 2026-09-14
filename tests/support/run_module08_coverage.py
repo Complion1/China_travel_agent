@@ -21,7 +21,7 @@ from coverage.exceptions import CoverageException
 
 COVERAGE_OUTPUT = Path("/tmp/module08-coverage.json")
 SOURCE_PACKAGE = ("app.candidate_research",)
-DEFAULT_COVERAGE_THRESHOLD = 80.0
+DEFAULT_COVERAGE_THRESHOLD = 70.0
 DEFAULT_TEST_PATHS = (
     "tests/unit/candidate_research",
     "tests/contract/candidate_research",

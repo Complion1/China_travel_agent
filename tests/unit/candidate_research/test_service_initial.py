@@ -312,8 +312,11 @@ def _matching_details(uid: str, *, category: str = "museum") -> PlaceDetailsSucc
     )
 
 
+@pytest.mark.parametrize("extra_irrelevant_conflict", (False, True))
 @pytest.mark.asyncio
-async def test_public_initial_completes_full_candidate_loop_and_replays_terminal_without_providers() -> None:
+async def test_public_initial_completes_full_candidate_loop_and_replays_terminal_without_providers(
+    extra_irrelevant_conflict: bool,
+) -> None:
     """Drive every initial objective once, then mature the derived eligible set."""
     run_id = uuid4()
     request, hotel_ref, hotel_artifact, _ = _request(run_id, place_width=8)
@@ -379,14 +382,25 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
     ))))
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel_artifact)
+    extra_candidate_search = _multi_place_search(("a0", "x0"), category="museum")
+    conflicting_extra_search = _multi_place_search(("x0",), category="museum")
+    conflicting_extra_search = conflicting_extra_search.model_copy(
+        update={
+            "places": (
+                conflicting_extra_search.places[0].model_copy(
+                    update={"address": "x0 Conflicting Road"}
+                ),
+            )
+        }
+    )
     map_adapter = FakeMapAdapter((
         _multi_place_search(("a0", "a1", "a2", "a3", "a4", "a5"), category="museum"),
         _multi_place_search(("r0", "r1", "r2", "r3"), category="restaurant"),
         _multi_place_search(("r0",), category="restaurant"),
         _multi_place_search(("r1",), category="restaurant"),
-        _multi_place_search(("a0",), category="museum"),
+        extra_candidate_search if extra_irrelevant_conflict else _multi_place_search(("a0",), category="museum"),
         _multi_place_search(("a1",), category="museum"),
-        _multi_place_search(("a2",), category="museum"),
+        conflicting_extra_search if extra_irrelevant_conflict else _multi_place_search(("a2",), category="museum"),
         _multi_place_search(("r2",), category="restaurant"),
         _matching_details("a0"), _matching_details("a1"), _matching_details("a2"), _matching_details("a3"),
     ))
@@ -396,7 +410,7 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
 
     result = await service.research_initial(request)
 
-    assert isinstance(result, CandidateResearchCompleted)
+    assert isinstance(result, CandidateResearchCompleted), result.model_dump(mode="json")
     judgment_context = json.loads(operation.prompts[1].user_text)
     assert judgment_context["current_evidence_handles"] == [
         item["handle"] for item in judgment_context["evidence"]
@@ -421,6 +435,7 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
     assert result.counts.attraction_count == 6
     assert result.counts.restaurant_count == 4
     assert result.counts.unique_eligible_count == 10
+    assert result.counts.admitted_slots == 10 + int(extra_irrelevant_conflict)
     assert result.coverage.covered_interests == (InterestTag.CULTURE, InterestTag.NATURE)
     assert result.coverage.covered_meals == (MealIntent.LUNCH, MealIntent.DINNER)
     assert result.coverage.resolved_must_item_count == result.coverage.must_item_count == 0
@@ -438,7 +453,12 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
         "candidate_research.candidate_set",
     }
     assert all(item.operation_id.run_id == run_id for item in repository.put_requests)
-    assert repository.contents[result.candidate_set_ref.artifact_id]["record"]["record_type"] == "completed"
+    terminal_payload = repository.contents[result.candidate_set_ref.artifact_id]
+    assert terminal_payload["record"]["record_type"] == "completed"
+    assert sum(
+        candidate["state"] == "conflicted"
+        for candidate in terminal_payload["record"]["state"]["candidates"]
+    ) == int(extra_irrelevant_conflict)
 
     provider_calls = (operation.call_count, map_adapter.call_count, budget.consume_count, len(repository.put_requests))
     replay = await service.research_initial(request)

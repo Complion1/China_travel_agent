@@ -494,7 +494,9 @@ def test_policy_primitives_cover_invalid_time_meal_route_and_anchor_paths() -> N
     assert attraction_bounds(TravelPace.RELAXED, PlanningDayKind.PARTIAL) == (0, 2)
     assert attraction_bounds(TravelPace.INTENSE, PlanningDayKind.PARTIAL) == (0, 4)
     assert attraction_bounds(TravelPace.NORMAL, PlanningDayKind.TRANSIT_ONLY) == (0, 0)
-    assert default_open_interval(date(2026, 9, 3)).start_at.time() == time(9, 0)
+    default_interval = default_open_interval(date(2026, 9, 3))
+    assert default_interval.start_at.time() == time(7, 30)
+    assert default_interval.end_at.time() == time(22, 0)
 
     attraction = _simple_visit()
     lunch = attraction.model_copy(update={"visit_id": "lunch", "visit_kind": VisitKind.LUNCH})

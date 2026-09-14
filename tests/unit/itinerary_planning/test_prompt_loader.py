@@ -13,8 +13,9 @@ from app.itinerary_planning.prompt_loader import (
 
 def test_planning_prompt_is_packaged_utf8_and_hash_locked() -> None:
     resource = load_planning_prompt()
-    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v2"
+    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v3"
     assert resource.sha256 == PLANNING_PROMPT_SHA256
+    assert "普通日开放区间固定为当日 07:30–22:00" in resource.text
     assert "backup_distance_exceeded" in resource.text
     assert "只有 Matrix 证明现有候选无法组成三组互不重复且在 3000 米内的备选时才请求补研" in resource.text
     assert "午餐和晚餐不能是同一地点" in resource.text

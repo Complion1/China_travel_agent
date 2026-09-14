@@ -13,7 +13,7 @@ from app.workflow_contracts import ArtifactRef, OperationId, WorkflowPhase
 ZERO = "sha256:" + "0" * 64
 
 
-def test_resume_fingerprint_uses_local_v2_domain_and_both_full_plans():
+def test_resume_fingerprint_uses_local_v4_domain_and_both_full_plans():
     import hashlib
     from app.itinerary_planning import ItineraryPlanningResumeRequest
     from app.itinerary_planning.fingerprints import fingerprint_request_resume, fingerprint_request_initial
@@ -27,8 +27,8 @@ def test_resume_fingerprint_uses_local_v2_domain_and_both_full_plans():
     first = fingerprint_request_resume(request)
     def model_hash(value):
         return "sha256:" + hashlib.sha256(canonical_json_bytes(value.model_dump(mode="json", exclude_none=False))).hexdigest()
-    expected = {"fingerprint_version": "planning-resume-fp-v3", "kind": "request_resume", "fields": {
-            "capability_scope": "module09-structured-demo-v1",
+    expected = {"fingerprint_version": "planning-resume-fp-v4", "kind": "request_resume", "fields": {
+            "capability_scope": "module09-structured-demo-v2",
             "schema_version": "2.0", "run_id": run_id,
         "predecessor_planning_ref": artifact_ref_payload(request.predecessor_planning_ref),
         "supplemented_candidate_set_ref": artifact_ref_payload(request.supplemented_candidate_set_ref),

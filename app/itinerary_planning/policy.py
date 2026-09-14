@@ -83,8 +83,8 @@ def ceil_to_grid(value: datetime) -> datetime:
 def default_open_interval(day: date):
     from .models import TimeInterval
     return TimeInterval(
-        start_at=datetime.combine(day, time(9, 0), tzinfo=SHANGHAI),
-        end_at=datetime.combine(day, time(21, 0), tzinfo=SHANGHAI),
+        start_at=datetime.combine(day, time(7, 30), tzinfo=SHANGHAI),
+        end_at=datetime.combine(day, time(22, 0), tzinfo=SHANGHAI),
     )
 
 
