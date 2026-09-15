@@ -29,6 +29,35 @@ services:
     environment:
       <<: *agent-environment
       BAIDU_MAPS_API_KEY: ${BAIDU_MAPS_API_KEY:-}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-china_travel_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-china_travel_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only-change-me}
+
+  artifact-migrate:
+    <<: *agent-security
+    profiles: ["production"]
+    image: china-travel-agent:local
+    build:
+      <<: *agent-build
+      target: runtime
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *agent-environment
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-china_travel_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-china_travel_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only-change-me}
+    command:
+      - alembic
+      - -c
+      - /workspace/app/artifact_persistence/alembic.ini
+      - upgrade
+      - head
 
   test:
     <<: *agent-security

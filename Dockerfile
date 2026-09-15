@@ -25,8 +25,9 @@ COPY scripts ./scripts
 USER appuser
 
 # The end-to-end CLI is not implemented yet. Keep the runtime target honest by
-# validating only the nine production packages that currently exist.
-CMD ["python", "-c", "import app.requirements, app.llm_runtime, app.requirement_extraction, app.workflow_contracts, app.requirement_subgraph, app.baidu_map, app.hotel_selection, app.candidate_research, app.itinerary_planning; print('modules 01-09 import successfully')"]
+# validating only the ten production packages that currently exist. Importing
+# Module 10 does not connect to PostgreSQL or run migrations.
+CMD ["python", "-c", "import app.requirements, app.llm_runtime, app.requirement_extraction, app.workflow_contracts, app.requirement_subgraph, app.baidu_map, app.hotel_selection, app.candidate_research, app.itinerary_planning, app.artifact_persistence; print('modules 01-10 import successfully')"]
 
 
 FROM runtime AS test
