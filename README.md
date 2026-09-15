@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–09 已完成并进入本地 `main` 稳定基线；Module 09 的结构化输入 Demo 已通过离线 Gate、独立真实规划和 Module 06→09 单次真实 DeepSeek Flash／百度地图联调。生产 LLM Profile 继续使用 DeepSeek V4 Flash。Module 10 已在功能分支实现并通过 PostgreSQL Artifact 持久化、迁移、并发、真实重启和回归资格门；完整 Demo 主链仍等待 Module 13 显式装配，因此现有 Module 01–09 生产组合尚未自动切换 Repository。Module 11 的 checkpoint、执行预算和恢复状态持久化仍未开始。各模块的真实结果与边界见实施状态快照；commit、merge、push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–10 已完成并进入本地 `main` 稳定基线；Module 09 的结构化输入 Demo 已通过离线 Gate、独立真实规划和历史 Module 06→09 单次真实 DeepSeek Flash／百度地图联调，最新真实联调发现的问题已按所属模块登记并由用户决定暂缓。生产 LLM Profile 继续使用 DeepSeek V4 Flash。Module 10 已通过 PostgreSQL Artifact 持久化、迁移、并发、真实重启、真实 API 产物重读和回归资格门；完整 Demo 主链仍等待 Module 13 显式装配，因此现有 Module 01–09 生产组合尚未自动切换 Repository。Module 11 的 checkpoint、执行预算和恢复状态持久化仍未开始。各模块的真实结果与边界见实施状态快照；Module 10 本地 commit 和 fast-forward merge 已执行，push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
 
 ## 架构基线
 
@@ -61,7 +61,7 @@ CLI Demo
 
 模块 09 提供结构化输入范围内的受控行程规划、initial/resume、六工具循环、真实路线证据、完整确定性提交校验、Artifact、执行预算和 replay。生产 LLM Profile 锁定为 `deepseek-v4-flash`；Provider 仅把服务端当前返回的 `deepseek-flash` 归一化为该公共规范名。最新离线 Module 09 Gate 为 `284 passed`，互补 unit/contract 为 `1686 passed`，coverage line／branch／combined 为 `88.5387% / 74.2077% / 84.8764%`，compileall 通过；随后独立 Module 09 真实运行和 Module 06→09 单次真实联调均通过。文本作息、活动时刻/时长、交通限制等未被上游结构化的功能继续延期，不宣称已满足；完整持久化 Demo 主链仍需 Module 11–14，尤其是 Module 13 组合根的显式装配。
 
-模块 10 提供符合 Module 04 三方法公共接口的 PostgreSQL Artifact Repository、显式生命周期 Runtime、固定 `artifact_store` schema、Alembic `m10_0001` 迁移、幂等写入、容量与并发控制、断线单次重试和真实重启持久性。AP-T06 最终资格为 Module 10 unit `64 passed`、contract `7 passed`、迁移 `15 passed`、普通 PostgreSQL integration `31 passed`、Module 04 映射／并发／故障 `20 passed`、全量 unit/contract `2041 passed`；coverage line／branch／combined 为 `87.7127% / 74.6479% / 84.9478%`。用户追加的真实 API 验收已证明 Module 10 可保存并在重连后读取真实行程产物；两次上游 Module 09 规划未得到 Completed 终态，但用户已明确决定该问题不阻断 Module 10，Module 10 当前实现冻结并等待后续提交／合并授权。Module 10 不实现删除、TTL、checkpoint、自动迁移、生产 Registry 组合或生产部署。
+模块 10 提供符合 Module 04 三方法公共接口的 PostgreSQL Artifact Repository、显式生命周期 Runtime、固定 `artifact_store` schema、Alembic `m10_0001` 迁移、幂等写入、容量与并发控制、断线单次重试和真实重启持久性。AP-T06 最终资格为 Module 10 unit `64 passed`、contract `7 passed`、迁移 `15 passed`、普通 PostgreSQL integration `31 passed`、Module 04 映射／并发／故障 `20 passed`、全量 unit/contract `2041 passed`；coverage line／branch／combined 为 `87.7127% / 74.6479% / 84.9478%`。用户追加的真实 API 验收已证明 Module 10 可保存并在重连后读取真实行程产物；两次上游 Module 09 规划未得到 Completed 终态，但用户已明确决定该问题不阻断 Module 10。Module 10 实现提交 `cc1e6ef545db52f07cc15af64ea12ed589d24dda` 已 fast-forward 合并到本地 `main`，当前保持冻结。Module 10 不实现删除、TTL、checkpoint、自动迁移、生产 Registry 组合或生产部署。
 
 模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。模块 05 实现需求子图、同进程 interrupt/resume 和严格 checkpoint；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前开发没有客户端、FastAPI 或 Web；模块 14 只规划薄 CLI 和 Application Service。
 
