@@ -17,8 +17,10 @@ from app.requirement_subgraph import (
     RequirementConfirmationResume,
     RequirementSubgraphCoordinator,
     RequirementSubgraphCoordinatorLimits,
+    RequirementSubgraphResumeRejectedError,
     RequirementSubgraphStateError,
     build_requirement_subgraph,
+    create_requirement_subgraph_embedded_driver,
 )
 from app.requirement_subgraph.models import RequirementResumeEnvelope
 from app.requirements import RequirementConfirmation
@@ -27,6 +29,7 @@ from app.workflow_contracts import (
     ExecutionBudgetLimit,
     ExecutionBudgetPlan,
     InMemoryExecutionBudgetManager,
+    OperationResultIndeterminateError,
     TravelSessionState,
 )
 from tests.requirement_subgraph_fakes import (
@@ -162,6 +165,21 @@ async def _child_checkpoint(child, task):
     if type(values) is dict:
         values = TypeAdapter(TravelSessionState).validate_python(values, strict=True)
     return values, task.interrupts[0].value
+
+
+def _durable_parent_graph(driver, saver, resolved_results):
+    def route(value):
+        result = driver.resolve_result(state=value, interrupt_value=None)
+        resolved_results.append(result.result_type)
+        return value
+
+    builder = StateGraph(TravelSessionState)
+    builder.add_node("child", driver.graph)
+    builder.add_node("route", route)
+    builder.add_edge(START, "child")
+    builder.add_edge("child", "route")
+    builder.add_edge("route", END)
+    return builder.compile(checkpointer=saver)
 
 
 def _checkpoint_wire_payloads(value):
@@ -308,6 +326,267 @@ async def test_parent_saver_is_inherited_and_public_control_drives_child_lifecyc
     assert parent.checkpointer is not child.checkpointer
     assert type(parent.checkpointer.serde) is RequirementCheckpointSerializer
     assert type(child.checkpointer) is type(None)
+
+
+@pytest.mark.asyncio
+async def test_embedded_driver_rehydrates_pause_with_a_fresh_driver_simulation():
+    initial = make_initial_state()
+    shared_saver = InMemorySaver(serde=RequirementCheckpointSerializer())
+
+    def manager_factory(run_id):
+        return InMemoryExecutionBudgetManager(
+            plan=ExecutionBudgetPlan(
+                schema_version="1.0",
+                run_id=run_id,
+                limits=(
+                    ExecutionBudgetLimit(
+                        key=REQUIREMENTS_CLARIFICATION_ROUND_KEY,
+                        limit=6,
+                    ),
+                ),
+            ),
+            limits=DEMO_EXECUTION_BUDGET_MANAGER_LIMITS,
+        )
+
+    first_sink = RecordingRequirementSubgraphSignalSink()
+    first_service = ScriptedRequirementDomainService(
+        process_results=[make_need_confirmation_transition(initial)],
+    )
+    first_driver = create_requirement_subgraph_embedded_driver(
+        domain_service=first_service,
+        execution_budget_manager_factory=manager_factory,
+        signal_sink=first_sink,
+        limits=RequirementSubgraphCoordinatorLimits(max_runs=2),
+    )
+    first_results: list[str] = []
+    first_parent = _durable_parent_graph(first_driver, shared_saver, first_results)
+    config = {"configurable": {"thread_id": str(initial.run_id)}}
+
+    async with first_driver.start_operation(
+        state=initial,
+        turn=make_turn(initial),
+    ) as entered:
+        await first_parent.ainvoke(entered, config=config)
+        snapshot = await first_parent.aget_state(config, subgraphs=True)
+        paused_state, interrupt_value = await _child_checkpoint(
+            first_driver.graph,
+            snapshot.tasks[0],
+        )
+        paused = first_driver.resolve_result(
+            state=paused_state,
+            interrupt_value=interrupt_value,
+        )
+
+    first_driver.verify_pause_token(
+        durable_pause=paused.durable_pause,
+        pause_token=paused.pause.pause_token,
+    )
+    process_count_before_token_rejection = len(first_service.process_calls)
+    signal_count_before_token_rejection = len(first_sink.calls)
+    with pytest.raises(RequirementSubgraphResumeRejectedError) as caught:
+        first_driver.verify_pause_token(
+            durable_pause=paused.durable_pause.model_copy(
+                update={"operation_nonce": paused.pause.pause_token},
+            ),
+            pause_token=paused.pause.pause_token,
+        )
+    assert caught.value.args == ()
+    assert len(first_service.process_calls) == process_count_before_token_rejection
+    assert len(first_sink.calls) == signal_count_before_token_rejection
+    with pytest.raises(RequirementSubgraphResumeRejectedError):
+        first_driver.verify_pause_token(
+            durable_pause=paused.durable_pause,
+            pause_token="f" * 32,
+        )
+    first_process_call_count = len(first_service.process_calls)
+    del first_parent, first_driver, first_service, first_sink
+
+    second_sink = RecordingRequirementSubgraphSignalSink()
+    second_service = ScriptedRequirementDomainService(
+        confirm_results=[make_confirmed_transition(initial)],
+    )
+    second_driver = create_requirement_subgraph_embedded_driver(
+        domain_service=second_service,
+        execution_budget_manager_factory=manager_factory,
+        signal_sink=second_sink,
+        limits=RequirementSubgraphCoordinatorLimits(max_runs=2),
+    )
+    second_results: list[str] = []
+    second_parent = _durable_parent_graph(second_driver, shared_saver, second_results)
+    accepted_resume = RequirementConfirmationResume(
+        action=RequirementConfirmation(
+            decision="revise",
+            revision_text="请调整需求",
+        ),
+    )
+
+    tampered_pause = paused.durable_pause.model_copy(
+        update={"state_digest": "sha256:" + "0" * 64},
+    )
+    with pytest.raises(RequirementSubgraphResumeRejectedError):
+        async with second_driver.resume_accepted_operation(
+            state=paused.state,
+            durable_pause=tampered_pause,
+            resume=accepted_resume,
+        ):
+            raise AssertionError("tampered durable pause entered operation scope")
+    assert second_sink.calls == []
+    assert second_service.process_calls == []
+    assert second_service.confirm_calls == []
+
+    async with second_driver.resume_accepted_operation(
+        state=paused.state,
+        durable_pause=paused.durable_pause,
+        resume=accepted_resume,
+    ) as command:
+        await second_parent.ainvoke(command, config=config)
+
+    assert second_results == ["confirmed"]
+    assert first_results == []
+    assert first_process_call_count == 1
+    assert second_service.process_calls == []
+    assert len(second_service.confirm_calls) == 1
+    replayed = [
+        signal
+        for signal in second_sink.calls
+        if signal.signal_type == "node_replayed"
+    ]
+    assert len(replayed) == 1
+    assert replayed[0].operation_id.logical_step == (
+        f"requirement_pause_{paused.durable_pause.operation_nonce}"
+    )
+    budgeted = [
+        signal
+        for signal in second_sink.calls
+        if signal.signal_type == "budget_consumed"
+    ]
+    assert len(budgeted) == 1
+    assert budgeted[0].operation_id.logical_step == (
+        f"clarification_round_{paused.durable_pause.operation_nonce}"
+    )
+    assert budgeted[0].amount == 1
+
+
+@pytest.mark.asyncio
+async def test_fresh_driver_replay_uses_durable_nonce_and_fails_indeterminate_before_domain_call():
+    initial = make_initial_state()
+    shared_saver = InMemorySaver(serde=RequirementCheckpointSerializer())
+    managers: dict[object, InMemoryExecutionBudgetManager] = {}
+
+    def manager_factory(run_id):
+        manager = managers.get(run_id)
+        if manager is None:
+            manager = InMemoryExecutionBudgetManager(
+                plan=ExecutionBudgetPlan(
+                    schema_version="1.0",
+                    run_id=run_id,
+                    limits=(
+                        ExecutionBudgetLimit(
+                            key=REQUIREMENTS_CLARIFICATION_ROUND_KEY,
+                            limit=6,
+                        ),
+                    ),
+                ),
+                limits=DEMO_EXECUTION_BUDGET_MANAGER_LIMITS,
+            )
+            managers[run_id] = manager
+        return manager
+
+    first_driver = create_requirement_subgraph_embedded_driver(
+        domain_service=ScriptedRequirementDomainService(
+            process_results=[make_need_confirmation_transition(initial)],
+        ),
+        execution_budget_manager_factory=manager_factory,
+        signal_sink=RecordingRequirementSubgraphSignalSink(),
+        limits=RequirementSubgraphCoordinatorLimits(max_runs=2),
+    )
+    first_parent = _durable_parent_graph(first_driver, shared_saver, [])
+    config = {"configurable": {"thread_id": str(initial.run_id)}}
+
+    async with first_driver.start_operation(
+        state=initial,
+        turn=make_turn(initial),
+    ) as entered:
+        await first_parent.ainvoke(entered, config=config)
+        snapshot = await first_parent.aget_state(config, subgraphs=True)
+        paused_state, interrupt_value = await _child_checkpoint(
+            first_driver.graph,
+            snapshot.tasks[0],
+        )
+        paused = first_driver.resolve_result(
+            state=paused_state,
+            interrupt_value=interrupt_value,
+        )
+    del first_parent, first_driver
+
+    accepted_resume = RequirementConfirmationResume(
+        action=RequirementConfirmation(
+            decision="revise",
+            revision_text="请调整需求",
+        ),
+    )
+    second_service = ScriptedRequirementDomainService(
+        confirm_results=[make_confirmed_transition(initial)],
+    )
+    second_sink = RecordingRequirementSubgraphSignalSink(fail_on_call=3)
+    second_driver = create_requirement_subgraph_embedded_driver(
+        domain_service=second_service,
+        execution_budget_manager_factory=manager_factory,
+        signal_sink=second_sink,
+        limits=RequirementSubgraphCoordinatorLimits(max_runs=2),
+    )
+    second_parent = _durable_parent_graph(second_driver, shared_saver, [])
+
+    with pytest.raises(RuntimeError, match="sink failure"):
+        async with second_driver.resume_accepted_operation(
+            state=paused.state,
+            durable_pause=paused.durable_pause,
+            resume=accepted_resume,
+        ) as command:
+            await second_parent.ainvoke(command, config=config)
+
+    assert second_service.process_calls == []
+    assert second_service.confirm_calls == []
+    assert [signal.signal_type for signal in second_sink.calls] == [
+        "resume_accepted",
+        "node_replayed",
+    ]
+
+    third_service = ScriptedRequirementDomainService(
+        confirm_results=[make_confirmed_transition(initial)],
+    )
+    third_sink = RecordingRequirementSubgraphSignalSink()
+    third_driver = create_requirement_subgraph_embedded_driver(
+        domain_service=third_service,
+        execution_budget_manager_factory=manager_factory,
+        signal_sink=third_sink,
+        limits=RequirementSubgraphCoordinatorLimits(max_runs=2),
+    )
+    third_parent = _durable_parent_graph(third_driver, shared_saver, [])
+
+    with pytest.raises(OperationResultIndeterminateError) as caught:
+        async with third_driver.resume_accepted_operation(
+            state=paused.state,
+            durable_pause=paused.durable_pause,
+            resume=accepted_resume,
+        ) as command:
+            await third_parent.ainvoke(command, config=config)
+
+    assert caught.value.args == ()
+    assert third_service.process_calls == []
+    assert third_service.confirm_calls == []
+    replayed = [
+        signal
+        for signal in third_sink.calls
+        if signal.signal_type == "node_replayed"
+    ]
+    assert len(replayed) == 1
+    assert replayed[0].operation_id.logical_step == (
+        f"requirement_pause_{paused.durable_pause.operation_nonce}"
+    )
+    assert all(
+        signal.signal_type != "budget_consumed" for signal in third_sink.calls
+    )
 
 
 @pytest.mark.asyncio

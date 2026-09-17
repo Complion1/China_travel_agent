@@ -7,6 +7,7 @@ from datetime import date
 import app.requirement_subgraph as package_module
 import app.requirement_subgraph.checkpoint as checkpoint_module
 import app.requirement_subgraph.coordinator as coordinator_module
+import app.requirement_subgraph.embedded as embedded_module
 import app.requirement_subgraph.graph as graph_module
 import app.requirement_subgraph.runtime as runtime_module
 from app.requirement_extraction import DeepSeekRequirementExtractor
@@ -28,6 +29,7 @@ def test_production_imports_remain_inside_module_05_and_shared_contracts():
         package_module,
         checkpoint_module,
         coordinator_module,
+        embedded_module,
         graph_module,
         runtime_module,
     )
@@ -67,6 +69,7 @@ def test_no_future_module_stub_or_dynamic_loader_is_reachable_from_package():
         "RequirementResume",
         "RequirementPauseEnvelope",
         "RequirementResumeEnvelope",
+        "RequirementSubgraphDurablePause",
         "RequirementSubgraphPaused",
         "RequirementSubgraphConfirmed",
         "RequirementSubgraphDomainFailed",
@@ -93,9 +96,11 @@ def test_no_future_module_stub_or_dynamic_loader_is_reachable_from_package():
         "RequirementSubgraphCapacityExceededError",
         "RequirementCheckpointSerializer",
         "RequirementSubgraphCoordinator",
+        "RequirementSubgraphEmbeddedDriver",
         "RequirementSubgraphRuntime",
         "build_requirement_subgraph",
         "create_demo_requirement_subgraph_runtime",
+        "create_requirement_subgraph_embedded_driver",
     }
 
 

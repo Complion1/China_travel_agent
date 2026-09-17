@@ -22,6 +22,9 @@ from app.requirement_subgraph.models import (
     RequirementConfirmationInterrupt,
     RequirementPauseEnvelope,
     RequirementResumeEnvelope,
+    RequirementSubgraphDurablePause,
+    _pause_token_digest,
+    _state_digest,
 )
 from app.requirements import RequirementErrorCode
 from app.workflow_contracts import (
@@ -343,15 +346,27 @@ def test_paused_confirmation_source_and_summary_must_match_outcome(source, summa
         requirement_outcome=transition.outcome,
         artifact_refs=(),
     )
+    pause = RequirementPauseEnvelope(
+        pause_token="a" * 32,
+        interrupt=RequirementConfirmationInterrupt(
+            source_outcome_type=source,
+            summary=summary,
+        ),
+    )
     with pytest.raises(ValidationError):
         RequirementSubgraphPaused(
             state=state,
-            pause=RequirementPauseEnvelope(
-                pause_token="a" * 32,
-                interrupt=RequirementConfirmationInterrupt(
-                    source_outcome_type=source,
-                    summary=summary,
+            pause=pause,
+            durable_pause=RequirementSubgraphDurablePause(
+                run_id=state.run_id,
+                trace_id=state.trace_id,
+                state_digest=_state_digest(state),
+                pause_token_digest=_pause_token_digest(
+                    state.run_id,
+                    pause.pause_token,
                 ),
+                operation_nonce="b" * 32,
+                interrupt=pause.interrupt,
             ),
         )
 

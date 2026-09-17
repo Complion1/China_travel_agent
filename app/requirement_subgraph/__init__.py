@@ -10,6 +10,10 @@ from app.requirement_subgraph.errors import (
     RequirementSubgraphStateError,
 )
 from app.requirement_subgraph.coordinator import RequirementSubgraphCoordinator
+from app.requirement_subgraph.embedded import (
+    RequirementSubgraphEmbeddedDriver,
+    create_requirement_subgraph_embedded_driver,
+)
 from app.requirement_subgraph.checkpoint import RequirementCheckpointSerializer
 from app.requirement_subgraph.graph import build_requirement_subgraph
 from app.requirement_subgraph.runtime import (
@@ -31,6 +35,7 @@ from app.requirement_subgraph.models import (
     RequirementSubgraphBudgetExceeded,
     RequirementSubgraphConfirmed,
     RequirementSubgraphCoordinatorLimits,
+    RequirementSubgraphDurablePause,
     RequirementSubgraphDomainFailed,
     RequirementSubgraphPaused,
     RequirementSubgraphResult,
@@ -55,6 +60,7 @@ __all__ = [
     "RequirementResume",
     "RequirementPauseEnvelope",
     "RequirementResumeEnvelope",
+    "RequirementSubgraphDurablePause",
     "RequirementSubgraphPaused",
     "RequirementSubgraphConfirmed",
     "RequirementSubgraphDomainFailed",
@@ -81,7 +87,9 @@ __all__ = [
     "RequirementSubgraphCapacityExceededError",
     "RequirementCheckpointSerializer",
     "RequirementSubgraphCoordinator",
+    "RequirementSubgraphEmbeddedDriver",
     "RequirementSubgraphRuntime",
     "build_requirement_subgraph",
     "create_demo_requirement_subgraph_runtime",
+    "create_requirement_subgraph_embedded_driver",
 ]

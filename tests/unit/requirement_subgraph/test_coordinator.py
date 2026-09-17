@@ -30,7 +30,9 @@ from app.workflow_contracts import (
     WorkflowPhase,
 )
 from app.requirement_subgraph import (
+    RequirementClarificationInterrupt,
     RequirementClarificationResume,
+    RequirementConfirmationInterrupt,
     RequirementPauseEnvelope,
     RequirementResumeEnvelope,
     RequirementSubgraphCapacityExceededError,
@@ -41,10 +43,12 @@ from app.requirement_subgraph import (
     RequirementSubgraphStateError,
     RequirementSubgraphCoordinator,
     RequirementSubgraphCoordinatorLimits,
+    RequirementSubgraphDurablePause,
     RequirementSubgraphBudgetExceeded,
     RequirementSubgraphConfirmed,
     REQUIREMENTS_CLARIFICATION_ROUND_KEY,
 )
+from app.requirement_subgraph.models import _pause_token_digest, _state_digest
 from tests.requirement_subgraph_fakes import (
     PerRunBudgetManagerFactory,
     RecordingRequirementSubgraphSignalSink,
@@ -172,6 +176,23 @@ def _confirmation_resume_envelope(waiting, token):
     )
 
 
+def _durable_pause_for(
+    state,
+    interrupt,
+    *,
+    pause_token: str = "a" * 32,
+    operation_nonce: str = "b" * 32,
+):
+    return RequirementSubgraphDurablePause(
+        run_id=state.run_id,
+        trace_id=state.trace_id,
+        state_digest=_state_digest(state),
+        pause_token_digest=_pause_token_digest(state.run_id, pause_token),
+        operation_nonce=operation_nonce,
+        interrupt=interrupt,
+    )
+
+
 async def _start_and_pause_as(coordinator, initial, waiting, interrupt):
     async with coordinator.start_operation(state=initial, turn=make_turn(initial)):
         coordinator._ensure_current_pause(state=initial, interrupt=interrupt)
@@ -229,6 +250,7 @@ def _assert_fault_tombstone(record):
     assert record.pause_token is None
     assert record.operation_nonce is None
     assert record.interrupt_descriptor is None
+    assert record.durable_pause is None
     assert record.pending_result is None
     assert record.active_lease is None
     assert not record.operation_lock.locked()
@@ -1733,3 +1755,163 @@ async def test_coordinator_scope_cleanup_and_local_result_mismatch_fault():
         assert caught.value.args == ()
     finally:
         coordinator_module._CURRENT_LEASE.reset(token)
+
+
+def test_durable_pause_token_and_interrupt_preflight_cover_all_waiting_branches():
+    initial = make_initial_state()
+    clarification = _waiting_state(initial)
+    confirmation = _confirmation_state(initial)
+    invalidated = _invalidated_state(initial)
+    clarification_interrupt = RequirementClarificationInterrupt(message="请补充")
+    confirmation_interrupt = RequirementConfirmationInterrupt(
+        source_outcome_type="need_confirmation",
+        summary="请确认",
+    )
+    invalidated_interrupt = RequirementConfirmationInterrupt(
+        source_outcome_type="invalidated",
+        summary="需求已变化",
+    )
+    durable = _durable_pause_for(clarification, clarification_interrupt)
+    coordinator, sink, factory = _coordinator()
+
+    coordinator._verify_durable_pause_token(
+        durable_pause=durable,
+        pause_token="a" * 32,
+    )
+    with pytest.raises(RequirementSubgraphResumeRejectedError):
+        coordinator._verify_durable_pause_token(
+            durable_pause=durable,
+            pause_token="not-a-token",  # type: ignore[arg-type]
+        )
+    with pytest.raises(RequirementSubgraphResumeRejectedError):
+        coordinator._verify_durable_pause_token(
+            durable_pause=durable,
+            pause_token="f" * 32,
+        )
+    with pytest.raises(RequirementSubgraphResumeRejectedError) as caught:
+        coordinator._verify_durable_pause_token(
+            durable_pause=durable.model_copy(
+                update={"operation_nonce": "a" * 32},
+            ),
+            pause_token="a" * 32,
+        )
+    assert caught.value.args == ()
+    assert coordinator._records == {}
+    assert factory.created == []
+    assert sink.calls == []
+
+    assert coordinator._interrupt_matches_state(clarification, clarification_interrupt)
+    assert not coordinator._interrupt_matches_state(
+        clarification,
+        confirmation_interrupt,
+    )
+    assert coordinator._interrupt_matches_state(confirmation, confirmation_interrupt)
+    assert not coordinator._interrupt_matches_state(
+        confirmation,
+        invalidated_interrupt,
+    )
+    assert coordinator._interrupt_matches_state(invalidated, invalidated_interrupt)
+    assert not coordinator._interrupt_matches_state(
+        invalidated,
+        confirmation_interrupt,
+    )
+    assert not coordinator._interrupt_matches_state(
+        _confirmed_state(initial),
+        clarification_interrupt,
+    )
+
+
+@pytest.mark.asyncio
+async def test_durable_resume_rehydrate_covers_collision_existing_capacity_and_manager_guards(
+    monkeypatch,
+):
+    class BodyError(Exception):
+        pass
+
+    initial = make_initial_state()
+    waiting = _waiting_state(initial)
+    interrupt = RequirementClarificationInterrupt(message="请补充")
+    durable = _durable_pause_for(waiting, interrupt)
+    resume = RequirementClarificationResume(turn=make_turn(initial))
+
+    collision_sequence = SequenceSecretHex(("b" * 32, "c" * 32))
+    monkeypatch.setattr(coordinator_module, "_new_secret_hex", collision_sequence)
+    coordinator, _, _ = _coordinator()
+    with pytest.raises(BodyError):
+        async with coordinator._resume_durable_operation(
+            state=waiting,
+            durable_pause=durable,
+            resume=resume,
+        ):
+            raise BodyError
+    assert collision_sequence.calls == 2
+
+    existing, _, _ = _coordinator()
+    existing_record = coordinator_module._RunRecord(
+        run_id=waiting.run_id,
+        trace_id=waiting.trace_id,
+        manager=ScriptedExecutionBudgetManager(),
+        loop=asyncio.get_running_loop(),
+        status="paused",
+        latest_state=waiting,
+        pause_token="c" * 32,
+        operation_nonce=durable.operation_nonce,
+        interrupt_descriptor=interrupt,
+        durable_pause=durable,
+    )
+    existing._records[waiting.run_id] = existing_record
+    with pytest.raises(BodyError):
+        async with existing._resume_durable_operation(
+            state=waiting,
+            durable_pause=durable,
+            resume=resume,
+        ):
+            raise BodyError
+
+    mismatched, _, _ = _coordinator()
+    mismatched_record = coordinator_module._RunRecord(
+        run_id=waiting.run_id,
+        trace_id=waiting.trace_id,
+        manager=ScriptedExecutionBudgetManager(),
+        loop=asyncio.get_running_loop(),
+        status="running",
+        latest_state=waiting,
+        pause_token="c" * 32,
+        operation_nonce=durable.operation_nonce,
+        interrupt_descriptor=interrupt,
+        durable_pause=durable,
+    )
+    mismatched._records[waiting.run_id] = mismatched_record
+    with pytest.raises(RequirementSubgraphResumeRejectedError):
+        async with mismatched._resume_durable_operation(
+            state=waiting,
+            durable_pause=durable,
+            resume=resume,
+        ):
+            raise AssertionError("mismatched record entered")
+
+    bad_factory = PerRunBudgetManagerFactory(lambda _run_id: object())
+    bad_manager, _, _ = _coordinator(factory=bad_factory)
+    with pytest.raises(RequirementSubgraphConfigurationError):
+        async with bad_manager._resume_durable_operation(
+            state=waiting,
+            durable_pause=durable,
+            resume=resume,
+        ):
+            raise AssertionError("invalid manager entered")
+
+    capacity, _, _ = _coordinator(max_runs=1)
+    other = make_initial_state()
+    capacity._records[other.run_id] = coordinator_module._RunRecord(
+        run_id=other.run_id,
+        trace_id=other.trace_id,
+        manager=ScriptedExecutionBudgetManager(),
+        loop=asyncio.get_running_loop(),
+    )
+    with pytest.raises(RequirementSubgraphCapacityExceededError):
+        async with capacity._resume_durable_operation(
+            state=waiting,
+            durable_pause=durable,
+            resume=resume,
+        ):
+            raise AssertionError("capacity guard entered")

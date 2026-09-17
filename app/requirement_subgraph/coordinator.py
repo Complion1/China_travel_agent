@@ -45,6 +45,7 @@ from app.requirement_subgraph.errors import (
 )
 from app.requirement_subgraph.models import (
     DEMO_REQUIREMENT_SUBGRAPH_COORDINATOR_LIMITS,
+    PauseToken,
     REQUIREMENTS_CLARIFICATION_ROUND_KEY,
     RequirementClarificationInterrupt,
     RequirementClarificationResume,
@@ -52,14 +53,18 @@ from app.requirement_subgraph.models import (
     RequirementConfirmationResume,
     RequirementInterrupt,
     RequirementPauseEnvelope,
+    RequirementResume,
     RequirementResumeEnvelope,
     RequirementSubgraphBudgetExceeded,
     RequirementSubgraphConfirmed,
     RequirementSubgraphCoordinatorLimits,
+    RequirementSubgraphDurablePause,
     RequirementSubgraphDomainFailed,
     RequirementSubgraphPaused,
     RequirementSubgraphResult,
     _fresh_model,
+    _pause_token_digest,
+    _state_digest,
 )
 from app.requirement_subgraph.signals import (
     BudgetConsumed,
@@ -120,6 +125,7 @@ class _RunRecord:
     pause_token: str | None = None
     operation_nonce: str | None = None
     interrupt_descriptor: RequirementInterrupt | None = None
+    durable_pause: RequirementSubgraphDurablePause | None = None
     pending_result: RequirementSubgraphResult | None = None
     lease_generation: int = 0
     active_lease: "_Lease | None" = None
@@ -142,16 +148,20 @@ class _OperationScope(AbstractAsyncContextManager[object]):
         self,
         coordinator: "RequirementSubgraphCoordinator",
         *,
-        kind: Literal["start", "resume"],
+        kind: Literal["start", "resume", "durable_resume"],
         state: TravelSessionState | None = None,
         turn: RequirementTurnInput | None = None,
         envelope: RequirementResumeEnvelope | None = None,
+        durable_pause: RequirementSubgraphDurablePause | None = None,
+        resume: RequirementResume | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._kind = kind
         self._state: object | None = state
         self._turn: object | None = turn
         self._envelope: object | None = envelope
+        self._durable_pause: object | None = durable_pause
+        self._resume: object | None = resume
         self._record: _RunRecord | None = None
         self._lease_token: Token[_Lease | None] | None = None
         self._lock_acquired = False
@@ -167,6 +177,13 @@ class _OperationScope(AbstractAsyncContextManager[object]):
                 value = await self._coordinator._enter_resume(
                     self, self._state, self._envelope
                 )
+            elif self._kind == "durable_resume":
+                value = await self._coordinator._enter_durable_resume(
+                    self,
+                    self._state,
+                    self._durable_pause,
+                    self._resume,
+                )
             else:
                 raise RequirementSubgraphStateError() from None
             self._entered = True
@@ -175,6 +192,8 @@ class _OperationScope(AbstractAsyncContextManager[object]):
             self._state = None
             self._turn = None
             self._envelope = None
+            self._durable_pause = None
+            self._resume = None
 
     async def __aexit__(self, exc_type, exc, traceback) -> bool | None:
         return await self._coordinator._exit_scope(
@@ -238,6 +257,56 @@ class RequirementSubgraphCoordinator:
             _OperationScope(self, kind="resume", state=state, envelope=envelope),
         )
 
+    def _resume_durable_operation(
+        self,
+        *,
+        state: TravelSessionState,
+        durable_pause: RequirementSubgraphDurablePause,
+        resume: RequirementResume,
+    ) -> AbstractAsyncContextManager[Command]:
+        return cast(
+            AbstractAsyncContextManager[Command],
+            _OperationScope(
+                self,
+                kind="durable_resume",
+                state=state,
+                durable_pause=durable_pause,
+                resume=resume,
+            ),
+        )
+
+    def _verify_durable_pause_token(
+        self,
+        *,
+        durable_pause: RequirementSubgraphDurablePause,
+        pause_token: PauseToken,
+    ) -> None:
+        fresh_pause = cast(
+            RequirementSubgraphDurablePause,
+            _fresh_exact(
+                RequirementSubgraphDurablePause,
+                durable_pause,
+                RequirementSubgraphResumeRejectedError,
+            ),
+        )
+        try:
+            fresh_token = TypeAdapter(PauseToken).validate_python(
+                pause_token,
+                strict=True,
+            )
+        except Exception:
+            raise RequirementSubgraphResumeRejectedError() from None
+        nonce_matches_token = hmac.compare_digest(
+            fresh_pause.operation_nonce,
+            fresh_token,
+        )
+        digest_matches = hmac.compare_digest(
+            fresh_pause.pause_token_digest,
+            _pause_token_digest(fresh_pause.run_id, fresh_token),
+        )
+        if nonce_matches_token or not digest_matches:
+            raise RequirementSubgraphResumeRejectedError() from None
+
     def _ensure_loop(self) -> None:
         try:
             loop = asyncio.get_running_loop()
@@ -282,16 +351,30 @@ class RequirementSubgraphCoordinator:
             descriptor = self._parse_interrupt(interrupt_value)
             if (
                 record.pause_token is None
+                or record.operation_nonce is None
                 or record.interrupt_descriptor is None
                 or descriptor != record.interrupt_descriptor
             ):
                 raise RequirementSubgraphStateError()
+            if record.durable_pause is None:
+                record.durable_pause = RequirementSubgraphDurablePause(
+                    run_id=fresh_state.run_id,
+                    trace_id=fresh_state.trace_id,
+                    state_digest=_state_digest(fresh_state),
+                    pause_token_digest=_pause_token_digest(
+                        fresh_state.run_id,
+                        record.pause_token,
+                    ),
+                    operation_nonce=record.operation_nonce,
+                    interrupt=descriptor,
+                )
             result = RequirementSubgraphPaused(
                 state=fresh_state,
                 pause=RequirementPauseEnvelope(
                     pause_token=record.pause_token,
                     interrupt=descriptor,
                 ),
+                durable_pause=record.durable_pause,
             )
             result = self._copy_result(result)
             self._mark_resolved(record)
@@ -400,6 +483,77 @@ class RequirementSubgraphCoordinator:
         scope._record = record
         try:
             return await self._commit_resume(scope, fresh_state, fresh_envelope)
+        except Exception:
+            await self._release_lease(scope, record)
+            raise
+
+    async def _enter_durable_resume(
+        self,
+        scope: _OperationScope,
+        state: object,
+        durable_pause: object | None,
+        resume: object | None,
+    ) -> Command:
+        self._ensure_loop()
+        fresh_state = cast(
+            TravelSessionState,
+            _fresh_exact(TravelSessionState, state, RequirementSubgraphInputError),
+        )
+        fresh_pause = cast(
+            RequirementSubgraphDurablePause,
+            _fresh_exact(
+                RequirementSubgraphDurablePause,
+                durable_pause,
+                RequirementSubgraphResumeRejectedError,
+            ),
+        )
+        fresh_resume = cast(
+            RequirementResume,
+            _fresh_union(
+                RequirementResume,
+                resume,
+                RequirementSubgraphResumeRejectedError,
+            ),
+        )
+        self._validate_durable_pause(fresh_state, fresh_pause)
+        loop = self._loop
+        assert loop is not None
+        async with self._admission_lock:
+            record = self._records.get(fresh_state.run_id)
+            if record is None:
+                if len(self._records) >= self._limits.max_runs:
+                    raise RequirementSubgraphCapacityExceededError() from None
+                manager = self._manager_factory(fresh_state.run_id)
+                if not self._has_manager_surface(manager):
+                    raise RequirementSubgraphConfigurationError() from None
+                ephemeral_token = _new_secret_hex()
+                while ephemeral_token == fresh_pause.operation_nonce:
+                    ephemeral_token = _new_secret_hex()
+                record = _RunRecord(
+                    run_id=fresh_state.run_id,
+                    trace_id=fresh_state.trace_id,
+                    manager=manager,
+                    loop=loop,
+                    status="paused",
+                    latest_state=fresh_state,
+                    pause_token=ephemeral_token,
+                    operation_nonce=fresh_pause.operation_nonce,
+                    interrupt_descriptor=fresh_pause.interrupt,
+                    durable_pause=fresh_pause,
+                )
+                self._records[fresh_state.run_id] = record
+        await record.operation_lock.acquire()
+        scope._lock_acquired = True
+        scope._record = record
+        try:
+            self._validate_durable_record(record, fresh_state, fresh_pause)
+            if record.pause_token is None:
+                raise RequirementSubgraphResumeRejectedError() from None
+            envelope = RequirementResumeEnvelope(
+                pause_token=record.pause_token,
+                resume=fresh_resume,
+            )
+            return await self._commit_resume(scope, fresh_state, envelope)
         except Exception:
             await self._release_lease(scope, record)
             raise
@@ -530,6 +684,66 @@ class RequirementSubgraphCoordinator:
         else:
             raise RequirementSubgraphResumeRejectedError() from None
 
+    def _validate_durable_pause(
+        self,
+        state: TravelSessionState,
+        durable_pause: RequirementSubgraphDurablePause,
+    ) -> None:
+        if (
+            state.schema_version != "2.0"
+            or state.phase is not WorkflowPhase.REQUIREMENTS
+            or state.delivery_status.value != "awaiting_user"
+            or state.terminal_code is not None
+            or state.terminal_outcome is not None
+            or durable_pause.run_id != state.run_id
+            or durable_pause.trace_id != state.trace_id
+            or durable_pause.state_digest != _state_digest(state)
+            or not self._interrupt_matches_state(state, durable_pause.interrupt)
+        ):
+            raise RequirementSubgraphResumeRejectedError() from None
+
+    def _validate_durable_record(
+        self,
+        record: _RunRecord,
+        state: TravelSessionState,
+        durable_pause: RequirementSubgraphDurablePause,
+    ) -> None:
+        if (
+            record.status != "paused"
+            or record.run_id != state.run_id
+            or record.trace_id != state.trace_id
+            or record.latest_state != state
+            or record.operation_nonce != durable_pause.operation_nonce
+            or record.interrupt_descriptor != durable_pause.interrupt
+            or record.durable_pause != durable_pause
+        ):
+            raise RequirementSubgraphResumeRejectedError() from None
+
+    @staticmethod
+    def _interrupt_matches_state(
+        state: TravelSessionState,
+        interrupt: RequirementInterrupt,
+    ) -> bool:
+        outcome = state.requirement_outcome
+        if type(outcome) is NeedClarification:
+            return (
+                type(interrupt) is RequirementClarificationInterrupt
+                and interrupt.message == outcome.message
+            )
+        if type(outcome) is NeedConfirmation:
+            return (
+                type(interrupt) is RequirementConfirmationInterrupt
+                and interrupt.source_outcome_type == "need_confirmation"
+                and interrupt.summary == outcome.summary
+            )
+        if type(outcome) is RequirementInvalidated:
+            return (
+                type(interrupt) is RequirementConfirmationInterrupt
+                and interrupt.source_outcome_type == "invalidated"
+                and interrupt.summary == outcome.summary
+            )
+        return False
+
     def _record_for_state(
         self,
         state: object,
@@ -583,6 +797,7 @@ class RequirementSubgraphCoordinator:
         record.pause_token = None
         record.operation_nonce = None
         record.interrupt_descriptor = None
+        record.durable_pause = None
         record.pending_result = None
 
     def _settle(self, record: _RunRecord, result_type: str) -> None:
@@ -593,6 +808,7 @@ class RequirementSubgraphCoordinator:
         record.pause_token = None
         record.operation_nonce = None
         record.interrupt_descriptor = None
+        record.durable_pause = None
 
     def _mark_resolved(self, record: _RunRecord) -> None:
         if record.lease_resolved:
@@ -705,6 +921,7 @@ class RequirementSubgraphCoordinator:
                 record.pause_token is None
                 or record.operation_nonce is None
                 or record.interrupt_descriptor != fresh_interrupt
+                or record.durable_pause is None
             ):
                 self._fault(record)
                 raise RequirementSubgraphStateError() from None
@@ -723,16 +940,23 @@ class RequirementSubgraphCoordinator:
         record.pause_token = token
         record.operation_nonce = nonce
         record.interrupt_descriptor = fresh_interrupt
+        record.durable_pause = None
         return token, nonce, fresh_interrupt
 
     def _take_pause_for_replay(self) -> tuple[str, RequirementInterrupt]:
         record = self._current_record()
-        if record.pause_token is None or record.operation_nonce is None or record.interrupt_descriptor is None:
+        if (
+            record.pause_token is None
+            or record.operation_nonce is None
+            or record.interrupt_descriptor is None
+            or record.durable_pause is None
+        ):
             raise RequirementSubgraphStateError() from None
         nonce = record.operation_nonce
         descriptor = record.interrupt_descriptor
         record.pause_token = None
         record.interrupt_descriptor = None
+        record.durable_pause = None
         record.status = "running"
         return nonce, descriptor
 

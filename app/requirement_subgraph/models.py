@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Annotated, Literal, TypeAlias
@@ -29,6 +30,7 @@ from app.requirements import (
 )
 from app.workflow_contracts import (
     BudgetExceeded as WorkflowBudgetExceeded,
+    ContentHash,
     DeliveryStatus,
     ExecutionBudgetKey,
     ExecutionBudgetScope,
@@ -42,6 +44,8 @@ _HEX32 = r"^[0-9a-f]{32}$"
 _CLARIFICATION_STEP = re.compile(r"^clarification_round_[0-9a-f]{32}$")
 
 PauseToken = Annotated[str, StringConstraints(pattern=_HEX32)]
+
+_PAUSE_TOKEN_DIGEST_DOMAIN = b"requirement-subgraph-pause-token-v1\x00"
 
 
 def _fresh_model(model_type: object, value: BaseModel) -> object:
@@ -69,6 +73,40 @@ def _fresh_model(model_type: object, value: BaseModel) -> object:
         allow_nan=False,
     )
     return adapter.validate_json(encoded, strict=True)
+
+
+def _canonical_model_bytes(model_type: object, value: BaseModel) -> bytes:
+    fresh = _fresh_model(model_type, value)
+    assert isinstance(fresh, BaseModel)
+    return json.dumps(
+        fresh.model_dump(
+            mode="json",
+            exclude_none=False,
+            by_alias=False,
+            exclude_computed_fields=True,
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _state_digest(state: TravelSessionState) -> ContentHash:
+    return ContentHash(
+        "sha256:"
+        + hashlib.sha256(_canonical_model_bytes(TravelSessionState, state)).hexdigest()
+    )
+
+
+def _pause_token_digest(run_id: UUID, pause_token: str) -> ContentHash:
+    payload = (
+        _PAUSE_TOKEN_DIGEST_DOMAIN
+        + str(run_id).encode("ascii")
+        + b"\x00"
+        + pause_token.encode("ascii")
+    )
+    return ContentHash("sha256:" + hashlib.sha256(payload).hexdigest())
 
 
 class RequirementClarificationInterrupt(BaseModel):
@@ -168,6 +206,29 @@ class RequirementResumeEnvelope(BaseModel):
         return self
 
 
+class RequirementSubgraphDurablePause(BaseModel):
+    """Safe evidence required to rehydrate one embedded paused operation."""
+
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    run_id: UUID
+    trace_id: UUID
+    state_digest: ContentHash
+    pause_token_digest: ContentHash = Field(repr=False)
+    operation_nonce: PauseToken
+    interrupt: RequirementInterrupt
+
+    @model_validator(mode="after")
+    def fresh_interrupt(self) -> "RequirementSubgraphDurablePause":
+        object.__setattr__(
+            self,
+            "interrupt",
+            _fresh_model(RequirementInterrupt, self.interrupt),
+        )
+        return self
+
+
 def _requirements_state_base(state: TravelSessionState) -> None:
     if (
         state.phase is not WorkflowPhase.REQUIREMENTS
@@ -184,6 +245,7 @@ class RequirementSubgraphPaused(BaseModel):
     result_type: Literal["paused"] = "paused"
     state: TravelSessionState
     pause: RequirementPauseEnvelope
+    durable_pause: RequirementSubgraphDurablePause
 
     @model_validator(mode="after")
     def validate_pause_contract(self) -> "RequirementSubgraphPaused":
@@ -192,6 +254,11 @@ class RequirementSubgraphPaused(BaseModel):
             self,
             "pause",
             _fresh_model(RequirementPauseEnvelope, self.pause),
+        )
+        object.__setattr__(
+            self,
+            "durable_pause",
+            _fresh_model(RequirementSubgraphDurablePause, self.durable_pause),
         )
         _requirements_state_base(self.state)
         if self.state.delivery_status is not DeliveryStatus.AWAITING_USER:
@@ -220,6 +287,17 @@ class RequirementSubgraphPaused(BaseModel):
                 raise ValueError("invalidated interrupt mismatch")
         else:
             raise ValueError("paused result requires a waiting outcome")
+        durable = self.durable_pause
+        if (
+            durable.run_id != self.state.run_id
+            or durable.trace_id != self.state.trace_id
+            or durable.state_digest != _state_digest(self.state)
+            or durable.pause_token_digest
+            != _pause_token_digest(self.state.run_id, self.pause.pause_token)
+            or durable.operation_nonce == self.pause.pause_token
+            or durable.interrupt != interrupt
+        ):
+            raise ValueError("durable pause mismatch")
         return self
 
 
@@ -334,6 +412,7 @@ __all__ = [
     "RequirementResume",
     "RequirementPauseEnvelope",
     "RequirementResumeEnvelope",
+    "RequirementSubgraphDurablePause",
     "RequirementSubgraphPaused",
     "RequirementSubgraphConfirmed",
     "RequirementSubgraphDomainFailed",

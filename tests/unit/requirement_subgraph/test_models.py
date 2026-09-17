@@ -42,8 +42,10 @@ from app.requirement_subgraph import (
     RequirementSubgraphBudgetExceeded,
     RequirementSubgraphConfirmed,
     RequirementSubgraphDomainFailed,
+    RequirementSubgraphDurablePause,
     RequirementSubgraphPaused,
 )
+from app.requirement_subgraph.models import _pause_token_digest, _state_digest
 from tests.requirement_subgraph_fakes import make_initial_state, make_turn
 
 
@@ -76,6 +78,22 @@ def _clarification_state():
             "requirement_state": transition.state,
             "requirement_outcome": transition.outcome,
         }
+    )
+
+
+def _durable_pause(
+    state,
+    pause: RequirementPauseEnvelope,
+    *,
+    operation_nonce: str = "d" * 32,
+) -> RequirementSubgraphDurablePause:
+    return RequirementSubgraphDurablePause(
+        run_id=state.run_id,
+        trace_id=state.trace_id,
+        state_digest=_state_digest(state),
+        pause_token_digest=_pause_token_digest(state.run_id, pause.pause_token),
+        operation_nonce=operation_nonce,
+        interrupt=pause.interrupt,
     )
 
 
@@ -228,11 +246,21 @@ def test_dto_field_order_discriminators_and_defaults_are_exact():
         "pause_token",
         "resume",
     )
+    assert tuple(RequirementSubgraphDurablePause.model_fields) == (
+        "schema_version",
+        "run_id",
+        "trace_id",
+        "state_digest",
+        "pause_token_digest",
+        "operation_nonce",
+        "interrupt",
+    )
     assert tuple(RequirementSubgraphPaused.model_fields) == (
         "schema_version",
         "result_type",
         "state",
         "pause",
+        "durable_pause",
     )
     assert tuple(RequirementSubgraphConfirmed.model_fields) == (
         "schema_version",
@@ -324,7 +352,11 @@ def test_pause_payload_is_safe_and_json_round_trip_preserves_union_branch():
         pause_token="b" * 32,
         interrupt=RequirementClarificationInterrupt(message="请补充需求"),
     )
-    result = RequirementSubgraphPaused(state=state, pause=pause)
+    result = RequirementSubgraphPaused(
+        state=state,
+        pause=pause,
+        durable_pause=_durable_pause(state, pause),
+    )
     adapter = TypeAdapter(
         RequirementSubgraphPaused
     )
@@ -339,26 +371,52 @@ def test_pause_payload_is_safe_and_json_round_trip_preserves_union_branch():
     assert "requirement" not in pause.interrupt.model_dump_json()
 
 
+def test_durable_pause_hides_token_and_rejects_digest_or_nonce_mismatch():
+    state = _clarification_state()
+    pause = RequirementPauseEnvelope(
+        pause_token="b" * 32,
+        interrupt=RequirementClarificationInterrupt(message="请补充需求"),
+    )
+    durable = _durable_pause(state, pause)
+    assert pause.pause_token not in repr(durable)
+    assert pause.pause_token not in durable.model_dump_json()
+    for tampered in (
+        durable.model_copy(update={"state_digest": "sha256:" + "0" * 64}),
+        durable.model_copy(update={"pause_token_digest": "sha256:" + "0" * 64}),
+        durable.model_copy(update={"operation_nonce": pause.pause_token}),
+    ):
+        with pytest.raises(ValidationError):
+            RequirementSubgraphPaused(
+                state=state,
+                pause=pause,
+                durable_pause=tampered,
+            )
+
+
 def test_paused_cross_field_invariants_reject_wrong_message_or_branch():
     state = _clarification_state()
     with pytest.raises(ValidationError):
+        pause = RequirementPauseEnvelope(
+            pause_token="c" * 32,
+            interrupt=RequirementClarificationInterrupt(message="wrong"),
+        )
         RequirementSubgraphPaused(
             state=state,
-            pause=RequirementPauseEnvelope(
-                pause_token="c" * 32,
-                interrupt=RequirementClarificationInterrupt(message="wrong"),
-            ),
+            pause=pause,
+            durable_pause=_durable_pause(state, pause),
         )
     with pytest.raises(ValidationError):
+        pause = RequirementPauseEnvelope(
+            pause_token="c" * 32,
+            interrupt=RequirementConfirmationInterrupt(
+                source_outcome_type="need_confirmation",
+                summary="wrong branch",
+            ),
+        )
         RequirementSubgraphPaused(
             state=state,
-            pause=RequirementPauseEnvelope(
-                pause_token="c" * 32,
-                interrupt=RequirementConfirmationInterrupt(
-                    source_outcome_type="need_confirmation",
-                    summary="wrong branch",
-                ),
-            ),
+            pause=pause,
+            durable_pause=_durable_pause(state, pause),
         )
 
 
@@ -396,10 +454,12 @@ def test_paused_confirmation_invalidated_and_clarification_display_fields_must_m
         interrupt = RequirementConfirmationInterrupt(
             source_outcome_type="invalidated", summary="wrong"
         )
+    pause = RequirementPauseEnvelope(pause_token="c" * 32, interrupt=interrupt)
     with pytest.raises(ValidationError):
         RequirementSubgraphPaused(
             state=state,
-            pause=RequirementPauseEnvelope(pause_token="c" * 32, interrupt=interrupt),
+            pause=pause,
+            durable_pause=_durable_pause(state, pause),
         )
 
 
@@ -561,15 +621,17 @@ def test_invalidated_state_requires_digest_and_resume_branch_is_confirmation():
             "requirement_outcome": transition.outcome,
         }
     )
+    pause = RequirementPauseEnvelope(
+        pause_token="e" * 32,
+        interrupt=RequirementConfirmationInterrupt(
+            source_outcome_type="invalidated",
+            summary="新的摘要",
+        ),
+    )
     result = RequirementSubgraphPaused(
         state=workflow_state,
-        pause=RequirementPauseEnvelope(
-            pause_token="e" * 32,
-            interrupt=RequirementConfirmationInterrupt(
-                source_outcome_type="invalidated",
-                summary="新的摘要",
-            ),
-        ),
+        pause=pause,
+        durable_pause=_durable_pause(workflow_state, pause),
     )
     assert result.pause.interrupt.source_outcome_type == "invalidated"
 
@@ -597,11 +659,13 @@ def test_paused_result_rejects_terminal_state_wrong_delivery_and_non_waiting_out
                 }
             ),
             pause=pause,
+            durable_pause=_durable_pause(clarification, pause),
         )
     with pytest.raises(ValidationError):
         RequirementSubgraphPaused(
             state=clarification.model_copy(update={"delivery_status": DeliveryStatus.IN_PROGRESS}),
             pause=pause,
+            durable_pause=_durable_pause(clarification, pause),
         )
     with pytest.raises(ValidationError):
         confirmed_domain_state = RequirementDomainState(confirmation_status="confirmed")
@@ -611,13 +675,15 @@ def test_paused_result_rejects_terminal_state_wrong_delivery_and_non_waiting_out
             metadata_without_raw_evidence=confirmed_domain_state.metadata,
             confirmation_summary_digest="digest",
         )
-        RequirementSubgraphPaused(
-            state=make_initial_state().model_copy(
+        non_waiting = make_initial_state().model_copy(
                 update={
                     "delivery_status": DeliveryStatus.AWAITING_USER,
                     "requirement_state": confirmed_domain_state,
                     "requirement_outcome": confirmed_outcome,
                 }
-            ),
+            )
+        RequirementSubgraphPaused(
+            state=non_waiting,
             pause=pause,
+            durable_pause=_durable_pause(non_waiting, pause),
         )

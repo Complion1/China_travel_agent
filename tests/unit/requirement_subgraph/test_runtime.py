@@ -15,6 +15,7 @@ from app.requirement_subgraph import (
     RequirementSubgraphConfigurationError,
     RequirementSubgraphCoordinator,
     RequirementSubgraphCoordinatorLimits,
+    RequirementSubgraphEmbeddedDriver,
     RequirementSubgraphInputError,
     RequirementSubgraphResumeRejectedError,
     RequirementSubgraphRunFaultedError,
@@ -92,6 +93,43 @@ def test_mismatched_coordinator_and_duplicate_runtime_are_configuration_errors()
     with pytest.raises(RequirementSubgraphConfigurationError):
         RequirementSubgraphRuntime(graph=graph, coordinator=coordinator)
     assert runtime._graph is graph
+
+
+def test_embedded_driver_rejects_standalone_mismatch_and_duplicate_claim():
+    service = ScriptedRequirementDomainService()
+    coordinator = _coordinator(service)
+    embedded_graph = build_requirement_subgraph(
+        coordinator=coordinator,
+        checkpointer=None,
+    )
+    driver = RequirementSubgraphEmbeddedDriver(
+        graph=embedded_graph,
+        coordinator=coordinator,
+    )
+    assert driver.graph is embedded_graph
+    assert driver.limits == RequirementSubgraphCoordinatorLimits(max_runs=2)
+
+    with pytest.raises(RequirementSubgraphConfigurationError):
+        RequirementSubgraphEmbeddedDriver(
+            graph=embedded_graph,
+            coordinator=coordinator,
+        )
+    with pytest.raises(RequirementSubgraphConfigurationError):
+        RequirementSubgraphEmbeddedDriver(
+            graph=embedded_graph,
+            coordinator=_coordinator(service),
+        )
+
+    standalone_coordinator = _coordinator(service)
+    standalone_graph = build_requirement_subgraph(
+        coordinator=standalone_coordinator,
+        checkpointer=InMemorySaver(serde=RequirementCheckpointSerializer()),
+    )
+    with pytest.raises(RequirementSubgraphConfigurationError):
+        RequirementSubgraphEmbeddedDriver(
+            graph=standalone_graph,
+            coordinator=standalone_coordinator,
+        )
 
 
 @pytest.mark.asyncio
