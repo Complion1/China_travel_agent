@@ -59,6 +59,28 @@ services:
       - upgrade
       - head
 
+  durable-migrate:
+    <<: *agent-security
+    profiles: ["production"]
+    image: china-travel-agent:local
+    build:
+      <<: *agent-build
+      target: runtime
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      artifact-migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *agent-environment
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-china_travel_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-china_travel_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only-change-me}
+    command: ["python", "-m", "app.durable_execution.migrate"]
+
   test:
     <<: *agent-security
     profiles: ["test"]

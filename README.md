@@ -1,6 +1,22 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–10 已完成并进入本地 `main` 稳定基线；Module 09 的结构化输入 Demo 已通过离线 Gate、独立真实规划和历史 Module 06→09 单次真实 DeepSeek Flash／百度地图联调，最新真实联调发现的问题已按所属模块登记并由用户决定暂缓。生产 LLM Profile 继续使用 DeepSeek V4 Flash。Module 10 已通过 PostgreSQL Artifact 持久化、迁移、并发、真实重启、真实 API 产物重读和回归资格门；完整 Demo 主链仍等待 Module 13 显式装配，因此现有 Module 01–09 生产组合尚未自动切换 Repository。Module 11 的 checkpoint、执行预算和恢复状态持久化仍未开始。各模块的真实结果与边界见实施状态快照；Module 10 本地 commit 和 fast-forward merge 已执行，push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–10 已完成并进入本地 `main` 稳定基线；Module 09 的结构化输入 Demo 已通过离线 Gate、独立真实规划和历史 Module 06→09 单次真实 DeepSeek Flash／百度地图联调，最新真实联调发现的问题已按所属模块登记并由用户决定暂缓。生产 LLM Profile 继续使用 DeepSeek V4 Flash。Module 10 已通过 PostgreSQL Artifact 持久化、迁移、并发、真实重启、真实 API 产物重读和回归资格门；完整 Demo 主链仍等待 Module 13 显式装配，因此现有 Module 01–09 生产组合尚未自动切换 Repository。Module 11 的 checkpoint、执行预算和恢复状态持久化已在未提交功能工作区实现，并提供显式迁移和 Docker 导入自检；演示优先验收与原严格资格的区别见实施状态快照，不代表完整 Demo 已装配。Module 10 本地 commit 和 fast-forward merge 已执行，push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
+
+## Module 11 显式迁移与导入自检
+
+Module 11 提供持久执行库，不提供完整旅游 CLI。默认 runtime 只导入 Module 01–11，不连接数据库、不自动迁移；启动 runtime 不会自动拉起迁移服务。
+
+配置本地 `.env` 的 PostgreSQL 变量后，显式执行：
+
+```bash
+docker compose --profile production build runtime
+docker compose --profile production run --rm durable-migrate
+docker compose run --rm --no-deps runtime
+```
+
+`durable-migrate` 等待 PostgreSQL 健康和 `artifact-migrate` 成功，再执行 `python -m app.durable_execution.migrate`；可显式重复执行。`production` profile 包含数据库和迁移服务，因此启用该 profile 后无目标地执行 `up` 也会启动这些服务，应使用上述明确目标命令。不要把测试迁移指向正式数据库；不要删除含有需保留数据的卷。
+
+Module 11 按用户授权进行本地提交与合并；演示范围验收和原覆盖率/延期条件的区别见 [T07 验收记录](docs/11_t07_demo_acceptance.md)。现有通用 test target 的 M11 contract 需要隔离 PostgreSQL，不能将无数据库环境的全套运行当成有效验收。完整业务装配继续留给 Module 13。
 
 ## 架构基线
 
@@ -18,7 +34,7 @@ CLI Demo
 - LangGraph：主工作流、状态转换、受控循环、interrupt/resume 和 checkpoint。
 - Runtime Agent Skill：单一业务能力、Prompt、工具白名单、调用预算、停止条件与失败策略。
 - MCP：外部 Agent 工具协议。首版百度地图能力由模块 06 的 typed adapter 和 MCP Gateway 接入。
-- PostgreSQL：Module 10 已提供显式创建的 Artifact Repository、Runtime 和 Alembic 迁移；Module 11 将来负责 checkpoint、执行账本和跨进程恢复。数据库不通过 MCP，现有 Module 01–09 Demo 组合在 Module 13 接线前仍使用进程内 Repository，也不会在 PostgreSQL 故障时自动回退或双写。
+- PostgreSQL：Module 10 已提供显式创建的 Artifact Repository、Runtime 和 Alembic 迁移；Module 11 工作区实现负责 checkpoint、执行账本和跨进程恢复，采用独立的显式迁移入口。数据库不通过 MCP，现有 Module 01–09 Demo 组合在 Module 13 接线前仍使用进程内 Repository，也不会在 PostgreSQL 故障时自动回退或双写。
 
 外部工具型 Skill 在项目已指定 MCP Server 时必须走 MCP；纯领域计算和确定性校验不使用 MCP。Skill 不得直连供应商 HTTP、直接管理 MCP session 或把 MCP 原始 payload 写入 Graph state。DeepSeek 由模块 02 通过 LangChain 专用集成调用，不经过 MCP。
 
@@ -73,7 +89,7 @@ CLI Demo
 
 ## Docker 开发与测试
 
-当前容器承诺复现已经实现的模块 01–10，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 会导入模块 01–10 的十个生产包，并输出 `modules 01-10 import successfully`；这只证明包可加载，不会自动连接或迁移数据库。test target 包含当前 tests 树，pytest 的冻结命令通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+当前容器包含已经实现的模块 01–11，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 导入模块 01–11，并输出 `modules 01-11 import successfully`；这只证明包可加载，不会自动连接或迁移数据库。test target 包含当前 tests 树，pytest 通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。M11 的数据库合同测试须按验收记录提供隔离 PostgreSQL；默认 test 服务不替代该编排。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
