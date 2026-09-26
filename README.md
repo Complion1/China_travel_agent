@@ -1,6 +1,6 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–10 已完成并进入本地 `main` 稳定基线；Module 09 的结构化输入 Demo 已通过离线 Gate、独立真实规划和历史 Module 06→09 单次真实 DeepSeek Flash／百度地图联调，最新真实联调发现的问题已按所属模块登记并由用户决定暂缓。生产 LLM Profile 继续使用 DeepSeek V4 Flash。Module 10 已通过 PostgreSQL Artifact 持久化、迁移、并发、真实重启、真实 API 产物重读和回归资格门；完整 Demo 主链仍等待 Module 13 显式装配，因此现有 Module 01–09 生产组合尚未自动切换 Repository。Module 11 的 checkpoint、执行预算和恢复状态持久化已在未提交功能工作区实现，并提供显式迁移和 Docker 导入自检；演示优先验收与原严格资格的区别见实施状态快照，不代表完整 Demo 已装配。Module 10 本地 commit 和 fast-forward merge 已执行，push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–10 已完成并进入本地 `main` 稳定基线；Module 09 的结构化输入 Demo 已通过离线 Gate、独立真实规划和历史 Module 06→09 单次真实 DeepSeek Flash／百度地图联调，最新真实联调发现的问题已按所属模块登记并由用户决定暂缓。生产 LLM Profile 继续使用 DeepSeek V4 Flash。Module 10 已通过 PostgreSQL Artifact 持久化、迁移、并发、真实重启、真实 API 产物重读和回归资格门；完整 Demo 主链仍等待 Module 13 显式装配，因此现有 Module 01–09 生产组合尚未自动切换 Repository。Module 11 的 checkpoint、执行预算和恢复状态持久化已提交并快进合并到本地 `main`，并提供显式迁移和 Docker 导入自检；演示优先验收与原严格资格的区别见实施状态快照，不代表完整 Demo 已装配。Module 10 本地 commit 和 fast-forward merge 已执行，push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
 
 ## Module 11 显式迁移与导入自检
 
@@ -16,7 +16,7 @@ docker compose run --rm --no-deps runtime
 
 `durable-migrate` 等待 PostgreSQL 健康和 `artifact-migrate` 成功，再执行 `python -m app.durable_execution.migrate`；可显式重复执行。`production` profile 包含数据库和迁移服务，因此启用该 profile 后无目标地执行 `up` 也会启动这些服务，应使用上述明确目标命令。不要把测试迁移指向正式数据库；不要删除含有需保留数据的卷。
 
-Module 11 按用户授权进行本地提交与合并；演示范围验收和原覆盖率/延期条件的区别见 [T07 验收记录](docs/11_t07_demo_acceptance.md)。现有通用 test target 的 M11 contract 需要隔离 PostgreSQL，不能将无数据库环境的全套运行当成有效验收。完整业务装配继续留给 Module 13。
+Module 11 已按用户授权提交并合并到本地 main（实现提交 `985dcde`）；演示范围验收和原覆盖率/延期条件的区别见 [T07 验收记录](docs/11_t07_demo_acceptance.md)。现有通用 test target 的 M11 contract 需要隔离 PostgreSQL，不能将无数据库环境的全套运行当成有效验收。完整业务装配继续留给 Module 13。
 
 ## 架构基线
 
