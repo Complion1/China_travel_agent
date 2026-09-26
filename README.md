@@ -2,9 +2,11 @@
 
 中国境内旅游攻略 Agent。模块 01–10 已完成并进入本地 `main` 稳定基线；Module 09 的结构化输入 Demo 已通过离线 Gate、独立真实规划和历史 Module 06→09 单次真实 DeepSeek Flash／百度地图联调，最新真实联调发现的问题已按所属模块登记并由用户决定暂缓。生产 LLM Profile 继续使用 DeepSeek V4 Flash。Module 10 已通过 PostgreSQL Artifact 持久化、迁移、并发、真实重启、真实 API 产物重读和回归资格门；完整 Demo 主链仍等待 Module 13 显式装配，因此现有 Module 01–09 生产组合尚未自动切换 Repository。Module 11 的 checkpoint、执行预算和恢复状态持久化已提交并快进合并到本地 `main`，并提供显式迁移和 Docker 导入自检；演示优先验收与原严格资格的区别见实施状态快照，不代表完整 Demo 已装配。Module 10 本地 commit 和 fast-forward merge 已执行，push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
 
+Module 12 的确定性结果格式化已实现，当前源码包含模块 01–12；独立收尾验证结果见 [实施状态快照](./docs/IMPLEMENTATION_STATUS.md)。三天真实需求业务链的单轮测试停在需求抽取修复阶段，尚未通过完整业务链验收，具体证据及后续修复边界见 [真实联调报告](./docs/12_live_pipeline_acceptance.md)。
+
 ## Module 11 显式迁移与导入自检
 
-Module 11 提供持久执行库，不提供完整旅游 CLI。默认 runtime 只导入 Module 01–11，不连接数据库、不自动迁移；启动 runtime 不会自动拉起迁移服务。
+Module 11 提供持久执行库，不提供完整旅游 CLI。当前默认 runtime 只导入 Module 01–12，不连接数据库、不自动迁移；启动 runtime 不会自动拉起迁移服务。
 
 配置本地 `.env` 的 PostgreSQL 变量后，显式执行：
 
@@ -17,6 +19,16 @@ docker compose run --rm --no-deps runtime
 `durable-migrate` 等待 PostgreSQL 健康和 `artifact-migrate` 成功，再执行 `python -m app.durable_execution.migrate`；可显式重复执行。`production` profile 包含数据库和迁移服务，因此启用该 profile 后无目标地执行 `up` 也会启动这些服务，应使用上述明确目标命令。不要把测试迁移指向正式数据库；不要删除含有需保留数据的卷。
 
 Module 11 已按用户授权提交并合并到本地 main（实现提交 `985dcde`）；演示范围验收和原覆盖率/延期条件的区别见 [T07 验收记录](docs/11_t07_demo_acceptance.md)。现有通用 test target 的 M11 contract 需要隔离 PostgreSQL，不能将无数据库环境的全套运行当成有效验收。完整业务装配继续留给 Module 13。
+
+## Module 12 结果生成与保存交接
+
+`app.result_formatting` 提供 `ResultFormattingService`，只处理 Module 09 的 `completed` 行程，并只读已保存的 Module 07/08/09 公共证据。输入需要已确认的工作流 `state` 和显式 `itinerary_ref`；输出为按日分块的结构化结果、中文 Markdown 快照及汇总索引，不提供部分行程预览，不重新调用模型或供应商。
+
+调用顺序为 `prepare` → 调用方保存全部日块 → `build_index` 核验已保存日块 → 调用方保存索引 → `load` 完整读取。Module 12 负责生成和校验，保存与主图交付由后续 Module 13 显式接线；当前持久化测试 harness 仅证明 Module 10 与 Module 12 的保存/读取合同，不代表完整 Module 11/13 恢复链已装配。
+
+快照保留短来源引用、就地风险说明及末尾来源目录，同时显示路线原耗时与预留时间。费用标为未核验，已确认的补充文本回显并标为未验证；天气仅有占位，天气查询与地图展示延期。完整 Demo 主链仍未装配。
+
+本轮 C 批已验证真实 PostgreSQL integration `3 passed`、同一专属卷重建 PostgreSQL 后新进程读取 `3` 个日块且摘要一致，以及完整 unit/contract `2218 passed, 7 warnings`；既有 M10/M11 测试库迁移与本次资源清理通过。这些是收尾同步前的阶段证据，最终源码的独立 Closeout 结果另见实施状态快照。
 
 ## 架构基线
 
@@ -64,6 +76,8 @@ CLI Demo
 - [`docs/09_itinerary_planning_loop_vibe_coding.md`](./docs/09_itinerary_planning_loop_vibe_coding.md)：模块 09 精确执行契约、Docker Gate、真实联网资格和 MODULE-CLOSEOUT 路由。
 - [`docs/10_artifact_persistence.md`](./docs/10_artifact_persistence.md)：模块 10 PostgreSQL Artifact 持久化、迁移、Repository、事务和安全合同。
 - [`docs/10_artifact_persistence_vibe_coding.md`](./docs/10_artifact_persistence_vibe_coding.md)：模块 10 精确执行契约、真实 PostgreSQL Gate 和 MODULE-CLOSEOUT 路由。
+- [`docs/12_result_formatting.md`](./docs/12_result_formatting.md)：模块 12 结构化结果、中文 Markdown、来源、日块与索引完整性合同。
+- [`docs/12_result_formatting_vibe_coding.md`](./docs/12_result_formatting_vibe_coding.md)：模块 12 精确执行契约、独立 PostgreSQL 验证脚本和 MODULE-CLOSEOUT 路由。
 
 权威层级和冲突处理以主设计第 1 节为准。后续模块必须按路线图中的 `depends_on` 和模块 acceptance gate 开工。`_vibe_coding.md` 专门面向能力较弱的编码模型，必须保留精确文件白名单、符号、算法、阶段 Gate、测试矩阵、停止条件和报告模板，不能压缩成需要模型自行推导的摘要。
 
@@ -89,7 +103,7 @@ CLI Demo
 
 ## Docker 开发与测试
 
-当前容器包含已经实现的模块 01–11，不会把尚不存在的完整 Graph/CLI 主链伪装成可运行服务。runtime 默认 CMD 导入模块 01–11，并输出 `modules 01-11 import successfully`；这只证明包可加载，不会自动连接或迁移数据库。test target 包含当前 tests 树，pytest 通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。M11 的数据库合同测试须按验收记录提供隔离 PostgreSQL；默认 test 服务不替代该编排。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+当前容器包含已经实现的模块 01–12，完整 Graph/CLI 主链尚未装配。runtime 默认 CMD 配置为导入模块 01–12，并输出 `modules 01-12 import successfully`；该检查只验证包可加载，不会自动连接或迁移数据库。`COPY app` 与 test target 的 `COPY tests` 已覆盖 Module 12。pytest 通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。M11 的数据库合同测试需要隔离 PostgreSQL；默认 test 服务不替代该编排。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
@@ -106,11 +120,13 @@ docker compose build runtime
 docker compose run --rm runtime
 ```
 
-运行全部离线测试：
+在项目根目录使用 PowerShell 7 执行 Module 12 完整验证与全项目 unit/contract 回归：
 
 ```powershell
-docker compose --profile test run --rm test
+pwsh -NoProfile -File ./scripts/verify_module12.ps1 -Mode Closeout -RunTag local-m12-001
 ```
+
+每次执行须将示例 `RunTag` 改为本次未使用的小写标签。脚本从当前源码构建专属 runtime/test 镜像，不读取 `.env`，仅使用合成测试凭据；模块测试断网，数据库测试使用新建的 internal 网络和专属 PostgreSQL 卷。Closeout 依次覆盖 Module 12 unit/contract、coverage 诊断、compileall、既有 M10/M11 迁移、Module 12 integration、同卷重启后的新进程读取、全部 `tests/unit` 与 `tests/contract`，最后断网验证 runtime 默认 CMD。脚本退出时核验资源身份并清理本次容器、网络和卷，保留并报告镜像；不调用真实供应商 API。参数、停止条件和其他模式见 Module 12 执行契约 §6.3。
 
 模块 06 百度地图 live、地图调起和 M2 live 资格命令及独立授权要求只以 [`docs/06_baidu_map_adapter_and_mcp_gateway.md`](./docs/06_baidu_map_adapter_and_mcp_gateway.md) 和配套执行契约为准；README 不提供读取或输出 Secret 的命令。
 

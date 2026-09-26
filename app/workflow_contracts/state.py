@@ -207,7 +207,21 @@ class TravelSessionState(BaseModel):
                 json_input=info.mode == "json",
             )
         if info.mode == "json" and isinstance(payload.get("artifact_refs"), list):
-            payload["artifact_refs"] = tuple(payload["artifact_refs"])
+            # Preserve strict JSON restoration of Ref datetime/UUID fields
+            # before the enclosing tuple enters Python validation.
+            payload["artifact_refs"] = tuple(
+                ArtifactRef.model_validate_json(
+                    json.dumps(
+                        item,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ),
+                    strict=True,
+                )
+                for item in payload["artifact_refs"]
+            )
         return payload
 
     @model_validator(mode="after")

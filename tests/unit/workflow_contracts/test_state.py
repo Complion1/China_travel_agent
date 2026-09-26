@@ -294,6 +294,34 @@ def test_state_codec_is_deterministic_and_accepts_only_safe_json_bytes() -> None
             parse_travel_session_state_json(invalid)  # type: ignore[arg-type]
 
 
+def test_state_codec_round_trips_nonempty_artifact_refs_fresh() -> None:
+    refs = (
+        _ref(UUID("42345678-1234-5678-1234-567812345678"), "requirements_artifact"),
+        _ref(
+            UUID("52345678-1234-5678-1234-567812345678"),
+            "hotel_artifact",
+            phase=WorkflowPhase.HOTEL_SELECTION,
+        ),
+    )
+    state = _state(artifact_refs=refs)
+
+    encoded = serialize_travel_session_state(state)
+    restored = parse_travel_session_state_json(encoded)
+
+    assert restored == state
+    assert type(restored.artifact_refs) is tuple
+    assert serialize_travel_session_state(restored) == encoded
+    for saved, original in zip(restored.artifact_refs, refs, strict=True):
+        assert type(saved) is ArtifactRef
+        assert saved == original
+        assert saved is not original
+        assert type(saved.artifact_id) is UUID
+        assert type(saved.operation_id) is OperationId
+        assert saved.operation_id is not original.operation_id
+        assert saved.created_at == UTC
+        assert saved.created_at.utcoffset() == timezone.utc.utcoffset(UTC)
+
+
 def test_state_codec_duplicate_and_version_error_priority() -> None:
     with pytest.raises(WorkflowStateValidationError):
         parse_travel_session_state_json(
@@ -520,6 +548,9 @@ def _assert_marker_error(error: Exception, expected_type: type[Exception]) -> No
 
 def _codec_validation_vectors() -> tuple[tuple[object, type[Exception]], ...]:
     valid = serialize_travel_session_state(_state(requirement_outcome=_outcomes()[0]))
+    valid_ref = _ref(
+        UUID("42345678-1234-5678-1234-567812345678"), "artifact"
+    ).model_dump(mode="json")
     return (
         (bytearray(valid), WorkflowStateValidationError),
         (valid.decode("utf-8"), WorkflowStateValidationError),
@@ -537,6 +568,14 @@ def _codec_validation_vectors() -> tuple[tuple[object, type[Exception]], ...]:
         (b'{"schema_version":"2.0"}', WorkflowStateValidationError),
         (_json_payload_with(unexpected="extra"), WorkflowStateValidationError),
         (_json_payload_with(run_id=1), WorkflowStateValidationError),
+        (
+            _json_payload_with(artifact_refs=[{**valid_ref, "size_bytes": True}]),
+            WorkflowStateValidationError,
+        ),
+        (
+            _json_payload_with(artifact_refs=[{**valid_ref, "created_at": "2026-01-02T03:04:05"}]),
+            WorkflowStateValidationError,
+        ),
         (
             _json_payload_with(
                 requirement_state={
@@ -648,7 +687,11 @@ def _serializer_invalid_factories():
             artifact_refs=(first, first),
         )
 
-    return (forged_v1, mutated_state, mutated_outcome, transition_mismatch, terminal_invariant, artifact_invariant)
+    def mutated_artifact_ref_list():
+        ref = _ref(UUID("42345678-1234-5678-1234-567812345678"), "artifact")
+        return _state(artifact_refs=(ref,)).model_copy(update={"artifact_refs": [ref]})
+
+    return (forged_v1, mutated_state, mutated_outcome, transition_mismatch, terminal_invariant, artifact_invariant, mutated_artifact_ref_list)
 
 
 @pytest.mark.parametrize("state_factory", _serializer_invalid_factories())
