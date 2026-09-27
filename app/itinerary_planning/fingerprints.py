@@ -31,9 +31,9 @@ from .models import (
 
 
 FINGERPRINT_VERSION = "planning-fp-v1"
-INITIAL_CONTEXT_FINGERPRINT_VERSION = "planning-fp-v3"
-RESUME_FINGERPRINT_VERSION = "planning-resume-fp-v4"
-CAPABILITY_SCOPE = "module09-structured-demo-v2"
+INITIAL_CONTEXT_FINGERPRINT_VERSION = "planning-fp-v4"
+RESUME_FINGERPRINT_VERSION = "planning-resume-fp-v5"
+CAPABILITY_SCOPE = "module09-optional-backups-v1"
 
 
 def _normal(value: object) -> object:
@@ -115,6 +115,21 @@ def operation_id_payload(operation_id: OperationId) -> dict[str, object]:
     }
 
 
+def _model_json_keys(value: object) -> object:
+    """Encode validated enum map keys while retaining canonical value types."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            key = key.value if isinstance(key, Enum) else key
+            if type(key) is not str or key in result:
+                raise ValueError("model dictionary keys must encode uniquely as strings")
+            result[key] = _model_json_keys(item)
+        return result
+    if isinstance(value, (tuple, list)):
+        return [_model_json_keys(item) for item in value]
+    return value
+
+
 def _model_hash(value: BaseModel) -> ContentDigest:
     if not isinstance(value, BaseModel):
         raise TypeError("invalid model")
@@ -130,7 +145,7 @@ def _model_hash(value: BaseModel) -> ContentDigest:
             exclude_computed_fields=True,
         )
         fresh = TypeAdapter(type(value)).validate_python(tree, strict=True)
-        return _canonical_hash(fresh.model_dump(mode="python"))
+        return _canonical_hash(_model_json_keys(fresh.model_dump(mode="python")))
     except Exception:
         raise TypeError("model failed fresh strict validation") from None
 

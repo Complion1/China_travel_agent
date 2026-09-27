@@ -331,6 +331,59 @@ def test_exception_classification_and_retry_after():
     assert _classify_exception(context) == ("context_length_exceeded", False)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("finish, expected_code", [
+    ("length", LLMErrorCode.OUTPUT_TRUNCATED),
+    ("content_filter", LLMErrorCode.CONTENT_FILTERED),
+])
+async def test_sdk_finish_exception_reaches_runtime_without_retry_or_content_leak(
+    monkeypatch, capsys, async_mode, finish, expected_code,
+):
+    private_text = "private completion must never escape"
+    if finish == "length":
+        completion = openai.types.chat.ChatCompletion(
+            id="offline-completion", created=0, model="deepseek-v4-flash",
+            object="chat.completion",
+            choices=[{
+                "index": 0, "finish_reason": finish,
+                "message": {"role": "assistant", "content": private_text},
+            }],
+        )
+        error = openai.LengthFinishReasonError(completion=completion)
+    else:
+        error = openai.ContentFilterFinishReasonError()
+    model = FakeModel(error)
+    adapter = make_adapter()
+    attempts = []
+
+    def build_model(profile):
+        attempts.append(profile)
+        return model
+
+    monkeypatch.setattr(adapter, "_build_model", build_model)
+    sleeper = RecordingSleeper()
+    runtime = DeepSeekRuntime(provider=adapter, sleeper=sleeper)
+    operation = runtime.start_operation(ModelRole.REQUIREMENT_EXTRACTION)
+    prompt = PromptEnvelope(system_text="Return status", user_text="status")
+    try:
+        outcome = (
+            await operation.ainvoke_structured(prompt, StatusSchema)
+            if async_mode else operation.invoke_structured(prompt, StatusSchema)
+        )
+    finally:
+        operation.close()
+        await adapter.aclose()
+
+    assert isinstance(outcome, LLMInvocationFailure)
+    assert outcome.error.code == expected_code
+    assert outcome.error.retryable is False
+    assert len(attempts) == 1
+    assert sleeper.sleeps == sleeper.async_sleeps == []
+    captured = capsys.readouterr()
+    assert private_text not in outcome.model_dump_json() + captured.out + captured.err
+
+
 def test_normalize_response_rejects_each_incomplete_field():
     base = {
         "choices": [{"message": {"content": "ok", "tool_calls": []}, "finish_reason": "stop"}],
@@ -388,6 +441,7 @@ def test_build_model_uses_only_locked_profile_values(monkeypatch):
     monkeypatch.setattr("app.llm_runtime.provider.ChatDeepSeek", fake_chat_deepseek)
     make_adapter()._build_model(REQUIREMENT_EXTRACTION_PROFILE)
     assert captured["model"] == "deepseek-v4-flash"
+    assert captured["max_tokens"] == 32_768
     assert captured["max_retries"] == 0
     assert captured["streaming"] is False
     assert captured["extra_body"] == {"thinking": {"type": "enabled"}}

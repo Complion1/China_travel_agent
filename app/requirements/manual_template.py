@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
 
 from app.requirements.models import (
     HubType,
@@ -28,7 +27,6 @@ MANUAL_TEMPLATE_KEYS = [
     "正式游玩天数",
     "到达机场/车站、日期、时间",
     "离开机场/车站、日期、时间",
-    "总预算",
     "成人/儿童/老人",
     "儿童年龄",
     "房间及房型",
@@ -65,12 +63,6 @@ _LABEL_TO_PACE = {label: value for value, label in _PACE_TO_LABEL.items()}
 def render_manual_template() -> str:
     """Render the fixed empty v1 template in canonical order."""
     return "\n".join([f"模板版本：{MANUAL_TEMPLATE_VERSION}", *(f"{key}：" for key in MANUAL_TEMPLATE_KEYS)])
-
-
-def _format_number(value: float | None) -> str:
-    if value is None:
-        return ""
-    return format(Decimal(str(value)).normalize(), "f")
 
 
 def _interest_text(requirement: TravelRequirement) -> str:
@@ -117,7 +109,6 @@ def serialize_manual_template(requirement: TravelRequirement) -> ManualTemplateS
         "正式游玩天数": str(time_window.sightseeing_days or ""),
         "到达机场/车站、日期、时间": _hub_text(time_window.arrival),
         "离开机场/车站、日期、时间": _hub_text(time_window.departure),
-        "总预算": _format_number(requirement.budget.total_cny),
         "成人/儿童/老人": "/".join(
             "" if value is None else str(value)
             for value in (party.adults_count, party.children_count, party.seniors_count)
@@ -209,6 +200,13 @@ def parse_manual_template(submission: ManualTemplateSubmission) -> RequirementPa
             continue
         key = match.group("key")
         value = match.group("value").strip()
+        if key == "总预算":
+            # Accept the legacy optional line without collecting an amount.
+            # Duplicates remain an error, as for every other template key.
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] > 1:
+                _add_error(errors, key, "重复键")
+            continue
         if key not in _ALL_KEYS:
             _add_error(errors, f"第{index}行", f"未知键：{key}")
             continue
@@ -259,17 +257,6 @@ def parse_manual_template(submission: ManualTemplateSubmission) -> RequirementPa
 
     arrival = _parse_hub(parsed["到达机场/车站、日期、时间"], "到达机场/车站、日期、时间", errors) if parsed.get("到达机场/车站、日期、时间") else None
     departure = _parse_hub(parsed["离开机场/车站、日期、时间"], "离开机场/车站、日期、时间", errors) if parsed.get("离开机场/车站、日期、时间") else None
-
-    budget_total: float | None = None
-    budget_text = parsed.get("总预算", "")
-    if budget_text:
-        try:
-            amount = Decimal(budget_text.replace(",", "").replace("，", ""))
-            if not amount.is_finite() or amount <= 0:
-                raise InvalidOperation
-            budget_total = float(amount)
-        except (InvalidOperation, ValueError):
-            _add_error(errors, "总预算", "必须为大于 0 的人民币金额")
 
     adults: int | None = None
     children: int | None = None
@@ -359,7 +346,7 @@ def parse_manual_template(submission: ManualTemplateSubmission) -> RequirementPa
     return RequirementPatch(
         destination=destination,
         time_window=time_window,
-        budget=TravelBudget(total_cny=budget_total),
+        budget=TravelBudget(),
         party=party,
         rooms=TravelRooms(room_count=room_count, room_type_requirements=room_type),
         constraints=TravelConstraints(

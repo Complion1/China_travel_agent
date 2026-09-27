@@ -89,8 +89,7 @@ class LiveCase:
 EMPTY = TravelRequirement()
 CASES = (
     LiveCase("001", "我想去杭州玩3天，预算5000元左右，两个大人。", RequirementIntent.INITIAL, EMPTY, {
-        "destination": "杭州", "sightseeing_days": 3, "budget_total_cny": 5000.0,
-        "budget_is_approximate": True, "adults_count": 2,
+        "destination": "杭州", "sightseeing_days": 3, "adults_count": 2,
     }),
     LiveCase("002", "我7月20日下午3点到杭州东站，7月23日上午10点从杭州东站离开。", RequirementIntent.INITIAL, EMPTY, {
         "arrival_hub_name": "杭州东站",
@@ -121,16 +120,16 @@ CASES = (
     ), {"must_visit_places": ["西湖"]}),
     LiveCase("011", "预算改成八千元。", RequirementIntent.CORRECTION, TravelRequirement(
         budget=TravelBudget(total_cny=5000.0)
-    ), {"budget_total_cny": 8000.0}),
+    ), {}),
     LiveCase("012", "酒店改成靠近地铁的，不要临街。", RequirementIntent.CONFIRMATION_REVISION, TravelRequirement(
         preferences=TravelPreferences(hotel_preferences="安静")
     ), {"hotel_preferences": "靠近地铁的，不要临街"}),
     LiveCase("013", "我想去杭州。", RequirementIntent.INITIAL, EMPTY, {"destination": "杭州"},
              ExtractionRepairFeedback(code="evidence_missing", field_paths=(RequirementFieldPath.DESTINATION,))),
     LiveCase("014", "预算五千左右。", RequirementIntent.INITIAL, EMPTY,
-             {"budget_total_cny": 5000.0, "budget_is_approximate": True}),
+             {}),
     LiveCase("015", "预算改成八千元。", RequirementIntent.CORRECTION, EMPTY,
-             {"budget_total_cny": 8000.0},
+             {},
              ExtractionRepairFeedback(code="intent_mismatch", field_paths=())),
     LiveCase("016", "我想去杭州玩3天。", RequirementIntent.INITIAL, EMPTY,
              {"destination": "杭州", "sightseeing_days": 3},

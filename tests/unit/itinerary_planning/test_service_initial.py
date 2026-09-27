@@ -311,6 +311,37 @@ def _fixture(*responses: object):
     return service, request, runtime, operation, repository
 
 
+@pytest.mark.asyncio
+async def test_optional_backups_cannot_start_a_supplement_cycle():
+    from app.itinerary_planning.models import ProposedAreaCoverageTarget
+    args = RequestCandidateSupplementArgs(
+        effective_policy=ProposedEffectivePlanningPolicy(
+            effective_pace=TravelPace.NORMAL, daily_time_rules=(),
+            time_sensitive_must=(), transport_rules=(),
+        ), draft=None,
+        proposed_gaps=(ProposedSupplementGap(
+            source_gap_type="backup_unavailable", date=date(2026, 9, 3),
+            target=ProposedAreaCoverageTarget(role=ResearchRole.ATTRACTION,
+                anchor_handle="candidate-handle-0000", radius_km=3),
+            evidence_handles=("evidence-handle-0000",),
+        ),),
+    )
+    response = ToolCallsReady(calls=(ValidatedToolCall(call_id="optional_backup",
+        tool_name=PlanningTool.REQUEST_CANDIDATE_SUPPLEMENT.value, arguments=args),), metadata=_metadata())
+    service, request, _, operation, _ = _fixture(response, ToolTurnCompleted(final_text="结束", metadata=_metadata()))
+    try:
+        result = await service.plan_initial(request)
+        assert result.outcome_type != "awaiting_candidate_supplement"
+        assert not any(gap.gap_type == "backup_unavailable" for gap in result.gaps)
+        assert result.budgets.direction_calls_consumed == 0
+        assert isinstance(result, ItineraryPlanningIncomplete)
+        assert operation.call_count == 1
+        assert operation.continuations == []
+        assert service._runs[request.operation_plan.run_id].supplement_fingerprints == []
+    finally:
+        await service.aclose()
+
+
 def _test_requirement_id(prefix: str, tree: dict[str, object]) -> str:
     payload = json.dumps(tree, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     return f"{prefix}:{hashlib.sha256(payload).hexdigest()[:16]}"
@@ -1274,8 +1305,8 @@ _R16_POLICY_CASES = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ("supported", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
-async def test_service_completed_requires_real_non_transit_day_meals_routes_and_backups(case: str) -> None:
+@pytest.mark.parametrize("case", ("supported", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
+async def test_service_completed_requires_main_plan_and_valid_optional_backups(case: str) -> None:
     service, request, _, operation, repository = _fixture()
     if case == "must_valid":
         preferences = request.confirmed.requirement.preferences.model_copy(update={"must_visit_places": ["杭州候选1"]})
@@ -1715,7 +1746,7 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
         )
         if case == "r15_f02_supplement_locked_mismatch":
             first_proposal = proposal.model_copy(update={
-                "days": (proposal.days[0].model_copy(update={"backups": ()}),),
+                "days": (proposal.days[0].model_copy(update={"backups": (), "day_kind": PlanningDayKind.PARTIAL}),),
             })
         first_submit = SubmitItineraryArgs(effective_policy=first_policy, draft=first_proposal)
         second_proposal = proposal.model_copy(update={
@@ -1798,8 +1829,33 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
         submit = submit.model_copy(update={"draft": proposal.model_copy(update={"days": (early_day,)})})
     if case.startswith(("prefix_", "resume_")) or case == "missing_backups":
         three = submit.model_copy(update={"draft": proposal.model_copy(update={"days": (proposal.days[0].model_copy(update={"backups": ()}),)})})
+        if case.startswith(("prefix_", "resume_")):
+            # Preserve the prefix-strength regression with a real main-plan
+            # defect: this full day is incorrectly submitted as partial.
+            three = three.model_copy(update={"draft": three.draft.model_copy(update={
+                "days": (three.draft.days[0].model_copy(update={"day_kind": PlanningDayKind.PARTIAL}),),
+            })})
         submit = three
+    if case == "partial_backups":
+        submit = submit.model_copy(update={"draft": proposal.model_copy(update={
+            "days": (proposal.days[0].model_copy(update={"backups": proposal.days[0].backups[1:2]}),),
+        })})
     submit_responses = [ToolCallsReady(calls=(ValidatedToolCall(call_id="e2e_submit", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=submit),), metadata=_metadata())]
+    if case.startswith("backup_slots_"):
+        original_backups = proposal.days[0].backups
+        bad_backups = {
+            "backup_slots_order_repair": tuple(reversed(original_backups)),
+            "backup_slots_duplicate_repair": (
+                *original_backups[:2], original_backups[2].model_copy(update={"backup_kind": "lunch"}),
+            ),
+        }[case]
+        bad_submit = submit.model_copy(update={"draft": proposal.model_copy(update={
+            "days": (proposal.days[0].model_copy(update={"backups": bad_backups}),),
+        })})
+        submit_responses = [
+            ToolCallsReady(calls=(ValidatedToolCall(call_id="bad_backup_slots", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=bad_submit),), metadata=_metadata()),
+            ToolCallsReady(calls=(ValidatedToolCall(call_id="corrected_backup_slots", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=submit),), metadata=_metadata()),
+        ]
     if case == "route_rebind_repair":
         mismatched_arrival = proposal.arrival_transfer.model_copy(update={
             "route_leg": proposal.arrival_transfer.route_leg.model_copy(update={"leg_id": "regenerated-arrival"}),
@@ -2036,6 +2092,16 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
 
     result = await service.plan_initial(request)
     replay = None if case == "r12_fake_verified_anchor" or case in _R14_POLICY_CASES or case in _R15_POLICY_CASES else await service.plan_initial(request)
+
+    if case in {"missing_backups", "partial_backups"}:
+        assert isinstance(result, ItineraryPlanningCompleted)
+        assert replay == result
+        assert result.summary.backups == (0 if case == "missing_backups" else 1)
+        assert result.budgets.iterations_consumed == 3
+        assert operation.call_count == 4
+        assert len(service._map_adapter.directions_calls) == 6
+        assert service._runs[base.run_id].pending_gaps == []
+        return
 
     deferred_policy_case = (
         (case in _R05_DURATION_CASES and case != "duration_estimate_bypass")
@@ -2453,7 +2519,7 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
         assert result.budgets.direction_calls_consumed == 6
         return
 
-    if case not in {"supported", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "must_valid"}:
+    if case not in {"supported", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "must_valid"}:
         assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
         assert replay == result
         if case == "meal_intent_mismatch_feedback":
@@ -2463,9 +2529,9 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
                 "code": "policy_rejected",
                 "reason": "meal_intent_mismatch",
             }
-        if case.startswith("prefix_") or case == "missing_backups":
+        if case.startswith("prefix_"):
             assert result.itinerary_ref is not None
-            assert any(gap.gap_type == "backup_unavailable" for gap in result.gaps)
+            assert not any(gap.gap_type == "backup_unavailable" for gap in result.gaps)
             from app.itinerary_planning import ItineraryPlanningArtifact
             states = [(await repository.get(repository.refs[slot.planning_state_operation_id], expected_model=ItineraryPlanningArtifact)).content.record.state for slot in request.operation_plan.iteration_slots if slot.planning_state_operation_id in repository.refs]
             saved = [state for state in states if state.draft is not None]
@@ -2476,23 +2542,6 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
             elif case == "prefix_1_to_3":
                 assert counts[-2:] == [1, 3]
                 assert saved[-1].no_progress_streak == 0
-            else:
-                assert counts[-1] == 3
-                from app.itinerary_planning.artifacts import AwaitingCandidateSupplementRecord, _to_gap_summary_snapshot
-                from app.itinerary_planning.service import _supplement_request
-                from tests.unit.itinerary_planning.test_service_resume import _supplemental_plan
-                run = service._runs[request.operation_plan.run_id]
-                backed_gaps = tuple(gap.model_copy(update={"evidence_refs": (run.candidate_evidence_refs[1],)}) for gap in result.gaps if gap.gap_type == "backup_unavailable")
-                state = saved[-1].model_copy(update={"pending_call_id": "backup_supply", "supplement_fingerprints": ("sha256:" + "7" * 64,)})
-                source = ItineraryPlanningArtifact(schema_version="1.0", request_digest=run.request_digest, parent_planning_ref=None,
-                    directories=service._directory_model(run), record=AwaitingCandidateSupplementRecord(schema_version="1.0", record_type="awaiting_candidate_supplement",
-                        state=state, gaps=tuple(_to_gap_summary_snapshot(service._gap_summary_from_gap(run, gap)) for gap in backed_gaps),
-                        gap_fingerprint="sha256:" + "7" * 64, pending_call_id="backup_supply"))
-                reconstructed = _supplement_request(source, _supplemental_plan(run.run_id))
-                assert [gap.gap_type for gap in reconstructed.gaps] == ["area_coverage_missing", "meal_coverage_missing", "meal_coverage_missing"]
-                assert [gap.anchor.uid for gap in reconstructed.gaps] == ["candidate-1", "candidate-2", "candidate-3"]
-                assert [gap.radius_km for gap in reconstructed.gaps] == [3, 3, 3]
-                assert [gap.meal_intent.value for gap in reconstructed.gaps[1:]] == ["lunch", "dinner"]
         return
     assert isinstance(result, ItineraryPlanningCompleted), result.model_dump(mode="json")
     assert replay == result
@@ -2500,6 +2549,22 @@ async def test_service_completed_requires_real_non_transit_day_meals_routes_and_
     assert result.summary.transit_only_days == 0
     assert result.summary.lunch_count == 1 and result.summary.dinner_count == 1
     assert result.summary.backups == 3
+    if case.startswith("backup_slots_"):
+        feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+        assert feedback == {
+            "status": "rejected", "code": "policy_rejected", "reason": "backup_slots_mismatch",
+            "day_no": 1, "expected_backup_kinds": (
+                ["attraction", "lunch"] if case == "backup_slots_duplicate_repair"
+                else ["attraction", "lunch", "dinner"]
+            ),
+            "actual_backup_kinds": [item.backup_kind for item in bad_backups],
+        }
+        assert bad_submit.draft.days[0].backups == bad_backups
+        assert result.budgets.iterations_consumed == 4
+        assert result.budgets.semantic_invocations_consumed == operation.call_count == 5
+        assert result.budgets.direction_calls_consumed == len(service._map_adapter.directions_calls) == 6
+        assert len(service._map_adapter.matrix_calls) == 1
+        assert json.loads(operation.continuations[-1][0].content)["tool_result"]["code"] != "success"
     if case == "route_rebind_repair":
         feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
         assert feedback == {
@@ -2594,10 +2659,7 @@ def test_rejected_prefix_accepts_a_later_attraction_as_the_backup_core() -> None
 
     assert service._retain_prefix(run, prefix) is True
     assert run.draft is prefix
-    assert [
-        (gap.backup_kind, gap.core_visit_id)
-        for gap in run.pending_gaps
-    ] == [("dinner", "dinner")]
+    assert run.pending_gaps == []  # Optional dinner backup is not a hard gap.
 
 
 @pytest.mark.asyncio

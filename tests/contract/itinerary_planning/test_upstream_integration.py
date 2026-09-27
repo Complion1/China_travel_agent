@@ -110,7 +110,7 @@ async def test_real_runtime_delivers_sixth_matrix_result_before_terminal_chance(
 def test_required_upstream_public_contracts_are_consumable() -> None:
     assert ModelRole.ITINERARY_PLANNING.value == "itinerary_planning"
     assert ITINERARY_PLANNING_PROFILE.semantic_invocation_limit == 12
-    assert ITINERARY_PLANNING_PROFILE.max_request_utf8_bytes == 524288
+    assert ITINERARY_PLANNING_PROFILE.max_request_utf8_bytes == 2097152
     assert ITINERARY_PLANNING_PROFILE.max_output_tokens == 49152
     assert ITINERARY_PLANNING_PROFILE.read_timeout_seconds == 120
     assert ITINERARY_PLANNING_ITERATION_BUDGET_KEY.name == "planning.iteration"

@@ -46,7 +46,7 @@ def _op(step: str, phase: WorkflowPhase = WorkflowPhase.ITINERARY_PLANNING, run_
 
 def _ref(number: int, artifact_type: str, phase: WorkflowPhase, step: str, run_id: UUID = RUN_ID, schema_version: str | None = None) -> ArtifactRef:
     return ArtifactRef(
-        artifact_id=UUID(int=number), artifact_type=artifact_type, schema_version=schema_version or ("3.0" if artifact_type == "itinerary_planning.model_action" else "1.0"),
+        artifact_id=UUID(int=number), artifact_type=artifact_type, schema_version=schema_version or ("4.0" if artifact_type == "itinerary_planning.model_action" else "1.0"),
         content_hash=DIGEST, operation_id=_op(step, phase, run_id), created_at=UTC, size_bytes=1,
     )
 
@@ -331,7 +331,7 @@ def _registered_artifacts() -> tuple[tuple[str, BaseModel, OperationId, type[Bas
     hotel = local.HotelLocationRefSnapshot(schema_version="1.0", ref_type="hotel", hotel_selection_ref_index=0)
     action_ref = directories.model_action_refs[0]
     action = ItineraryPlanningModelActionArtifact(
-        schema_version="3.0", request_digest=DIGEST, invocation_index=0, prompt_version="planning-v3",
+        schema_version="4.0", request_digest=DIGEST, invocation_index=0, prompt_version="planning-v4",
         prompt_hash=DIGEST, action_kind="final_text", call_summaries=(), invocation_metadata=_metadata(), disposition="accepted",
     )
     geocode = ItineraryPlanningHubGeocodeObservationArtifact(
@@ -367,12 +367,12 @@ def test_real_registry_accepts_complete_graph_and_each_registered_artifact_round
     registry = ArtifactSchemaRegistry(ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS)
     for artifact_type, artifact, operation_id, expected_model in _registered_artifacts():
         request = ArtifactWriteRequest(
-            operation_id=operation_id, artifact_type=artifact_type, schema_version="3.0" if artifact_type == "itinerary_planning.model_action" else "1.0",
+            operation_id=operation_id, artifact_type=artifact_type, schema_version="4.0" if artifact_type == "itinerary_planning.model_action" else "1.0",
             content=artifact.model_dump(mode="json"),
         )
         prepared = registry.prepare(request)
         ref = ArtifactRef(
-            artifact_id=uuid4(), artifact_type=artifact_type, schema_version="3.0" if artifact_type == "itinerary_planning.model_action" else "1.0",
+            artifact_id=uuid4(), artifact_type=artifact_type, schema_version="4.0" if artifact_type == "itinerary_planning.model_action" else "1.0",
             content_hash=prepared.content_hash, operation_id=operation_id, created_at=UTC, size_bytes=prepared.size_bytes,
         )
         decoded = registry.decode(ref=ref, canonical_bytes=prepared.canonical_bytes, expected_model=expected_model)
@@ -426,7 +426,7 @@ def test_registry_rejects_extra_coercion_forged_branch_and_unknown_version() -> 
     registry = ArtifactSchemaRegistry(ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS)
     artifact = _registered_artifacts()[0][1]
     request = ArtifactWriteRequest(
-        operation_id=_op("security_write"), artifact_type="itinerary_planning.model_action", schema_version="3.0",
+        operation_id=_op("security_write"), artifact_type="itinerary_planning.model_action", schema_version="4.0",
         content=artifact.model_dump(mode="json"),
     )
     with pytest.raises(ArtifactRequestValidationError):
@@ -440,6 +440,10 @@ def test_registry_rejects_extra_coercion_forged_branch_and_unknown_version() -> 
         registry.prepare(request.model_copy(update={"content": forged.model_dump(mode="json")}))
     with pytest.raises(Exception):
         registry.prepare(request.model_copy(update={"schema_version": "2.0"}))
+    with pytest.raises(Exception):
+        registry.prepare(request.model_copy(update={"schema_version": "3.0"}))
+    with pytest.raises(ArtifactRequestValidationError):
+        registry.prepare(request.model_copy(update={"content": {**request.content, "prompt_version": "planning-v3"}}))
 
 
 def test_directories_cross_run_and_pending_zero_prefix_contracts() -> None:

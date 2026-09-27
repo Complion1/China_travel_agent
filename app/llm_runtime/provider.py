@@ -49,6 +49,11 @@ def _classify_status(status_code: int) -> tuple[str, bool]:
 
 
 def _classify_exception(exc: Exception) -> tuple[str, bool]:
+    # The SDK's structured parser can raise before returning finish_reason.
+    if isinstance(exc, openai.LengthFinishReasonError):
+        return ("output_truncated", False)
+    if isinstance(exc, openai.ContentFilterFinishReasonError):
+        return ("content_filtered", False)
     if isinstance(exc, (openai.APITimeoutError, httpx.ReadTimeout)):
         return ("timeout", True)
     if isinstance(

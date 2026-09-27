@@ -190,6 +190,65 @@ def _action_batch_from_prompt(operation: FakeModelOperation, count: int) -> Prop
     return ProposedActionBatch(actions=tuple(actions))
 
 
+@pytest.mark.parametrize("interests", (
+    (InterestTag.CULTURE, InterestTag.NATURE),
+    (InterestTag.NATURE, InterestTag.CULTURE),
+    (InterestTag.FOOD, InterestTag.NATURE, InterestTag.CULTURE),
+    tuple(reversed(tuple(InterestTag))),
+))
+@pytest.mark.asyncio
+async def test_public_initial_normalizes_interest_order_without_changing_confirmed_input(interests) -> None:
+    run_id = uuid4()
+    request, hotel_ref, hotel_artifact, _ = _request(run_id)
+    request.confirmed.requirement.preferences.interests = list(interests)
+    before = request.model_dump_json()
+    expected = tuple(item for item in InterestTag if item in interests)
+    operation = FakeModelOperation((
+        structured(NoUsefulActionProposed(reason_code="insufficient_remaining_budget")),
+        structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
+    ))
+    runtime = FakeRuntime(operation)
+    repository = FakeRepository()
+    repository.seed(hotel_ref, hotel_artifact)
+    service = CandidateResearchService(runtime=runtime, map_adapter=FakeMapAdapter(),
+        artifact_repository=repository, budget_manager=FakeBudgetManager(run_id, place_limit=0))
+    try:
+        result = await service.research_initial(request)
+        assert result.outcome_type == "incomplete"
+        assert result.coverage.effective_interests == expected
+        assert runtime.start_count == 1
+        assert all(json.loads(prompt.user_text)["effective_interests"] == [item.value for item in expected]
+                   for prompt in operation.prompts)
+        assert request.model_dump_json() == before
+        assert request.operation_plan.terminal_successor_operation_id in repository.refs
+    finally:
+        await service.aclose()
+
+
+@pytest.mark.parametrize("interests", (
+    (InterestTag.CULTURE,),
+    (InterestTag.CULTURE, InterestTag.CULTURE),
+    (*tuple(InterestTag), InterestTag.CULTURE),
+))
+@pytest.mark.asyncio
+async def test_public_initial_does_not_repair_invalid_interest_cardinality(interests) -> None:
+    run_id = uuid4()
+    request, hotel_ref, hotel_artifact, _ = _request(run_id)
+    request.confirmed.requirement.preferences.interests = list(interests)
+    runtime = FakeRuntime()
+    repository = FakeRepository()
+    repository.seed(hotel_ref, hotel_artifact)
+    service = CandidateResearchService(runtime=runtime, map_adapter=FakeMapAdapter(),
+        artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
+    try:
+        result = await service.research_initial(request)
+        assert result.failure.code.value == "invalid_input"
+        assert runtime.start_count == 0
+        assert not repository.put_requests
+    finally:
+        await service.aclose()
+
+
 def _first_objective_action(operation: FakeModelOperation, *, ordinal: int = 0, query: str = "museum") -> ProposedSearchAction | ProposedDetailsAction:
     objective = json.loads(operation.prompts[-1].user_text)["objectives"][0]
     kind = objective["kind"]

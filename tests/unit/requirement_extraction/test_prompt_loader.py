@@ -30,7 +30,30 @@ def repair_json_shape_example() -> str:
 
 
 def test_prompt_version_is_frozen():
-    assert PROMPT_VERSION == "requirement-extraction-v1"
+    assert PROMPT_VERSION == "requirement-extraction-v3-explicit-negatives"
+
+
+@pytest.mark.parametrize("loader", [load_extract_prompt, load_repair_prompt])
+def test_current_prompt_explicitly_defers_amounts_and_budget_notes(loader):
+    text = loader()
+    assert "Always set budget_total_cny and budget_is_approximate to null" in text
+    assert "Do not copy budget-only wording into free_text_notes" in text
+
+
+def test_legacy_prompt_bytes_remain_readable_and_unchanged():
+    _load_prompt("extract_v1.txt", "f0fba9f60d9066912890a040f5cba197024ee4242c8a820104a05ce15776dcdb")
+    _load_prompt("repair_v1.txt", "7ad7e547fbb34f01b662fa74f1cb616447027a7920bed2a7d156a148508f695d")
+    _load_prompt("extract_v2_budget_deferred.txt", "82c50823cca0cf9dacc3d954527bc4fa11d02e8a69bc3ebe0d21d707b66175ad")
+    _load_prompt("repair_v2_budget_deferred.txt", "6911a585ea0c24f71d0c6b04d3a564e1b73230016a165742a1c415962b10bb0f")
+
+
+@pytest.mark.parametrize("loader", [load_extract_prompt, load_repair_prompt])
+def test_explicit_negative_answers_remain_evidenced_without_inference(loader):
+    text = loader()
+    assert "Explicit negative answers about mobility_constraints or dietary_restrictions are answered facts" in text
+    assert "including its negation" in text
+    assert "a separate evidence item for each field path" in text
+    assert "constraint that was not mentioned" in text
 
 
 def test_extract_prompt_hash_matches_bytes():

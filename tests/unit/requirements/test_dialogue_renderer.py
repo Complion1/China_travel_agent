@@ -35,8 +35,6 @@ SUMMARY_LABELS = [
     "离开枢纽类型",
     "离开时间",
     "离开时间约数",
-    "目的地内总预算",
-    "预算约数",
     "成人数量",
     "儿童数量",
     "儿童年龄",
@@ -82,7 +80,7 @@ def complete_requirement() -> TravelRequirement:
                 is_approximate=False,
             ),
         ),
-        budget=TravelBudget(total_cny=5000.0, is_approximate=True),
+        budget=TravelBudget(),
         party=TravelParty(
             adults_count=2,
             children_count=1,
@@ -152,13 +150,13 @@ def test_confirmation_summary_uses_chinese_enum_labels_and_all_values():
         "离开枢纽类型：机场",
         "兴趣：人文、自然、美食",
         "节奏：标准",
-        "目的地内总预算：5000 元",
         "儿童年龄：5",
         "必去地点：西湖、良渚博物院",
         "派生同行场景：亲子、带老人",
         "尚存假设：无",
     ]
     assert all(fragment in result for fragment in expected_fragments)
+    assert "预算" not in result and "5000" not in result
     assert "InterestTag." not in result
     assert "TravelPace." not in result
     assert "HubType." not in result
@@ -174,6 +172,13 @@ def test_confirmation_summary_renders_fixed_empty_values():
     assert "兴趣：未填写" in result
     assert "节奏：未填写" in result
     assert "尚存假设：无" in result
+
+
+def test_legacy_stored_budget_summary_keeps_historical_lines():
+    requirement = complete_requirement()
+    requirement.budget = TravelBudget(total_cny=5000.0, is_approximate=True)
+    result = render_confirmation_summary(requirement)
+    assert "目的地内总预算：5000 元\n预算约数：是\n成人数量：" in result
 
 
 def test_confirmation_summary_renders_agent_decides_instead_of_missing():

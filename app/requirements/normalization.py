@@ -28,6 +28,8 @@ _CN_DIGITS = {
     "九": 9,
 }
 
+_CHINESE_DATE = r"(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]"
+
 
 def _parse_cn_integer(text: str) -> Optional[int]:
     if text.isdigit():
@@ -50,10 +52,11 @@ def normalize_relative_date(raw: str, session_date: date) -> tuple[str, bool]:
     if text in offsets:
         return (session_date + timedelta(days=offsets[text])).isoformat(), True
 
-    match = re.fullmatch(r"(\d{1,2})月(\d{1,2})日", text)
+    match = re.fullmatch(_CHINESE_DATE, text)
     if match:
         try:
-            normalized = date(session_date.year, int(match.group(1)), int(match.group(2)))
+            normalized = date(int(match.group(1)) if match.group(1) else session_date.year,
+                              int(match.group(2)), int(match.group(3)))
         except ValueError as exc:
             raise NormalizationError(f"invalid_date: {text}") from exc
         return normalized.isoformat(), False
@@ -62,6 +65,45 @@ def normalize_relative_date(raw: str, session_date: date) -> tuple[str, bool]:
         return date.fromisoformat(text).isoformat(), False
     except ValueError as exc:
         raise NormalizationError(f"ambiguous_or_invalid_date: {text}") from exc
+
+
+def normalize_local_datetime(raw: str, session_date: date) -> tuple[str, bool, bool]:
+    """Parse one explicit local date/time, preserving relative/approximate flags.
+
+    Calendar and clock validation stay strict. Unsupported or contradictory
+    day-period wording is a clarification, never an inferred time of day.
+    """
+    number = r"[0-9零一二两三四五六七八九十]+"
+    matched = re.fullmatch(
+        rf"(?P<date>今天|明天|后天|\d{{4}}-\d{{2}}-\d{{2}}|{_CHINESE_DATE})\s*"
+        rf"(?P<period>上午|下午|晚上|中午|凌晨|早上|傍晚)?\s*"
+        rf"(?P<hour>{number})\s*(?:(?P<colon>[:：])\s*(?P<minute>\d{{2}})|"
+        rf"点(?:(?P<fraction>半|一刻|三刻)|\s*(?P<cn_minute>{number})\s*分?)?)"
+        r"\s*(?P<approximate>左右)?", raw.strip(),
+    )
+    if matched is None:
+        raise NormalizationError("ambiguous_or_invalid_datetime")
+    normalized_date, relative = normalize_relative_date(matched.group("date"), session_date)
+    hour = _parse_cn_integer(matched.group("hour"))
+    minute = _parse_cn_integer(matched.group("minute") or matched.group("cn_minute") or "0")
+    fractions = {"半": 30, "一刻": 15, "三刻": 45}
+    if matched.group("fraction"):
+        minute = fractions[matched.group("fraction")]
+    if hour is None or minute is None or not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise NormalizationError("invalid_clock_time")
+    period = matched.group("period")
+    if period in {"下午", "晚上", "傍晚"} and 1 <= hour <= 11:
+        hour += 12
+    elif period == "中午" and hour in {1, 2}:
+        hour += 12
+    allowed = {"上午": range(1, 12), "早上": range(5, 12), "凌晨": range(0, 6),
+               "中午": range(11, 15), "下午": range(12, 19), "傍晚": range(17, 20),
+               "晚上": range(18, 24)}
+    if period is not None and hour not in allowed[period]:
+        raise NormalizationError("conflicting_day_period")
+    if period is None and matched.group("colon") is None and 1 <= hour <= 12:
+        raise NormalizationError("ambiguous_day_period")
+    return f"{normalized_date} {hour:02d}:{minute:02d}", relative, matched.group("approximate") is not None
 
 
 def normalize_budget(raw: str) -> tuple[float, bool]:

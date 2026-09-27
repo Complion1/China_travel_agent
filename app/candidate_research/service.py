@@ -629,6 +629,7 @@ class CandidateResearchService:
                 effective = tuple(supplied)
                 if not 2 <= len(effective) <= 4 or len(set(effective)) != len(effective):
                     raise ValueError("invalid interests")
+                effective = tuple(sorted(effective, key=lambda item: list(InterestTag).index(item)))
             hotel_ref = request.hotel_selection_ref
             destination = confirmed.requirement.destination
             if destination is None or not destination.strip():

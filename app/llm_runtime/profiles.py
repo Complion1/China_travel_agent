@@ -33,7 +33,7 @@ class ModelProfile(BaseModel):
     provider_attempts_per_invocation: Literal[2] = PROVIDER_ATTEMPTS_PER_INVOCATION
     semantic_invocation_limit: Annotated[int, Field(gt=0)] = 2
     max_request_utf8_bytes: Annotated[int, Field(gt=0)] = 32_768
-    max_output_tokens: Annotated[int, Field(gt=0)] = 8_192
+    max_output_tokens: Annotated[int, Field(gt=0)] = 16_384
 
 
 REQUIREMENT_EXTRACTION_PROFILE = ModelProfile(
@@ -41,7 +41,7 @@ REQUIREMENT_EXTRACTION_PROFILE = ModelProfile(
     read_timeout_seconds=120,
     semantic_invocation_limit=2,
     max_request_utf8_bytes=32_768,
-    max_output_tokens=8_192,
+    max_output_tokens=32_768,
 )
 
 CANDIDATE_RESEARCH_PROFILE = ModelProfile(
@@ -56,7 +56,7 @@ ITINERARY_PLANNING_PROFILE = ModelProfile(
     role=ModelRole.ITINERARY_PLANNING,
     read_timeout_seconds=120,
     semantic_invocation_limit=12,
-    max_request_utf8_bytes=524_288,
+    max_request_utf8_bytes=2_097_152,
     max_output_tokens=49_152,
 )
 

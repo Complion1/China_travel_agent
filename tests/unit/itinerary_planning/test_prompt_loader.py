@@ -1,4 +1,5 @@
 import hashlib
+from importlib import resources
 
 import pytest
 
@@ -11,13 +12,18 @@ from app.itinerary_planning.prompt_loader import (
 )
 
 
+def test_previous_prompt_remains_immutable():
+    previous = resources.files("app.itinerary_planning.prompts").joinpath("planning_v3.txt").read_bytes()
+    assert hashlib.sha256(previous).hexdigest() == "cc9d5816a91fde13eeaea17d6925ffa5ea7794ba6041956913ce45f08f187934"
+
+
 def test_planning_prompt_is_packaged_utf8_and_hash_locked() -> None:
     resource = load_planning_prompt()
-    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v3"
+    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v4"
     assert resource.sha256 == PLANNING_PROMPT_SHA256
     assert "普通日开放区间固定为当日 07:30–22:00" in resource.text
     assert "backup_distance_exceeded" in resource.text
-    assert "只有 Matrix 证明现有候选无法组成三组互不重复且在 3000 米内的备选时才请求补研" in resource.text
+    assert "仅缺备选时不请求补研" in resource.text
     assert "午餐和晚餐不能是同一地点" in resource.text
     assert "backup_candidate_duplicate" in resource.text
     assert "remaining_direction_slots" in resource.text
@@ -47,8 +53,8 @@ def test_prompt_exposes_the_controller_date_and_route_capacity_rules() -> None:
     assert "随后立即单独 submit_itinerary" in text
     assert "同一业务迭代中每个日期最多调用一次 Matrix" in text
     assert "remaining_matrix_slots" in text
-    assert "最多进行一次这种重选" in text
-    assert "连同酒店一共 9 个 Matrix 地点" in text
+    assert "主行程全部硬约束成立即可提交" in text
+    assert "backups=[] 完全合法" in text
 
 
 def test_prompt_validation_fails_closed_for_type_hash_encoding_and_content(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -50,6 +50,29 @@ async def saved_bundle(scenario):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backup_count", [0, 1])
+async def test_three_day_optional_backups_roundtrip_without_fabrication(backup_count):
+    scenario = await make_scenario(days=3)
+    payload = tree(scenario.itinerary)
+    days = payload["record"]["draft"]["days"]
+    for day in days:
+        day["backups"] = day["backups"][:backup_count]
+    payload["record"]["summary"]["backups"] = 3 * backup_count
+    payload["record"]["summary"]["unknown_hours"] = sum(
+        item["business_hours_state"] == "unknown"
+        for day in days for item in (*day["visits"], *day["backups"])
+    )
+    scenario = await replace_itinerary(scenario, payload)
+    prepared, _, index, index_ref = await saved_bundle(scenario)
+    assert len(prepared.days) == len(index.days) == 3
+    assert all(len(day.data.backups) == backup_count for day in prepared.days)
+    loaded = await ResultFormattingService(artifact_repository=scenario.repository).load(
+        make_read_request(scenario, index_ref))
+    assert type(loaded) is ResultFormattingLoaded
+    assert loaded.days == prepared.days
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("days", [1, 60])
 async def test_real_repository_roundtrip_external_saves_and_per_call_read_cache(days):
     scenario = await make_scenario(days=days)
@@ -86,6 +109,23 @@ async def test_real_repository_roundtrip_external_saves_and_per_call_read_cache(
     assert [ref for ref, _ in repository.get_calls[:days + 1]] == [index_ref, *day_refs]
     assert_one_read_per_ref(repository)
     assert tree(scenario.request.state) == original_state
+
+
+@pytest.mark.asyncio
+async def test_three_day_null_budget_roundtrip_preserves_unverified_costs():
+    scenario = await make_scenario(days=3, budget_total_cny=None)
+    prepared, refs, index, index_ref = await saved_bundle(scenario)
+    loaded = await ResultFormattingService(artifact_repository=scenario.repository).load(
+        make_read_request(scenario, index_ref))
+    assert isinstance(loaded, ResultFormattingLoaded)
+    assert len(loaded.days) == len(refs) == 3
+    assert loaded.days == prepared.days and loaded.index == index
+    assert scenario.request.state.requirement_outcome.requirement.budget.total_cny is None
+    assert loaded.index.core.requirement.budget_total_cny is None
+    assert "用户总预算" not in loaded.markdown
+    assert "预算合规" not in loaded.markdown and "剩余预算" not in loaded.markdown
+    assert all(f"- {category}：未核验。" in loaded.markdown
+               for category in ("住宿", "当地交通", "餐饮", "景点", "其他当地消费"))
 
 
 @pytest.mark.asyncio

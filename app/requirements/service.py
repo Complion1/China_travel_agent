@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+import re
+from datetime import date
 from uuid import UUID, uuid4
 
 from pydantic import TypeAdapter
@@ -50,7 +51,6 @@ from app.requirements.models import (
     RequirementIssue,
     RequirementPatch,
     RequirementTurnInput,
-    TravelBudget,
     TravelConstraints,
     TravelParty,
     TravelPreferences,
@@ -63,7 +63,7 @@ from app.requirements.models import (
 )
 from app.requirements.normalization import (
     infer_hub_type,
-    normalize_budget,
+    normalize_local_datetime,
     normalize_relative_date,
 )
 
@@ -132,7 +132,7 @@ class RequirementDomainService:
             issue = RequirementIssue(
                 code=RequirementErrorCode.NORMALIZATION_ERROR.value,
                 field_path=self._normalization_error_path(exc),
-                message="输入无法确定性规范化，请提供明确日期、时间或金额",
+                message="输入无法确定性规范化，请提供明确日期或时间",
             )
             state = input.current.model_copy(deep=True)
             state.issues = (issue,)
@@ -290,7 +290,17 @@ class RequirementDomainService:
                     field_paths=(),
                 )
             )
-        return verify_evidence(attempt.value, request.user_message)
+        # Budget collection is deferred. Keep legacy DTO compatibility while
+        # applying the evidence contract only to fields active in this release.
+        active = attempt.value.model_copy(update={
+            "budget_total_cny": None,
+            "budget_is_approximate": None,
+            "evidence": [item for item in attempt.value.evidence if item.field_path not in {
+                RequirementFieldPath.BUDGET_TOTAL_CNY,
+                RequirementFieldPath.BUDGET_IS_APPROXIMATE,
+            }],
+        })
+        return verify_evidence(active, request.user_message)
 
     @staticmethod
     def _feedback_error_code(
@@ -333,14 +343,23 @@ class RequirementDomainService:
     ) -> tuple[RequirementPatch, dict[str, NormalizationRecord], tuple[str, ...]]:
         normalizations: dict[str, NormalizationRecord] = {}
         pending: set[str] = set()
-        evidence_by_path = {item.field_path: item.text for item in verified}
 
-        def normalize_date(value: str | None, path: RequirementFieldPath) -> str | None:
+        def normalize_date(value: str | None, path: RequirementFieldPath, *, range_start: str | None = None) -> str | None:
             if value is None:
                 return None
             try:
-                normalized, approximate = normalize_relative_date(value, session_date)
-            except NormalizationError as exc:
+                day_only = re.fullmatch(r"\s*(\d{1,2})\s*[日号]\s*", value)
+                if range_start is not None and day_only is not None:
+                    # The same DTO explicitly supplies the start month. Never
+                    # guess a month rollover when a range end is before it.
+                    first = date.fromisoformat(range_start)
+                    last = date(first.year, first.month, int(day_only.group(1)))
+                    if last < first:
+                        raise NormalizationError("ambiguous_date_range_end")
+                    normalized, approximate = last.isoformat(), False
+                else:
+                    normalized, approximate = normalize_relative_date(value, session_date)
+            except (NormalizationError, ValueError) as exc:
                 raise NormalizationError(f"{path.value}: {exc}") from exc
             normalizations[path.value] = NormalizationRecord(
                 raw_value=value,
@@ -351,32 +370,29 @@ class RequirementDomainService:
                 pending.add(path.value)
             return normalized
 
+        approximate_times: dict[RequirementFieldPath, bool] = {}
+
         def normalize_datetime(value: str | None, path: RequirementFieldPath) -> str | None:
             if value is None:
                 return None
             try:
-                datetime.strptime(value, "%Y-%m-%d %H:%M")
-                return value
-            except ValueError:
-                try:
-                    date_text, time_text = value.rsplit(" ", 1)
-                    normalized_date, approximate = normalize_relative_date(date_text, session_date)
-                    normalized = f"{normalized_date} {time_text}"
-                    datetime.strptime(normalized, "%Y-%m-%d %H:%M")
-                except (ValueError, NormalizationError) as exc:
-                    raise NormalizationError(f"{path.value}: invalid_datetime") from exc
+                normalized, relative, approximate = normalize_local_datetime(value, session_date)
+            except NormalizationError as exc:
+                raise NormalizationError(f"{path.value}: invalid_datetime") from exc
+            approximate_times[path] = approximate
+            if normalized != value:
                 normalizations[path.value] = NormalizationRecord(
                     raw_value=value,
                     normalized_value=normalized,
-                    rule_name="relative_datetime",
+                    rule_name="relative_datetime" if relative else "local_datetime",
                 )
-                if approximate:
-                    pending.add(path.value)
-                return normalized
+            if relative:
+                pending.add(path.value)
+            return normalized
 
         destination = dto.destination
         start = normalize_date(dto.sightseeing_start_date, RequirementFieldPath.SIGHTSEEING_START_DATE)
-        end = normalize_date(dto.sightseeing_end_date, RequirementFieldPath.SIGHTSEEING_END_DATE)
+        end = normalize_date(dto.sightseeing_end_date, RequirementFieldPath.SIGHTSEEING_END_DATE, range_start=start)
         arrival_datetime = normalize_datetime(dto.arrival_datetime, RequirementFieldPath.ARRIVAL_LOCAL_DATETIME)
         departure_datetime = normalize_datetime(dto.departure_datetime, RequirementFieldPath.DEPARTURE_LOCAL_DATETIME)
 
@@ -388,28 +404,6 @@ class RequirementDomainService:
         if departure_type is None and dto.departure_hub_name:
             inferred = infer_hub_type(dto.departure_hub_name)
             departure_type = HubType(inferred) if inferred else None
-
-        budget_value = dto.budget_total_cny
-        budget_approximate = dto.budget_is_approximate
-        raw_budget = evidence_by_path.get(RequirementFieldPath.BUDGET_TOTAL_CNY)
-        if budget_value is not None and raw_budget:
-            try:
-                parsed_budget, parsed_approximate = normalize_budget(raw_budget)
-            except NormalizationError as exc:
-                raise NormalizationError(
-                    f"{RequirementFieldPath.BUDGET_TOTAL_CNY.value}: {exc}"
-                ) from exc
-            if parsed_budget != budget_value:
-                raise NormalizationError(
-                    f"{RequirementFieldPath.BUDGET_TOTAL_CNY.value}: "
-                    "evidence_value_mismatch"
-                )
-            budget_approximate = bool(budget_approximate or parsed_approximate)
-            normalizations[RequirementFieldPath.BUDGET_TOTAL_CNY.value] = NormalizationRecord(
-                raw_value=raw_budget,
-                normalized_value=str(budget_value),
-                rule_name="cny_amount",
-            )
 
         patch_data: dict[str, object] = {"is_correction": dto.is_correction}
         if destination is not None:
@@ -424,6 +418,8 @@ class RequirementDomainService:
             arrival_data["local_datetime"] = arrival_datetime
         if dto.arrival_is_approximate is not None:
             arrival_data["is_approximate"] = dto.arrival_is_approximate
+        if approximate_times.get(RequirementFieldPath.ARRIVAL_LOCAL_DATETIME):
+            arrival_data["is_approximate"] = True
         departure_data: dict[str, object] = {}
         if dto.departure_hub_name is not None:
             departure_data["hub_name"] = dto.departure_hub_name
@@ -433,6 +429,8 @@ class RequirementDomainService:
             departure_data["local_datetime"] = departure_datetime
         if dto.departure_is_approximate is not None:
             departure_data["is_approximate"] = dto.departure_is_approximate
+        if approximate_times.get(RequirementFieldPath.DEPARTURE_LOCAL_DATETIME):
+            departure_data["is_approximate"] = True
         time_data: dict[str, object] = {}
         if arrival_data:
             time_data["arrival"] = TravelTimeWindowArrival(**arrival_data)
@@ -447,14 +445,6 @@ class RequirementDomainService:
                 time_data[name] = value
         if time_data:
             patch_data["time_window"] = TravelTimeWindow(**time_data)
-
-        budget_data: dict[str, object] = {}
-        if budget_value is not None:
-            budget_data["total_cny"] = budget_value
-        if budget_approximate is not None:
-            budget_data["is_approximate"] = budget_approximate
-        if budget_data:
-            patch_data["budget"] = TravelBudget(**budget_data)
 
         party_data = {
             name: value

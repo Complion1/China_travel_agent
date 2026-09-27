@@ -540,13 +540,30 @@ async def test_bad_relative_date_returns_clarification_without_partial_mutation(
     assert state == RequirementDomainState()
 
 
-async def test_budget_evidence_must_parse_to_the_extracted_amount():
+async def test_deferred_budget_does_not_normalize_or_block_active_fields():
     dto = dto_with_evidence(destination="杭州", budget_total_cny=6000.0)
     service, _, _ = make_service(dto)
     outcome = await service.process_turn(turn())
     assert isinstance(outcome.outcome, NeedClarification)
-    assert outcome.state.requirement.destination is None
-    assert outcome.outcome.issues[0].field_path is RequirementFieldPath.BUDGET_TOTAL_CNY
+    assert outcome.state.requirement.destination == "杭州"
+    assert outcome.state.requirement.budget.total_cny is None
+    assert all(issue.field_path is not RequirementFieldPath.BUDGET_TOTAL_CNY for issue in outcome.outcome.issues)
+
+
+async def test_complete_requirement_can_confirm_without_amount_or_budget_evidence():
+    dto = complete_dto().model_copy(update={"budget_total_cny": None,
+        "evidence": [item for item in complete_dto().evidence
+                     if item.field_path is not RequirementFieldPath.BUDGET_TOTAL_CNY]})
+    service, extractor, sink = make_service(dto)
+    result = await service.process_turn(turn())
+    assert isinstance(result.outcome, NeedConfirmation)
+    assert result.state.requirement.budget.total_cny is None
+    confirmed = await service.confirm(result.state, RequirementConfirmation(decision="accept", revision_text=None))
+    assert isinstance(confirmed.outcome, ConfirmedTravelRequirement)
+    assert confirmed.outcome.requirement.budget.total_cny is None
+    assert all(item.field_path not in {RequirementFieldPath.BUDGET_TOTAL_CNY, RequirementFieldPath.BUDGET_IS_APPROXIMATE}
+               for item in sink.received[0][1])
+    assert extractor.sessions[0].repair_calls == 0
 
 
 def test_process_manual_template_parse_error_is_non_mutating_clarification():

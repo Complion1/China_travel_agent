@@ -113,7 +113,7 @@ class Scenario:
     refs: dict[str, ArtifactRef]
 
 
-async def make_confirmed(days: int = 1):
+async def make_confirmed(days: int = 1, *, budget_total_cny: float | None = 10000.5):
     """Use real M01 confirmation; its digest deliberately has no prefix."""
     last = START_DATE + timedelta(days=days - 1)
     arrival = START_DATE - timedelta(days=1)
@@ -129,7 +129,7 @@ async def make_confirmed(days: int = 1):
             "sightseeing_days": days, "hotel_check_in_date": str(arrival),
             "hotel_check_out_date": str(departure), "hotel_nights": days + 1,
         },
-        "budget": {"total_cny": 10000.5, "is_approximate": True, "scope": "destination_only"},
+        "budget": {"total_cny": budget_total_cny, "is_approximate": budget_total_cny is not None, "scope": "destination_only"},
         "party": {"adults_count": 2, "children_count": 1, "children_ages": [8],
                   "seniors_count": 0, "total_people": 3},
         "rooms": {"room_count": 1, "room_type_requirements": "家庭房"},
@@ -180,6 +180,7 @@ async def make_scenario(
     repository: ArtifactRepository | None = None, *, days: int = 1,
     resume: bool = False, transit_only: bool = False, cross_midnight: bool = False,
     zero_route: bool = False, run_id: UUID = RUN_ID,
+    budget_total_cny: float | None = 10000.5,
 ) -> Scenario:
     """Persist complete evidence; return request, itinerary, evidence and repository.
 
@@ -211,7 +212,7 @@ async def make_scenario(
         refs[key] = ref
         return ref
 
-    confirmation = await make_confirmed(days)
+    confirmation = await make_confirmed(days, budget_total_cny=budget_total_cny)
     confirmed = confirmation.outcome
     requirement_digest = digest(tree(confirmed))
     hotel_candidates = [{"schema_version": "1.0", "uid": f"hotel-{i}",
@@ -318,8 +319,8 @@ async def make_scenario(
     planning_digest = digest("planning-original-request")
     action = await save("planning_action", ItineraryPlanningModelActionArtifact,
                         "itinerary_planning.model_action", WorkflowPhase.ITINERARY_PLANNING, {
-        "schema_version": "3.0", "request_digest": planning_digest, "invocation_index": 0,
-        "prompt_version": "planning-v3", "prompt_hash": digest("synthetic-prompt"),
+        "schema_version": "4.0", "request_digest": planning_digest, "invocation_index": 0,
+        "prompt_version": "planning-v4", "prompt_hash": digest("synthetic-prompt"),
         "action_kind": "tool_calls", "call_summaries": [{"schema_version": "1.0",
             "call_id": "synthetic-geocode", "ordinal": 0, "tool": "geocode_hub",
             "arguments_fingerprint": digest("arguments"), "handle_count": 0,

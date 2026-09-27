@@ -175,6 +175,7 @@ from .models import (
     PlanningTool,
 )
 from .policy import (
+    _BackupSlotsMismatch,
     _PolicyBusinessRejected,
     _PolicyLockedMismatch,
     candidate_is_eligible,
@@ -234,6 +235,15 @@ class _BusinessRejected(Exception):
 
     def __init__(self, reason: str = "business_gate_rejected") -> None:
         self.reason = reason
+
+
+class _BackupSlotsRejected(_BusinessRejected):
+    __slots__ = ("day_no", "slots")
+
+    def __init__(self, day_no: int, slots: _BackupSlotsMismatch) -> None:
+        super().__init__("backup_slots_mismatch")
+        self.day_no = day_no
+        self.slots = slots
 
 
 def _supplement_request(artifact: ItineraryPlanningArtifact, plan: research.CandidateResearchOperationPlan) -> research.CandidateResearchSupplementalRequest:
@@ -702,7 +712,7 @@ class ItineraryPlanningService:
             for operation_id, artifact_type, expected in operation_ids:
                 lookup = await self._repository.lookup(operation_id=operation_id)
                 if isinstance(lookup, ArtifactFound):
-                    expected_schema_version = "3.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
+                    expected_schema_version = "4.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
                     if lookup.ref.operation_id != operation_id or lookup.ref.schema_version != expected_schema_version or lookup.ref.artifact_type != artifact_type:
                         return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
                     read = await self._repository.get(lookup.ref, expected_model=expected)
@@ -1047,7 +1057,7 @@ class ItineraryPlanningService:
             raise ValueError("artifact operation phase mismatch")
         if type(content) is not expected:
             raise ValueError("artifact model mismatch")
-        artifact_schema_version = "3.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
+        artifact_schema_version = "4.0" if artifact_type == "itinerary_planning.model_action" else "1.0"
         request = ArtifactWriteRequest(
             operation_id=operation_id, artifact_type=artifact_type, schema_version=artifact_schema_version,
             content=content.model_dump(mode="json", exclude_none=False, by_alias=False, exclude_computed_fields=True),
@@ -1111,7 +1121,7 @@ class ItineraryPlanningService:
         operation_id = run.plan.terminal_action_operation_id if terminal_only else self._iteration_slot(run, run.iterations).action_operation_id
         from .artifacts import ItineraryPlanningModelActionArtifact
         action = ItineraryPlanningModelActionArtifact(
-            schema_version="3.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
+            schema_version="4.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
             prompt_version=PLANNING_PROMPT_VERSION, prompt_hash=load_planning_prompt().sha256, action_kind=kind,
             call_summaries=tuple(self._action_summary(call, i) for i, call in enumerate(calls)),
             invocation_metadata=metadata, disposition=disposition,
@@ -1313,7 +1323,11 @@ class ItineraryPlanningService:
                     await self._persist_state(run)
                     if run.no_progress >= 2:
                         return await self._finish_incomplete(run, PlanningStopReason.NO_PROGRESS)
-                    feedback = {"status": "rejected", "code": "policy_rejected"}
+                    feedback: dict[str, Any] = {"status": "rejected", "code": "policy_rejected"}
+                    if isinstance(rejected, _BackupSlotsRejected):
+                        feedback.update(reason=rejected.reason, day_no=rejected.day_no,
+                                        expected_backup_kinds=list(rejected.slots.expected),
+                                        actual_backup_kinds=list(rejected.slots.actual))
                     if rejected.reason in {
                         "route_leg_binding_mismatch",
                         "backup_distance_exceeded",
@@ -1890,8 +1904,12 @@ class ItineraryPlanningService:
             if draft.effective_policy.time_sensitive_must:
                 raise _BusinessRejected("structured_demo_deferred_policy_rule_rejected")
             validate_route_capacity(day, draft.effective_policy.effective_pace)
-            if not allow_missing_backups:
+            # Missing backups are legal in every mode; supplied entries remain
+            # subject to the same checks, including when retaining a prefix.
+            try:
                 validate_backup_options(day)
+            except _BackupSlotsMismatch as mismatch:
+                raise _BackupSlotsRejected(day_index + 1, mismatch) from None
             for item in day.visits:
                 if item.time_sensitive_anchor_ids:
                     raise _BusinessRejected("structured_demo_deferred_policy_rule_rejected")
@@ -2117,52 +2135,6 @@ class ItineraryPlanningService:
                 return False
         run.draft = prefix
         run.pending_gaps = [gap for gap in run.pending_gaps if not isinstance(gap, BackupUnavailableGap)]
-        for day in prefix.days:
-            role_visits = (
-                (
-                    "attraction",
-                    tuple(
-                        visit
-                        for visit in day.visits
-                        if visit.visit_kind
-                        in {
-                            VisitKind.ATTRACTION,
-                            VisitKind.ATTRACTION_LUNCH,
-                            VisitKind.ATTRACTION_DINNER,
-                        }
-                    ),
-                ),
-                (
-                    "lunch",
-                    tuple(
-                        visit
-                        for visit in day.visits
-                        if visit.visit_kind in {VisitKind.LUNCH, VisitKind.ATTRACTION_LUNCH}
-                    ),
-                ),
-                (
-                    "dinner",
-                    tuple(
-                        visit
-                        for visit in day.visits
-                        if visit.visit_kind in {VisitKind.DINNER, VisitKind.ATTRACTION_DINNER}
-                    ),
-                ),
-            )
-            for kind, visits in role_visits:
-                if not visits:
-                    continue
-                visit_ids = {visit.visit_id for visit in visits}
-                if any(
-                    item.backup_kind == kind and item.core_visit_id in visit_ids
-                    for item in day.backups
-                ):
-                    continue
-                core = visits[0]
-                run.pending_gaps.append(BackupUnavailableGap(
-                    gap_id=f"backup-{day.date}-{kind}", evidence_refs=(), date=day.date,
-                    backup_kind=kind, core_visit_id=core.visit_id, reason="no_nearby",
-                ))
         return True
 
     def _revalidate_saved_prefix(self, run: _Run) -> None:
@@ -2201,6 +2173,9 @@ class ItineraryPlanningService:
 
     async def _supplement(self, run: _Run, args: RequestCandidateSupplementArgs, action_ref: ArtifactRef, call_id: str) -> ItineraryPlanningOutcome | None:
         run.supplement_rejection_reason = None
+        if any(gap.source_gap_type == "backup_unavailable" for gap in args.proposed_gaps):
+            # Optional recommendations cannot create a mandatory research cycle.
+            raise _BusinessRejected("optional_backups_do_not_require_supplement")
         if len(run.supplement_fingerprints) >= 5 or run.iterations >= 6:
             # A supplement limit alone does not prove that map work or a
             # submission is impossible.  Only the exhausted, route-free state

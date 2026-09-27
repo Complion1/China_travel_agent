@@ -77,10 +77,6 @@ def _list_or_none(values: list[object]) -> str:
     return "、".join(str(value) for value in values) if values else "无"
 
 
-def _format_amount(value: float | None) -> str:
-    return "未填写" if value is None else f"{value:g} 元"
-
-
 def render_confirmation_summary(req: TravelRequirement) -> str:
     """Render every business field in a fixed, deterministic order."""
     time_window = req.time_window
@@ -120,8 +116,6 @@ def render_confirmation_summary(req: TravelRequirement) -> str:
         f"离开枢纽类型：{HUB_TYPE_LABELS.get(departure.hub_type, '未填写')}",
         f"离开时间：{_optional(departure.local_datetime)}",
         f"离开时间约数：{'是' if departure.is_approximate else '否'}",
-        f"目的地内总预算：{_format_amount(req.budget.total_cny)}",
-        f"预算约数：{'是' if req.budget.is_approximate else '否'}",
         f"成人数量：{_optional(party.adults_count)}",
         f"儿童数量：{_optional(party.children_count)}",
         f"儿童年龄：{_list_or_none(party.children_ages)}",
@@ -143,4 +137,12 @@ def render_confirmation_summary(req: TravelRequirement) -> str:
         "尚存假设：无",
         "请回复“确认”以继续，或补充修改信息。",
     ]
+    # Preserve summaries (and their digests) for pre-deferral stored states.
+    # New business inputs no longer populate these legacy fields.
+    if req.budget.total_cny is not None:
+        index = lines.index(f"成人数量：{_optional(party.adults_count)}")
+        lines[index:index] = [
+            f"目的地内总预算：{req.budget.total_cny:g} 元",
+            f"预算约数：{'是' if req.budget.is_approximate else '否'}",
+        ]
     return "\n".join(lines)

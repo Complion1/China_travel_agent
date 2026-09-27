@@ -17,7 +17,6 @@ from app.requirements.models import (
     TravelRequirement,
 )
 from app.requirements.normalization import (
-    validate_budget,
     validate_party,
     validate_requirement_bounds,
     validate_rooms,
@@ -225,7 +224,10 @@ class RequirementMerger:
             if (req.party.seniors_count or 0) > 0:
                 scenarios.append("travel_with_seniors")
             mobility = (req.constraints.mobility_constraints or "").strip()
-            if mobility and mobility not in {"无", "没有", "none", "None"}:
+            if mobility and mobility not in {
+                "无", "没有", "none", "None", "无行动限制", "没有行动限制",
+                "无行动限制和饮食禁忌", "没有行动限制和饮食禁忌",
+            }:
                 scenarios.append("mobility_assistance_needed")
             if req.inferred_scenarios != scenarios:
                 req.inferred_scenarios = scenarios
@@ -252,7 +254,6 @@ class RequirementMerger:
             ("time_window.arrival.local_datetime", req.time_window.arrival.local_datetime),
             ("time_window.departure.hub_name", req.time_window.departure.hub_name),
             ("time_window.departure.local_datetime", req.time_window.departure.local_datetime),
-            ("budget.total_cny", req.budget.total_cny),
             ("party.adults_count", req.party.adults_count),
             ("party.children_count", req.party.children_count),
             ("party.seniors_count", req.party.seniors_count),
@@ -273,7 +274,6 @@ class RequirementMerger:
             *validate_requirement_bounds(req),
             *validate_time_window(req.time_window),
             *validate_party(req.party.adults_count, req.party.children_count, req.party.children_ages, req.party.seniors_count),
-            *validate_budget(req.budget.total_cny),
             *validate_rooms(req.rooms.room_count, req.party.total_people or 0),
         ]
         return issues

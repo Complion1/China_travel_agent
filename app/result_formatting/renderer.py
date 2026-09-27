@@ -145,14 +145,12 @@ def render_header(core: ResultCore) -> str:
     requirement = core.requirement
     hotel = core.places[0]
     ages = "、".join(f"{age} 岁" for age in requirement.children_ages) or "未记录"
-    budget = ("约 " if requirement.budget_is_approximate else "") + _decimal(requirement.budget_total_cny)
     lines = [
         f"# {_escape(requirement.destination)}旅行攻略",
         "",
         f"- 游览日期：{requirement.sightseeing_start_date.isoformat()}—{requirement.sightseeing_end_date.isoformat()}；共 {requirement.sightseeing_days} 天。",
         f"- 同行人员：共 {requirement.total_people} 人；成人 {requirement.adults_count} 人、儿童 {requirement.children_count} 人、老人 {requirement.seniors_count} 人；儿童年龄：{ages}。",
         f"- 住宿日期：{requirement.hotel_check_in_date.isoformat()} 入住，{requirement.hotel_check_out_date.isoformat()} 离店；{requirement.hotel_nights} 晚，{requirement.room_count} 间房。",
-        f"- 用户总预算：{budget} 元；范围为目的地内住宿、当地交通、餐饮、景点和其他当地消费，不含往返目的地的大交通。",
         f"- 行程节奏：{core.effective_pace}。",
         "",
         "## 已确认酒店",
@@ -166,6 +164,11 @@ def render_header(core: ResultCore) -> str:
         _route_line(core.arrival_transfer.route, _place_map(core)),
         _transfer_allowance(core, arrival=True),
     ]
+    # Existing numeric artifacts retain their exact historical rendering.
+    # Active collection is deferred, so new runs reach this with a null amount.
+    if requirement.budget_total_cny is not None:
+        budget = ("约 " if requirement.budget_is_approximate else "") + _decimal(requirement.budget_total_cny)
+        lines.insert(5, f"- 用户总预算：{budget} 元；范围为目的地内住宿、当地交通、餐饮、景点和其他当地消费，不含往返目的地的大交通。")
     return "\n".join(lines)
 
 

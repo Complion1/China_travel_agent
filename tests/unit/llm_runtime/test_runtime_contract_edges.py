@@ -18,9 +18,10 @@ from app.llm_runtime.models import (
     ToolResult,
     ToolTurnCompleted,
 )
-from app.llm_runtime.profiles import REQUIREMENT_EXTRACTION_PROFILE
+from app.llm_runtime.profiles import REQUIREMENT_EXTRACTION_PROFILE, ITINERARY_PLANNING_PROFILE
 from app.llm_runtime.protocols import ProviderFailure, ProviderResponse
 from app.llm_runtime.runtime import DeepSeekRuntime, ModelOperation, _provider_failure_error
+from app.llm_runtime.sizing import canonical_json, canonical_request_bytes
 from tests.unit.llm_runtime.fakes import RecordingSleeper, ScriptedProviderAdapter
 
 
@@ -330,6 +331,65 @@ def test_tool_continuation_byte_gate_quota_and_provider_failure():
     op3, _, _ = operation([first, ProviderFailure("timeout", False, None, None)])
     assert isinstance(op3.invoke_tools(PROMPT, (TOOL,)), ToolCallsReady)
     assert_failure(op3.continue_tools((ToolResult(call_id="c", content="x"),)), LLMErrorCode.TIMEOUT)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("request_bytes", [524_289, 2_097_151, 2_097_152, 2_097_153])
+async def test_approved_planning_continuation_size_boundary_preserves_full_history(
+    async_mode, request_bytes,
+):
+    reasoning = "synthetic-private-reasoning:" + "x" * 262_144
+    first = response(content=None, calls=(("c", "echo", {"value": "x"}),),
+                     finish="tool_calls", reasoning=reasoning)
+    provider = ScriptedProviderAdapter([first, response(content="done")])
+    runtime = DeepSeekRuntime(provider=provider, sleeper=RecordingSleeper())
+    op = runtime.start_operation(ModelRole.ITINERARY_PLANNING)
+    try:
+        ready = await op.ainvoke_tools(PROMPT, (TOOL,)) if async_mode else op.invoke_tools(PROMPT, (TOOL,))
+        assert isinstance(ready, ToolCallsReady)
+        definitions = provider.tool_requests[0].tools
+        assistant = {
+            "role": "assistant", "content": None, "reasoning_content": reasoning,
+            "tool_calls": [{"id": "c", "type": "function", "function": {
+                "name": "echo", "arguments": canonical_json({"value": "x"}),
+            }}],
+        }
+        tool_message = {"role": "tool", "tool_call_id": "c", "content": ""}
+        base_size = len(canonical_request_bytes(
+            profile=ITINERARY_PLANNING_PROFILE, prompt=PROMPT, json_schema=None,
+            tools=definitions, internal_tool_history=(assistant, tool_message),
+        ))
+        tool_message["content"] = "r" * (request_bytes - base_size)
+        results = (ToolResult(call_id="c", content=tool_message["content"]),)
+        assert len(canonical_request_bytes(
+            profile=ITINERARY_PLANNING_PROFILE, prompt=PROMPT, json_schema=None,
+            tools=definitions, internal_tool_history=(assistant, tool_message),
+        )) == request_bytes
+        outcome = await op.acontinue_tools(results) if async_mode else op.continue_tools(results)
+        if request_bytes > 2_097_152:
+            assert_failure(outcome, LLMErrorCode.INPUT_TOO_LARGE)
+            assert outcome.error.actual_bytes == request_bytes
+            assert outcome.error.max_bytes == 2_097_152
+            assert provider.call_count == 1
+            assert provider.tool_continuations == []
+            assert "semantic_used=1," in repr(op)
+        else:
+            assert isinstance(outcome, ToolTurnCompleted)
+            assert provider.call_count == 2
+            assert len(provider.tool_continuations) == 1
+            continuation = provider.tool_continuations[0]
+            assert continuation.messages == (
+                {"role": "system", "content": PROMPT.system_text},
+                {"role": "user", "content": PROMPT.user_text},
+                assistant, tool_message,
+            )
+            assert continuation.max_output_tokens == 49_152
+            assert "semantic_used=2," in repr(op)
+        assert reasoning not in repr(op)
+    finally:
+        op.close()
+        await runtime.aclose()
 
 
 @pytest.mark.asyncio

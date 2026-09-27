@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import hashlib
+import pytest
+
 from app.itinerary_planning.fingerprints import (
     artifact_ref_payload,
     canonical_json_bytes,
@@ -13,7 +16,75 @@ from app.workflow_contracts import ArtifactRef, OperationId, WorkflowPhase
 ZERO = "sha256:" + "0" * 64
 
 
-def test_resume_fingerprint_uses_local_v4_domain_and_both_full_plans():
+def test_optional_backups_do_not_replay_the_required_backup_scope(monkeypatch):
+    import app.itinerary_planning.fingerprints as fingerprints
+    from tests.unit.itinerary_planning.test_service_initial import _fixture
+    _, request, *_ = _fixture()
+    current = fingerprints.fingerprint_request_initial(request)
+    monkeypatch.setattr(fingerprints, "INITIAL_CONTEXT_FINGERPRINT_VERSION", "planning-fp-v3")
+    assert fingerprints.fingerprint_request_initial(request) != current
+
+
+def test_initial_fingerprint_accepts_valid_enum_keyed_requirement_metadata():
+    from app.requirements import RequirementFieldPath
+    from app.requirements.models import FieldMetadata
+    from app.itinerary_planning.fingerprints import _model_hash, fingerprint_request_initial
+    from tests.unit.itinerary_planning.test_service_initial import _fixture
+
+    _, request, *_ = _fixture()
+    metadata = request.confirmed.metadata_without_raw_evidence.metadata
+    metadata[RequirementFieldPath.DESTINATION] = FieldMetadata(source_turn_id=uuid4())
+    metadata[RequirementFieldPath.ARRIVAL_HUB_NAME] = FieldMetadata(source_turn_id=uuid4())
+    before = request.model_dump_json()
+    expected = "sha256:" + hashlib.sha256(canonical_json_bytes(
+        request.confirmed.model_dump(mode="json", exclude_none=False))).hexdigest()
+    assert _model_hash(request.confirmed) == expected
+    first = fingerprint_request_initial(request)
+    assert request.model_dump_json() == before
+    request.confirmed.metadata_without_raw_evidence.metadata = dict(reversed(tuple(metadata.items())))
+    assert fingerprint_request_initial(request) == first
+    metadata[RequirementFieldPath.DESTINATION].source_turn_id = uuid4()
+    assert fingerprint_request_initial(request) != first
+
+
+def test_enum_key_encoding_does_not_coerce_invalid_metadata_or_change_utc_canonicalization():
+    from datetime import timedelta
+    from pydantic import BaseModel, ConfigDict
+    from app.requirements.models import FieldMetadata
+    from app.itinerary_planning.fingerprints import _model_hash
+    from tests.unit.itinerary_planning.test_service_initial import _fixture
+
+    _, request, *_ = _fixture()
+    request.confirmed.metadata_without_raw_evidence.metadata["destination"] = FieldMetadata()
+    with pytest.raises(TypeError):
+        _model_hash(request.confirmed)
+    ref = _ref(5)
+    assert _model_hash(ref) == "sha256:" + hashlib.sha256(canonical_json_bytes(ref.model_dump(mode="python"))).hexdigest()
+    class TimestampPayload(BaseModel):
+        model_config = ConfigDict(strict=True)
+        at: datetime
+    utc = TimestampPayload(at=ref.created_at)
+    shifted = TimestampPayload(at=ref.created_at.astimezone(timezone(timedelta(hours=8))))
+    assert _model_hash(utc) == _model_hash(shifted)
+
+
+@pytest.mark.asyncio
+async def test_public_initial_accepts_nonempty_requirement_metadata():
+    from app.requirements import RequirementFieldPath
+    from app.requirements.models import FieldMetadata
+    from tests.unit.itinerary_planning.test_service_initial import _fixture
+
+    service, request, runtime, _, _ = _fixture()
+    request.confirmed.metadata_without_raw_evidence.metadata[RequirementFieldPath.DESTINATION] = FieldMetadata(source_turn_id=uuid4())
+    try:
+        result = await service.plan_initial(request)
+        assert runtime.start_count == 1
+        assert result.outcome_type == "failed"  # Scripted model intentionally has no response.
+    finally:
+        await service.aclose()
+
+
+def test_resume_fingerprint_uses_local_v5_domain_and_both_full_plans():
     import hashlib
     from app.itinerary_planning import ItineraryPlanningResumeRequest
     from app.itinerary_planning.fingerprints import fingerprint_request_resume, fingerprint_request_initial
@@ -27,8 +98,8 @@ def test_resume_fingerprint_uses_local_v4_domain_and_both_full_plans():
     first = fingerprint_request_resume(request)
     def model_hash(value):
         return "sha256:" + hashlib.sha256(canonical_json_bytes(value.model_dump(mode="json", exclude_none=False))).hexdigest()
-    expected = {"fingerprint_version": "planning-resume-fp-v4", "kind": "request_resume", "fields": {
-            "capability_scope": "module09-structured-demo-v2",
+    expected = {"fingerprint_version": "planning-resume-fp-v5", "kind": "request_resume", "fields": {
+            "capability_scope": "module09-optional-backups-v1",
             "schema_version": "2.0", "run_id": run_id,
         "predecessor_planning_ref": artifact_ref_payload(request.predecessor_planning_ref),
         "supplemented_candidate_set_ref": artifact_ref_payload(request.supplemented_candidate_set_ref),

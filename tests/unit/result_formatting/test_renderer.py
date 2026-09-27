@@ -177,11 +177,16 @@ async def test_names_and_business_text_use_the_same_escaping(scenario):
 
 
 @pytest.mark.asyncio
-async def test_budget_plain_decimal_and_transport_semantics_remain_honest(scenario):
+@pytest.mark.parametrize("amount", [None, 1e20])
+async def test_deferred_budget_is_not_displayed_and_transport_semantics_remain_honest(scenario, amount):
     core, days = project(scenario)
-    requirement = core.requirement.model_copy(update={"budget_total_cny": 1e20, "budget_is_approximate": False})
+    requirement = core.requirement.model_copy(update={"budget_total_cny": amount, "budget_is_approximate": False})
     header = render_header(core.model_copy(update={"requirement": requirement}))
-    assert "用户总预算：100000000000000000000 元" in header and "1e+20" not in header
+    if amount is None:
+        assert "用户总预算" not in header
+    else:
+        assert "用户总预算：100000000000000000000 元" in header
+        assert "1e+20" not in header
     route = days[0].route_legs[0].model_copy(update={"transport_semantic": "ride_hailing", "route_mode": "driving"})
     day = days[0].model_copy(update={"route_legs": (route, *days[0].route_legs[1:])})
     assert "网约车（驾车路线估算，叫车可用性及费用未核验）" in render_day(core, day)

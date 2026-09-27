@@ -83,7 +83,7 @@ def test_serialize_parse_round_trip_all_template_business_fields():
     submission = serialize_manual_template(requirement)
     parsed = parse_manual_template(submission)
 
-    assert materialize(parsed) == requirement
+    assert materialize(parsed) == requirement.model_copy(update={"budget": TravelBudget()})
     assert parsed.model_fields_set >= {
         "destination",
         "time_window",
@@ -124,7 +124,7 @@ def test_parser_accepts_half_width_colons():
         template_version="1",
         content=submission.content.replace("：", ":"),
     )
-    assert materialize(parse_manual_template(half_width)) == full_requirement()
+    assert materialize(parse_manual_template(half_width)) == full_requirement().model_copy(update={"budget": TravelBudget()})
 
 
 def test_parser_requires_exact_key_text_without_surrounding_spaces():
@@ -197,7 +197,6 @@ def test_parser_accumulates_independent_value_errors():
     replacements = {
         "正式游玩日期：2025-06-01 至 2025-06-03": "正式游玩日期：2025-02-30 至 2025-06-03",
         "正式游玩天数：3": "正式游玩天数：0",
-        "总预算：5000": "总预算：零元",
         "成人/儿童/老人：2/1/0": "成人/儿童/老人：2/一/0",
         "儿童年龄：5": "儿童年龄：五",
         "房间及房型：1间，标准间": "房间及房型：0间，",
@@ -213,7 +212,6 @@ def test_parser_accumulates_independent_value_errors():
     assert {
         "正式游玩日期",
         "正式游玩天数",
-        "总预算",
         "成人/儿童/老人",
         "儿童年龄",
         "房间及房型",
@@ -231,7 +229,7 @@ def test_serializer_rejects_conflicting_interest_and_agent_decides_values():
 
 def test_serializer_emits_empty_values_for_an_incomplete_requirement():
     submission = serialize_manual_template(TravelRequirement())
-    assert "总预算：\n" in f"{submission.content}\n"
+    assert "总预算" not in submission.content
     assert "到达机场/车站、日期、时间：\n" in f"{submission.content}\n"
     assert "兴趣：\n" in f"{submission.content}\n"
     assert "节奏：" == submission.content.splitlines()[-1]
@@ -295,11 +293,19 @@ def test_parser_rejects_children_count_age_semantic_errors(party, ages, message)
     assert message in exc_info.value.field_errors["儿童年龄"]
 
 
-def test_parser_rejects_zero_budget_and_duplicate_interest_labels():
+def test_parser_ignores_legacy_budget_but_rejects_duplicate_interest_labels():
     content = serialize_manual_template(full_requirement()).content
-    content = content.replace("总预算：5000", "总预算：0")
+    content += "\n总预算：0"
     content = content.replace("兴趣：自然、美食", "兴趣：自然、自然")
     with pytest.raises(ManualTemplateParseError) as exc_info:
         parse_manual_template(ManualTemplateSubmission(template_version="1", content=content))
-    assert "总预算" in exc_info.value.field_errors
+    assert "总预算" not in exc_info.value.field_errors
     assert "兴趣" in exc_info.value.field_errors
+
+
+@pytest.mark.parametrize("amount", ["", "5000", "零元", "任意延期文本"])
+def test_legacy_optional_budget_line_never_produces_an_amount(amount):
+    content = serialize_manual_template(full_requirement()).content + "\n总预算：" + amount
+    parsed = parse_manual_template(ManualTemplateSubmission(template_version="1", content=content))
+    assert parsed.budget.total_cny is None
+    assert not parsed.budget.is_approximate

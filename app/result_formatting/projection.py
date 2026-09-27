@@ -146,7 +146,7 @@ _READ_TYPES = {
     HotelPlaceSearchArtifact: ("hotel.place_search", "hotel_selection", "1.0"),
     CandidateResearchArtifact: ("candidate_research.candidate_set", "candidate_research", "1.0"),
     CandidateResearchPlaceObservationArtifact: ("candidate_research.place_observation", "candidate_research", "1.0"),
-    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", "3.0"),
+    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", "4.0"),
     ItineraryPlanningHubGeocodeObservationArtifact: ("itinerary_planning.hub_geocode_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningDirectionsObservationArtifact: ("itinerary_planning.directions_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningRouteMatrixObservationArtifact: ("itinerary_planning.route_matrix_observation", "itinerary_planning", "1.0"),

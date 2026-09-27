@@ -2,6 +2,8 @@
 
 from uuid import uuid4
 
+import pytest
+
 from app.requirements.merge import RequirementMerger, update_metadata_for_patch
 from app.requirements.models import (
     EvidenceReceipt,
@@ -104,6 +106,29 @@ def test_total_people_and_scenarios_are_recomputed():
     ]
     assert "party.total_people" in result.derived_fields
     assert "inferred_scenarios" in result.derived_fields
+
+
+@pytest.mark.parametrize("text", (
+    "没有行动限制", "无行动限制", "没有行动限制和饮食禁忌", "无行动限制和饮食禁忌",
+))
+def test_explicit_no_mobility_constraint_removes_only_mobility_scenario(text):
+    current = TravelRequirement(
+        party=TravelParty(children_count=1, seniors_count=1),
+        constraints=TravelConstraints(mobility_constraints="需要轮椅"),
+        inferred_scenarios=["family_with_children", "travel_with_seniors", "mobility_assistance_needed"],
+    )
+    result = RequirementMerger().merge(current, RequirementPatch(
+        constraints=TravelConstraints(mobility_constraints=text), is_correction=True))
+    assert result.requirement.constraints.mobility_constraints == text
+    assert result.requirement.inferred_scenarios == ["family_with_children", "travel_with_seniors"]
+    assert "mobility_assistance_needed" in current.inferred_scenarios
+
+
+@pytest.mark.parametrize("text", ("行动不便", "没有轮椅，不能久走", "没有行动限制，但同行者需要轮椅"))
+def test_negation_does_not_erase_a_positive_mobility_constraint(text):
+    result = RequirementMerger().merge(TravelRequirement(), RequirementPatch(
+        constraints=TravelConstraints(mobility_constraints=text)))
+    assert result.requirement.inferred_scenarios == ["mobility_assistance_needed"]
 
 
 def test_dates_and_hotel_fields_are_recomputed_from_dependencies():

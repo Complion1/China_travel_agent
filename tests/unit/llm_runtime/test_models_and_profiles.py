@@ -11,6 +11,7 @@ from app.llm_runtime.profiles import (
     CANDIDATE_RESEARCH_PROFILE, ITINERARY_PLANNING_PROFILE,
     REPLANNING_PROFILE,
     MODEL_NAME, THINKING_TYPE, REASONING_EFFORT,
+    ModelProfile,
 )
 
 
@@ -62,6 +63,22 @@ class TestModels:
 class TestProfiles:
     def test_four_profiles(self):
         assert len(PROFILE_REGISTRY) == 4
+
+    def test_approved_output_limits_and_invocation_budgets(self):
+        expected = {
+            ModelRole.REQUIREMENT_EXTRACTION: (32_768, 2, 32_768),
+            ModelRole.CANDIDATE_RESEARCH: (32_768, 12, 262_144),
+            ModelRole.ITINERARY_PLANNING: (49_152, 12, 2_097_152),
+            ModelRole.REPLANNING: (32_768, 8, 262_144),
+        }
+        for role, (output_tokens, semantic_limit, request_bytes) in expected.items():
+            profile = get_profile(role)
+            assert profile.max_output_tokens == output_tokens
+            assert profile.semantic_invocation_limit == semantic_limit
+            assert profile.max_request_utf8_bytes == request_bytes
+            assert profile.provider_attempts_per_invocation == 2
+        assert ModelProfile(role=ModelRole.REQUIREMENT_EXTRACTION).max_output_tokens == 16_384
+        assert ModelProfile(role=ModelRole.ITINERARY_PLANNING).max_request_utf8_bytes == 32_768
 
     def test_profile_timeouts(self):
         assert REQUIREMENT_EXTRACTION_PROFILE.read_timeout_seconds == 120

@@ -209,7 +209,7 @@ class ResultRequirement(_ResultArtifactModel):
     seniors_count: Annotated[int, Field(ge=0, le=100)]
     total_people: Annotated[int, Field(ge=1, le=100)]
     room_count: PositiveInt
-    budget_total_cny: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    budget_total_cny: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None
     budget_is_approximate: bool
     budget_scope: Literal["destination_only"]
     mobility_constraints: RequirementText | None = Field(repr=False)

@@ -56,6 +56,21 @@ class _PolicyLockedMismatch(_PolicyBusinessRejected):
     __slots__ = ()
 
 
+class _BackupSlotsMismatch(ValueError):
+    """Only closed role lists may cross the private policy-feedback boundary."""
+
+    __slots__ = ("expected", "actual")
+
+    def __init__(self, expected: tuple[str, ...], actual: tuple[str, ...]) -> None:
+        roles = {"attraction", "lunch", "dinner"}
+        if any(len(items) > 3 or any(type(item) is not str or item not in roles for item in items)
+               for items in (expected, actual)):
+            raise ValueError("invalid backup slot diagnostic")
+        super().__init__("backup_slots_mismatch")
+        self.expected = expected
+        self.actual = actual
+
+
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 ARRIVAL_BUFFER_MINUTES = {HubType.AIRPORT: 60, HubType.RAILWAY_STATION: 30}
 DEPARTURE_BUFFER_MINUTES = {HubType.AIRPORT: 120, HubType.RAILWAY_STATION: 60}
@@ -609,8 +624,9 @@ def validate_backup_options(day: DayPlan) -> None:
     if dinners:
         required.append("dinner")
     kinds = [item.backup_kind for item in day.backups]
-    if tuple(kinds) != tuple(required):
-        raise ValueError("backup slots must follow the day's actual role order")
+    expected = tuple(kind for kind in required if kind in kinds)
+    if tuple(kinds) != expected:
+        raise _BackupSlotsMismatch(expected, tuple(kinds))
     if len(set(item.candidate.uid for item in day.backups)) != len(day.backups):
         raise ValueError("backup candidate uid must be unique")
     for item in day.backups:

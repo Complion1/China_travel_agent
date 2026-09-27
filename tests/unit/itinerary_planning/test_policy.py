@@ -232,6 +232,26 @@ def test_backup_accepts_non_walking_matrix_within_3000m_and_rejects_high_value_i
         validate_backup_options(DayPlan.model_construct(visits=(visit,), backups=(conflict,)))
 
 
+@pytest.mark.parametrize("visits", (
+    (VisitKind.ATTRACTION,),
+    (VisitKind.LUNCH,),
+    (VisitKind.ATTRACTION_DINNER,),
+))
+def test_optional_backups_allow_absence_for_partial_and_combined_roles(visits):
+    day = DayPlan.model_construct(day_kind=PlanningDayKind.PARTIAL,
+        visits=tuple(ScheduledVisit.model_construct(visit_kind=kind) for kind in visits), backups=())
+    validate_backup_options(day)  # Missing any of these roles is permitted.
+    assert day.backups == ()
+
+
+def test_backup_slot_diagnostic_rejects_arbitrary_or_unbounded_values():
+    from app.itinerary_planning.policy import _BackupSlotsMismatch
+    for values in (("PRIVATE_TEXT",), ("lunch",) * 4, (True,)):
+        with pytest.raises(ValueError) as caught:
+            _BackupSlotsMismatch(("lunch",), values)
+        assert "PRIVATE_TEXT" not in str(caught.value)
+
+
 def _confirmed(*, pace: TravelPace | None, agent_decides: bool) -> ConfirmedTravelRequirement:
     return ConfirmedTravelRequirement(
         outcome_type="confirmed", schema_version="1.0",
