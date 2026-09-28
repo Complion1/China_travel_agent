@@ -23,7 +23,7 @@ from app.durable_execution.repository import (
 
 def test_schema_constants_freeze_the_twelve_expected_tables() -> None:
     assert SCHEMA_NAME == "durable_execution"
-    assert EXPECTED_REVISION == "m11_0001"
+    assert EXPECTED_REVISION == "m11_0002"
     assert EXPECTED_BUSINESS_TABLES == (
         "capacity_state",
         "runs",

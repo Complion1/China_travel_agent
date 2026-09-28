@@ -63,6 +63,10 @@ class DurableExecutionStateError(DurableExecutionError):
     """状态或恢复证据不符合合同。"""
 
 
+class DurableExecutionCancellationPendingError(DurableExecutionError):
+    """已持久请求取消，正在等待安全收束。"""
+
+
 __all__ = [
     "DurableExecutionError",
     "DurableExecutionConfigurationError",
@@ -77,4 +81,5 @@ __all__ = [
     "DurableExecutionIncompatibleRunError",
     "DurableExecutionRunBlockedError",
     "DurableExecutionStateError",
+    "DurableExecutionCancellationPendingError",
 ]

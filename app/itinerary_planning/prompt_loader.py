@@ -50,7 +50,7 @@ def _validate_prompt_bytes(payload: bytes) -> PromptResource:
 
 # This value is intentionally filled from the immutable resource bytes after the
 # resource is created. It is a content contract, not a runtime-discovered hash.
-PLANNING_PROMPT_SHA256 = "sha256:900ae0a8f8f8d232a22945bafb05c4a57facd468820b7fcdffdd61c3f2a841f6"
+PLANNING_PROMPT_SHA256 = "sha256:5b17e4084da441232a44bea1e0bd881cd22fa2dc24280e0aa2f4769dbc326880"
 PLANNING_PROMPT_HASH = PLANNING_PROMPT_SHA256
 
 

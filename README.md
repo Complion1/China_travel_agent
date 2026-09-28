@@ -1,12 +1,16 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–10 已完成并进入本地 `main` 稳定基线；Module 09 的结构化输入 Demo 已通过离线 Gate、独立真实规划和历史 Module 06→09 单次真实 DeepSeek Flash／百度地图联调，最新真实联调发现的问题已按所属模块登记并由用户决定暂缓。生产 LLM Profile 继续使用 DeepSeek V4 Flash。Module 10 已通过 PostgreSQL Artifact 持久化、迁移、并发、真实重启、真实 API 产物重读和回归资格门；完整 Demo 主链仍等待 Module 13 显式装配，因此现有 Module 01–09 生产组合尚未自动切换 Repository。Module 11 的 checkpoint、执行预算和恢复状态持久化已提交并快进合并到本地 `main`，并提供显式迁移和 Docker 导入自检；演示优先验收与原严格资格的区别见实施状态快照，不代表完整 Demo 已装配。Module 10 本地 commit 和 fast-forward merge 已执行，push、PR 和 deploy 均未执行。旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–12 的当前批准范围实现及真实联调修复已进入本地 `main`；最新修复提交为 `b9b55d2`（2026-09-28）。当前 `feature/module-13-demo-workflow` 工作区新增未提交的 M11 网页控制扩展及 M13 生产主图，实现与提交前验证记录见实施状态 §14，尚未提交。Module 11 保留演示范围验收及既有延期边界。生产 LLM Profile 使用 DeepSeek V4 Flash；Module 10/11 提供 PostgreSQL 产物和执行状态持久化；网页/API 装配属于 M14，真实浏览器验收属于 M15。未执行 push、PR 或部署。旧原型接口不构成兼容要求。
 
-Module 12 的确定性结果格式化已实现，当前源码包含模块 01–12；独立收尾验证结果见 [实施状态快照](./docs/IMPLEMENTATION_STATUS.md)。三天真实需求业务链的单轮测试停在需求抽取修复阶段，尚未通过完整业务链验收，具体证据及后续修复边界见 [真实联调报告](./docs/12_live_pipeline_acceptance.md)。
+模块 01–12 修复收尾时的全量 Docker unit/contract 回归为 **2317 passed、8 warnings**（历史快照）。第 **18/20** 轮复用第 15 轮已通过的真实需求、酒店及 M08 候选检查点，从 M09 开始真实调用，获得 Completed；M12 三个日块、汇总索引及 PostgreSQL 重启后的读取/哈希一致性均通过。成功后停止，剩余两轮未使用。这是复用真实上游的集成链验证，不是第 18 轮重新调用全部上游，也不代表 M13/14、完整 M11 恢复闭环或行程质量最优已验收。最新证据见 [统一问题台账](./docs/12_live_pipeline_fixes.md)，模块历史验收见 [实施状态快照](./docs/IMPLEMENTATION_STATUS.md)；[首次真实联调报告](./docs/12_live_pipeline_acceptance.md) 保留当时的失败记录。
+
+当前规则：旅行预算金额功能延期，费用仍标未核验；抽取输出上限为 32,768 tokens，规划输入上限为 2 MiB。Module 09 使用 planning-v4 / ModelAction 4.0；备用点可选，缺项不阻止主行程完成、不触发备用点专用补研，已提供的备用点仍需通过资格、距离和证据校验。
 
 ## Module 11 显式迁移与导入自检
 
-Module 11 提供持久执行库，不提供完整旅游 CLI。当前默认 runtime 只导入 Module 01–12，不连接数据库、不自动迁移；启动 runtime 不会自动拉起迁移服务。
+当前未提交的网页控制扩展新增持久取消、run 查询/分页、暂停凭证交接端口、原生酒店恢复、节点只读证据视图及终态预算读取；迁移为 `m11_0002_web_controls`，仍需显式运行。它复用现有 PostgreSQL runs 和预算记录，不另建任务索引库。扩展审查及收尾证据见 [实施状态](docs/IMPLEMENTATION_STATUS.md)；应用端凭证加密、网页调度与浏览器交互留给 M14/M15。
+
+Module 11 提供持久执行库。当前默认 runtime 只导入 Module 01–13，不连接数据库、不自动迁移，也不启动网页服务器。
 
 配置本地 `.env` 的 PostgreSQL 变量后，显式执行：
 
@@ -18,15 +22,30 @@ docker compose run --rm --no-deps runtime
 
 `durable-migrate` 等待 PostgreSQL 健康和 `artifact-migrate` 成功，再执行 `python -m app.durable_execution.migrate`；可显式重复执行。`production` profile 包含数据库和迁移服务，因此启用该 profile 后无目标地执行 `up` 也会启动这些服务，应使用上述明确目标命令。不要把测试迁移指向正式数据库；不要删除含有需保留数据的卷。
 
-Module 11 已按用户授权提交并合并到本地 main（实现提交 `985dcde`）；演示范围验收和原覆盖率/延期条件的区别见 [T07 验收记录](docs/11_t07_demo_acceptance.md)。现有通用 test target 的 M11 contract 需要隔离 PostgreSQL，不能将无数据库环境的全套运行当成有效验收。完整业务装配继续留给 Module 13。
+Module 11 已按用户授权提交并合并到本地 main（实现提交 `985dcde`）；演示范围验收和原覆盖率/延期条件的区别见 [T07 验收记录](docs/11_t07_demo_acceptance.md)。现有通用 test target 的 M11 contract 需要隔离 PostgreSQL，不能将无数据库环境的全套运行当成有效验收。当前 M13 主图使用其能力完成业务编排。
 
 ## Module 12 结果生成与保存交接
 
 `app.result_formatting` 提供 `ResultFormattingService`，只处理 Module 09 的 `completed` 行程，并只读已保存的 Module 07/08/09 公共证据。输入需要已确认的工作流 `state` 和显式 `itinerary_ref`；输出为按日分块的结构化结果、中文 Markdown 快照及汇总索引，不提供部分行程预览，不重新调用模型或供应商。
 
-调用顺序为 `prepare` → 调用方保存全部日块 → `build_index` 核验已保存日块 → 调用方保存索引 → `load` 完整读取。Module 12 负责生成和校验，保存与主图交付由后续 Module 13 显式接线；当前持久化测试 harness 仅证明 Module 10 与 Module 12 的保存/读取合同，不代表完整 Module 11/13 恢复链已装配。
+调用顺序为 `prepare` → 调用方保存全部日块 → `build_index` 核验已保存日块 → 调用方保存索引 → `load` 完整读取。Module 12 负责生成和校验；当前 M13 通过每个日块及索引独立的 journal 保护节点保存结果，完整索引校验后才形成交付终态。
 
-快照保留短来源引用、就地风险说明及末尾来源目录，同时显示路线原耗时与预留时间。费用标为未核验，已确认的补充文本回显并标为未验证；天气仅有占位，天气查询与地图展示延期。完整 Demo 主链仍未装配。
+快照保留短来源引用、就地风险说明及末尾来源目录，同时显示路线原耗时与预留时间。费用标为未核验，已确认的补充文本回显并标为未验证；天气查询与地图展示延期。天气不影响本期完整达标判定。
+
+## Module 13 生产主图
+
+`app.demo_workflow.create_demo_workflow_definition` 返回供 M14 装配的 contract、命令 codec、预算 provider、未编译 graph factory、取消状态工厂和业务上下文清理入口。它串联真实 M05/M07/M08/M09/M12 能力，使用 M10/M11 持久化；不新增数据库、模型策略、天气交互或网页服务。
+
+酒店必须人工选择；研究合法 Incomplete 且仍有合格候选时继续尝试规划；补研最多五次且共享原预算。只有完整行程及完整结果索引才可交付：主行程营业未知或请求了本期未提供的地图时标为 `degraded`，其余适用门槛通过标为 `demo_ready`（完整达标）。备选缺省、天气及研究曾 Incomplete 不单独降级。
+
+设计与执行合同分别见 [M13 设计](docs/13_demo_workflow.md)、[M13 执行规范](docs/13_demo_workflow_vibe_coding.md)。当前测试与提交资格见 [实施状态 §14](docs/IMPLEMENTATION_STATUS.md#14-m13-生产主图与提交前收尾2026-09-28)。以下命令仅创建本次唯一前缀的隔离资源，所有 Python 均在 Docker 中执行；用新的前缀替换示例值：
+
+```powershell
+./scripts/verify_module13.ps1 -Set UnitContract -ProjectPrefix cta-m13-local-0928a
+./scripts/verify_module13.ps1 -Set Closeout -ProjectPrefix cta-m13-local-0928b
+```
+
+M14 仍负责 HTTP/浏览器交互、原暂停凭证保护、单执行名额及断线后的后台任务管理。M13 的离线模型/地图替身测试不等同于 M15 真实网页发布验收。
 
 本轮 C 批已验证真实 PostgreSQL integration `3 passed`、同一专属卷重建 PostgreSQL 后新进程读取 `3` 个日块且摘要一致，以及完整 unit/contract `2218 passed, 7 warnings`；既有 M10/M11 测试库迁移与本次资源清理通过。这些是收尾同步前的阶段证据，最终源码的独立 Closeout 结果另见实施状态快照。
 
@@ -46,7 +65,7 @@ CLI Demo
 - LangGraph：主工作流、状态转换、受控循环、interrupt/resume 和 checkpoint。
 - Runtime Agent Skill：单一业务能力、Prompt、工具白名单、调用预算、停止条件与失败策略。
 - MCP：外部 Agent 工具协议。首版百度地图能力由模块 06 的 typed adapter 和 MCP Gateway 接入。
-- PostgreSQL：Module 10 已提供显式创建的 Artifact Repository、Runtime 和 Alembic 迁移；Module 11 工作区实现负责 checkpoint、执行账本和跨进程恢复，采用独立的显式迁移入口。数据库不通过 MCP，现有 Module 01–09 Demo 组合在 Module 13 接线前仍使用进程内 Repository，也不会在 PostgreSQL 故障时自动回退或双写。
+- PostgreSQL：Module 10 已提供显式创建的 Artifact Repository、Runtime 和 Alembic 迁移；Module 11 工作区实现负责 checkpoint、执行账本和跨进程恢复，采用独立的显式迁移入口。数据库不通过 MCP；M13 生产主图由 M14 注入 M10 公开仓储，PostgreSQL 故障时不自动回退或双写。进程内 Repository 仅用于独立能力测试。
 
 外部工具型 Skill 在项目已指定 MCP Server 时必须走 MCP；纯领域计算和确定性校验不使用 MCP。Skill 不得直连供应商 HTTP、直接管理 MCP session 或把 MCP 原始 payload 写入 Graph state。DeepSeek 由模块 02 通过 LangChain 专用集成调用，不经过 MCP。
 
@@ -81,15 +100,15 @@ CLI Demo
 
 权威层级和冲突处理以主设计第 1 节为准。后续模块必须按路线图中的 `depends_on` 和模块 acceptance gate 开工。`_vibe_coding.md` 专门面向能力较弱的编码模型，必须保留精确文件白名单、符号、算法、阶段 Gate、测试矩阵、停止条件和报告模板，不能压缩成需要模型自行推导的摘要。
 
-## 当前边界
+## 模块边界与历史资格
 
-模块 01–05 已完成当前实现与离线验收：模块 05 unit `232 passed`、contract `65 passed`，line `97.7777777778%`、branch `95.0000000000%`、combined `97.0491803279%`；完整 Docker 离线 unit/contract 回归为 `935 passed`。模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`；模块 01、03、04 的本轮受影响回归分别为 `182`、`78`、`235 passed`。模块 02 的 DeepSeek V4 Flash capability live 已通过，模块 03 的 Flash live 资格为 `16/16`。这些数字是当前状态快照，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
+模块 01–05 已完成当前实现与离线验收：模块 05 unit `232 passed`、contract `65 passed`，line `97.7777777778%`、branch `95.0000000000%`、combined `97.0491803279%`；完整 Docker 离线 unit/contract 回归为 `935 passed`。模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`；模块 01、03、04 的本轮受影响回归分别为 `182`、`78`、`235 passed`。模块 02 的 DeepSeek V4 Flash capability live 已通过，模块 03 的 Flash live 资格为 `16/16`。这些数字是各模块早期验收快照，最新全量回归见本文开头，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
 
 模块 06 提供百度地图 typed adapter、七项核心 MCP Gateway 能力、技术限流、生命周期和安全边界。本次 closeout 最终离线快照为：Module 06 + M2 offline `222 passed`；coverage `221 passed`，line `1945/2002`（`97.15%`）、branch `544/570`（`95.44%`）、combined `2489/2572`（`96.77%`）；Module 04 回归 `235 passed`；完整 unit/contract `1156 passed`。当前源码七项核心 live 和 M2 live 已通过，地图调起当前为 `NOT_AVAILABLE/NOT_IN_MANIFEST`；不在此记录地址、坐标、UID、天气、路线、指令或 Secret。
 
-模块 08 提供受控候选研究循环、initial/supplemental、候选证据、执行预算、Artifact、replay、并发与失败边界；候选费用状态固定为 `not_evaluated`。原 closeout 后的结构化覆盖与候选一致性修复已随 Module 09 进入 `main`；当前统一 coverage 门槛为 line、branch、combined 各 70%，旧 80% 一次性例外只保留为历史记录。最新 Module 06→09 真实联调已从 Module 08 输出真实景点和餐厅候选。
+模块 08 提供受控候选研究循环、initial/supplemental、候选证据、执行预算、Artifact、replay、并发与失败边界；候选费用状态固定为 `not_evaluated`。原 closeout 后的结构化覆盖与候选一致性修复已随 Module 09 进入 `main`；当前统一 coverage 门槛为 line、branch、combined 各 70%，旧 80% 一次性例外只保留为历史记录。第 15 轮真实研究产出 56 个 eligible 候选（26 景点、30 餐厅），第 18 轮按原 Ref/hash 复用后完成规划。
 
-模块 09 提供结构化输入范围内的受控行程规划、initial/resume、六工具循环、真实路线证据、完整确定性提交校验、Artifact、执行预算和 replay。生产 LLM Profile 锁定为 `deepseek-v4-flash`；Provider 仅把服务端当前返回的 `deepseek-flash` 归一化为该公共规范名。最新离线 Module 09 Gate 为 `284 passed`，互补 unit/contract 为 `1686 passed`，coverage line／branch／combined 为 `88.5387% / 74.2077% / 84.8764%`，compileall 通过；随后独立 Module 09 真实运行和 Module 06→09 单次真实联调均通过。文本作息、活动时刻/时长、交通限制等未被上游结构化的功能继续延期，不宣称已满足；完整持久化 Demo 主链仍需 Module 11–14，尤其是 Module 13 组合根的显式装配。
+模块 09 提供结构化输入范围内的受控行程规划、initial/resume、六工具循环、真实路线证据、完整确定性提交校验、Artifact、执行预算和 replay。生产 LLM Profile 锁定为 `deepseek-v4-flash`；Provider 仅把服务端当前返回的 `deepseek-flash` 归一化为该公共规范名。早期离线 Module 09 Gate 为 `284 passed`，互补 unit/contract 为 `1686 passed`，coverage line／branch／combined 为 `88.5387% / 74.2077% / 84.8764%`，compileall 通过；随后独立 Module 09 真实运行和 Module 06→09 单次真实联调均通过。文本作息、活动时刻/时长、交通限制等未被上游结构化的功能继续延期，不宣称已满足；当前 M13 已装配持久化业务主图，M14 继续负责网页/API 与资源生命周期。
 
 模块 10 提供符合 Module 04 三方法公共接口的 PostgreSQL Artifact Repository、显式生命周期 Runtime、固定 `artifact_store` schema、Alembic `m10_0001` 迁移、幂等写入、容量与并发控制、断线单次重试和真实重启持久性。AP-T06 最终资格为 Module 10 unit `64 passed`、contract `7 passed`、迁移 `15 passed`、普通 PostgreSQL integration `31 passed`、Module 04 映射／并发／故障 `20 passed`、全量 unit/contract `2041 passed`；coverage line／branch／combined 为 `87.7127% / 74.6479% / 84.9478%`。用户追加的真实 API 验收已证明 Module 10 可保存并在重连后读取真实行程产物；两次上游 Module 09 规划未得到 Completed 终态，但用户已明确决定该问题不阻断 Module 10。Module 10 实现提交 `cc1e6ef545db52f07cc15af64ea12ed589d24dda` 已 fast-forward 合并到本地 `main`，当前保持冻结。Module 10 不实现删除、TTL、checkpoint、自动迁移、生产 Registry 组合或生产部署。
 
@@ -103,7 +122,7 @@ CLI Demo
 
 ## Docker 开发与测试
 
-当前容器包含已经实现的模块 01–12，完整 Graph/CLI 主链尚未装配。runtime 默认 CMD 配置为导入模块 01–12，并输出 `modules 01-12 import successfully`；该检查只验证包可加载，不会自动连接或迁移数据库。`COPY app` 与 test target 的 `COPY tests` 已覆盖 Module 12。pytest 通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。M11 的数据库合同测试需要隔离 PostgreSQL；默认 test 服务不替代该编排。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+当前容器包含模块 01–13 的生产库，网页应用尚未实现。runtime 默认 CMD 配置为导入模块 01–13，并输出 `modules 01-13 import successfully`；该检查只验证包可加载，不会自动连接或迁移数据库。`COPY app` 与 test target 的 `COPY tests` 已覆盖 Module 13。pytest 通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。M11 的数据库合同测试需要隔离 PostgreSQL；默认 test 服务不替代该编排。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
@@ -148,7 +167,7 @@ Module 06 地图 Adapter、Module 07 酒店、Module 08 候选和 Module 09 行�
 docker compose --profile live run --rm --no-deps module070809-live-test
 ```
 
-Module 10 使用可选的 PostgreSQL 服务，但迁移必须显式执行，应用启动不会自动修改数据库结构。当前完整 Demo 主链尚未在 Module 13 接入该 Runtime。需要初始化本地空库时按以下顺序运行：
+Module 10 使用可选的 PostgreSQL 服务，但迁移必须显式执行，应用启动不会自动修改数据库结构。当前 M13 主图通过 M11 受控能力使用该 Runtime 的公开仓储。需要初始化本地空库时按以下顺序运行：
 
 ```powershell
 docker compose --profile production up -d postgres

@@ -568,8 +568,8 @@ def parse_directions(
         if set(root) != {"status", "result"} or set(result) != {"routes"}:
             raise _response_error(capability)
         return _construct(DirectionsNoResult, capability, provenance=provenance)
-    if len(routes) > 3:
-        raise _response_error(capability)
+    # alternatives_limit bounds the public projection, not the provider array.
+    # Validate every route before selecting: malformed tails must not be hidden.
     alternatives: list[RouteAlternative] = []
     for raw_route in routes:
         route = _object(raw_route, capability)

@@ -2,6 +2,7 @@
 
 from app.durable_execution.errors import (
     DurableExecutionCapacityExceededError,
+    DurableExecutionCancellationPendingError,
     DurableExecutionConfigurationError,
     DurableExecutionDependencyError,
     DurableExecutionError,
@@ -18,6 +19,7 @@ from app.durable_execution.errors import (
 from app.durable_execution.models import (
     DEMO_DURABLE_EXECUTION_LIMITS,
     DurableExecutionCommandCodecDescriptor,
+    DurableCancellationReceipt,
     DurableExecutionContract,
     DurableExecutionEncodedCommand,
     DurableExecutionLimits,
@@ -25,6 +27,10 @@ from app.durable_execution.models import (
     DurableExecutionPauseEnvelope,
     DurableExecutionPaused,
     DurableExecutionResult,
+    DurableRunCursor,
+    DurableRunListRequest,
+    DurableRunPage,
+    DurableRunView,
     DurableExecutionTerminal,
     NodeRecoveryClass,
 )
@@ -33,6 +39,7 @@ from app.durable_execution.protocols import (
     DurableExecutionCommandCodec,
     DurableExecutionGraphCapabilities,
     DurableExecutionNodeCapabilities,
+    DurablePauseCredentialSink,
 )
 from app.durable_execution.runtime import (
     DurableExecutionRuntime,
@@ -62,6 +69,12 @@ __all__ = [
     "DurableExecutionPaused",
     "DurableExecutionTerminal",
     "DurableExecutionResult",
+    "DurableCancellationReceipt",
+    "DurableRunCursor",
+    "DurableRunListRequest",
+    "DurableRunPage",
+    "DurableRunView",
+    "DurablePauseCredentialSink",
     "DurableExecutionRuntime",
     "create_durable_execution_runtime",
     "DurableExecutionError",
@@ -77,4 +90,5 @@ __all__ = [
     "DurableExecutionIncompatibleRunError",
     "DurableExecutionRunBlockedError",
     "DurableExecutionStateError",
+    "DurableExecutionCancellationPendingError",
 ]

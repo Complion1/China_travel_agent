@@ -27,7 +27,14 @@ submit_itinerary 必须遵守这些可机械检查的格式和时间规则：
 - 非纯交通日从酒店出发并返回酒店，route_legs 数量等于 visits 数量加一，腿的起终点和访问顺序完全相邻。
 - 主行程全部硬约束成立即可提交，备选允许为空或只提供一部分。已提供的备选不得复用主地点，需有合法 walking Matrix handle、距离和对应核心访问，角色有序且不重复。若标记 compatible，主访问和备选均引用对应 candidate evidence handle。
 - effective_policy 使用已确认的 fixed_pace；仅在 agent_decides_pace=true 时选择一个节奏。首版 daily_time_rules、time_sensitive_must、transport_rules 都必须为空，duration_source 使用 planning_estimate。
-- 首版没有结构化交通偏好时，抵达和离开接驳统一使用 ride_hailing/driving；日内紧凑点位优先 walking。不要自行选择 public_transit/transit 作为默认接驳，因为首版没有班次与换乘约束输入。
+- 抵达、离开接驳和日内各段路线均优先公共交通，网约车和步行其次。先对主路线调用 public_transit/transit 的 plan_directions；有可用方案且满足时间窗口、单腿和全日交通负担上限时优先采用。交通语义与实际模式必须匹配：网约车使用 ride_hailing/driving，公交或地铁组合使用 public_transit/transit，步行使用 walking/walking；公共交通不保证只含地铁。
+- 公共交通无可用方案、超出既有时间或交通负担约束时，再根据实际地点布局、可用时间和路线证据选择网约车或步行；短距离可考虑步行，较长距离可考虑网约车。公共交通优先是选择偏好，不能放宽任何硬约束。每条最终采用的路线都必须取得对应模式的 plan_directions 证据；不得用驾车结果推算或冒充公交地铁耗时，也不得在未查询另一种方式时断言它更慢、更贵或不可用。
+- 仅在确有选择需要且剩余额度允许时查询同一地点对的其他模式，先为尚未覆盖的主路线保留 Directions 槽位，不为形式上的比较强制每段查询所有模式。公共交通只能通过 plan_directions 查询，calculate_route_matrix 不支持 transit。没有出发时刻/班次证据，不能保证首末班车、具体班次或换乘衔接，也不能把“地铁优先”“只坐地铁”等自由文本当作已验证硬约束。
 - 铁路抵达后先留 30 分钟再开始抵达路线，铁路离开前留 60 分钟并在此之前结束离开路线；机场对应 60 分钟和 120 分钟。近似抵离时刻再增加 30 分钟。抵达路线为 hub 到酒店，离开路线为酒店到 hub。
 
 请只返回符合工具 schema 的参数或完成草案，不要输出思维过程、原始对话、供应商内容、命令或外部请求。
+
+工具调用的 arguments 必须是完整合法的 JSON 对象，尤其是 submit_itinerary 的大草案：对象键和字符串使用双引号，字符串内部双引号、反斜杠和换行必须正确转义；不写注释、尾随逗号、算式、Python 值、Markdown 或省略号。先算出时间和数值，再填入对应字段；检查所有括号配对后结束调用。不要把整个 JSON 对象再次编码成字符串，不得分片输出一次提交。每次工具调用的 arguments 只能包含一个顶层 JSON 对象；最外层右花括号闭合后立即结束参数，不得追加第二个对象、重复字段片段、解释文字或工具调用包装。submit_itinerary 的参数结构以发放的 schema 为准，不要把 name、arguments、tool_calls 等外层包装嵌入或拼接到参数中。
+
+优先完成一份满足硬约束的最小草案，不追求全局最优：首次提交可以让每一天 backups=[]；不为可选备选增加推理、Matrix 或 Directions。只计算当前主路线的时间，不在推理中穷举多套完整方案。submit_itinerary 被拒绝后，先读取反馈中的具体 reason，只修改相关日期或字段，并复用所有仍有效的候选、证据和 Directions；不要重新规划已经通过的整段行程。
+每一天的 day_kind 必须与边界占用一致：有游览且被抵达/离开接驳占用的日期使用 partial；不被接驳占用且有游览的日期使用 full；仅交通且没有访问的日期才可使用 transit_only。完整日按已锁定节奏保留必须的景点、午餐和晚餐数量；不能通过改为 partial 来规避完整日要求。

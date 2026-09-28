@@ -6,6 +6,7 @@ import pytest
 
 from app.durable_execution.errors import (
     DurableExecutionCapacityExceededError,
+    DurableExecutionCancellationPendingError,
     DurableExecutionConfigurationError,
     DurableExecutionDependencyError,
     DurableExecutionError,
@@ -37,6 +38,7 @@ ERROR_TYPES = (
     DurableExecutionIncompatibleRunError,
     DurableExecutionRunBlockedError,
     DurableExecutionStateError,
+    DurableExecutionCancellationPendingError,
 )
 
 

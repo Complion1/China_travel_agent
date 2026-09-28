@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from datetime import datetime, timezone, timedelta
 from uuid import UUID, uuid4
 from typing import get_type_hints
 
@@ -26,6 +27,11 @@ from app.durable_execution.models import (
     DurableExecutionPauseEnvelope,
     DurableExecutionPaused,
     DurableExecutionTerminal,
+    DurableCancellationReceipt,
+    DurableRunCursor,
+    DurableRunListRequest,
+    DurableRunPage,
+    DurableRunView,
     NodeRecoveryClass,
     contract_canonical_bytes,
 )
@@ -66,6 +72,34 @@ from tests.requirement_subgraph_fakes import (
 
 def _digest(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def test_web_control_dtos_are_strict_fresh_and_safe() -> None:
+    created = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    cursor = DurableRunCursor(created_at=created, run_id=RUN_ID)
+    request = DurableRunListRequest(before=cursor)
+    assert request.before is not cursor
+    view = DurableRunView(
+        run_id=RUN_ID, trace_id=TRACE_ID, created_at=created,
+        finalized_at=None, lifecycle="open", activity="recovery_required",
+        phase=None, delivery_status=None, terminal_code=None,
+        pause_generation=0, cancel_requested=False,
+    )
+    page = DurableRunPage(items=(view,), next_cursor=cursor)
+    assert page.items[0] is not view and page.next_cursor is not cursor
+    assert "requirement" not in repr(page)
+    for limit in (0, 101, True):
+        with pytest.raises(ValidationError):
+            DurableRunListRequest(limit=limit)
+    with pytest.raises(ValidationError):
+        DurableRunCursor(created_at=created.replace(tzinfo=None), run_id=RUN_ID)
+    with pytest.raises(ValidationError):
+        DurableRunCursor(created_at=created.astimezone(timezone(timedelta(hours=8))), run_id=RUN_ID)
+    with pytest.raises(ValidationError):
+        DurableRunListRequest(extra="forbidden")
+    with pytest.raises(ValidationError):
+        DurableCancellationReceipt(run_id=RUN_ID, status="cancelled", state=None)
+    assert DurableCancellationReceipt(run_id=RUN_ID, status="requested", state=None).state is None
 
 
 def _repacked(
@@ -234,6 +268,11 @@ def test_public_dto_field_order_and_annotations_are_frozen() -> None:
         DurableExecutionPauseEnvelope: ("schema_version", "pause_token"),
         DurableExecutionPaused: ("schema_version", "outcome_type", "state", "pause"),
         DurableExecutionTerminal: ("schema_version", "outcome_type", "state"),
+        DurableCancellationReceipt: ("schema_version", "run_id", "status", "state"),
+        DurableRunCursor: ("schema_version", "created_at", "run_id"),
+        DurableRunListRequest: ("schema_version", "limit", "before"),
+        DurableRunView: ("schema_version", "run_id", "trace_id", "created_at", "finalized_at", "lifecycle", "activity", "phase", "delivery_status", "terminal_code", "pause_generation", "cancel_requested"),
+        DurableRunPage: ("schema_version", "items", "next_cursor"),
     }
     for model_type, fields in expected.items():
         assert tuple(model_type.model_fields) == fields

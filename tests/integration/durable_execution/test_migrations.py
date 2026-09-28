@@ -10,7 +10,10 @@ import sys
 import time
 
 import pytest
+import psycopg
 from psycopg.errors import CheckViolation
+from psycopg.rows import dict_row
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app.durable_execution.errors import DurableExecutionConfigurationError
 from app.durable_execution.repository import (
@@ -1194,4 +1197,198 @@ async def test_t02_pending_generation_and_lifecycle_matrix(
     else:
         with pytest.raises(CheckViolation):
             await _insert_pending_case(db_connection, values)
+    await db_connection.rollback()
+
+
+def _run_alembic_at_revision(settings, database: str, revision: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "/workspace/app/durable_execution/alembic.ini", "upgrade", revision],
+        cwd=Path(__file__).parents[3],
+        env=_module_environment(settings, database),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+async def _reset_module11_test_schema(connection) -> None:
+    await connection.execute("DROP SCHEMA IF EXISTS durable_execution CASCADE")
+    await connection.commit()
+
+
+async def _seed_legacy_runs(connection) -> None:
+    digest = "sha256:" + "0" * 64
+    rows = (
+        ("11111111-1111-4111-8111-111111111111", "open", "bootstrap_pending", None, None),
+        ("33333333-3333-4333-8333-333333333333", "closed", "bootstrap_checkpointed", "checkpoint-closed", None),
+        ("44444444-4444-4444-8444-444444444444", "blocked", "bootstrap_pending", None, "state_invalid"),
+    )
+    for run_id, lifecycle, bootstrap, checkpoint_id, blocked_reason in rows:
+        await connection.execute(
+            """
+            INSERT INTO durable_execution.runs
+                (run_id, trace_id, lifecycle, bootstrap_state, contract_id,
+                 contract_schema_version, contract_bytes, contract_digest,
+                 contract_size_bytes, latest_root_checkpoint_ns,
+                 latest_root_checkpoint_id, latest_root_checkpoint_digest,
+                 blocked_reason_code, finalized_at)
+            VALUES (%s, '22222222-2222-4222-8222-222222222222', %s, %s,
+                    'test.contract', '1.0', %s, %s, 1, %s, %s, %s, %s,
+                    CASE WHEN %s = 'open' THEN NULL ELSE clock_timestamp() END)
+            """,
+            (run_id, lifecycle, bootstrap, b"x", digest,
+             "" if checkpoint_id else None, checkpoint_id,
+             digest if checkpoint_id else None, blocked_reason, lifecycle),
+        )
+    await connection.execute(
+        """
+        INSERT INTO durable_execution.pending_commands
+            (run_id, pause_generation, command_kind, node_name,
+             command_type_id, command_type_version, command_bytes,
+             command_digest, command_size_bytes, status, accepted_at)
+        VALUES ('11111111-1111-4111-8111-111111111111', 0, 'initial',
+                '__start__', 'test.command', '1.0', %s, %s, 1,
+                'accepted', clock_timestamp())
+        """,
+        (b"x", digest),
+    )
+    await connection.execute(
+        """
+        INSERT INTO durable_execution.operation_journal
+            (run_id, operation_phase, operation_logical_step,
+             transition_ordinal, node_name, journal_state)
+        VALUES ('11111111-1111-4111-8111-111111111111', 'requirements',
+                'legacy_step', 1, 'requirements', 'execution_permitted')
+        """,
+    )
+    await connection.commit()
+
+
+async def test_w01_legacy_rows_upgrade_without_rewriting_evidence(
+    scope_db_connection, durable_execution_settings,
+) -> None:
+    connection = scope_db_connection
+    database = _database_name("MODULE11_TEST_SCOPE_DB", os.environ["MODULE11_TEST_PREFIX"])
+    await _reset_module11_test_schema(connection)
+    assert _run_alembic_at_revision(durable_execution_settings, database, "m11_0001").returncode == 0
+    async with await psycopg.AsyncConnection.connect(
+        host=durable_execution_settings.host, port=durable_execution_settings.port,
+        dbname=database, user=durable_execution_settings.user,
+        password=durable_execution_settings.password.get_secret_value(),
+        autocommit=True, row_factory=dict_row,
+        options="-c search_path=durable_execution,pg_catalog -c timezone=UTC",
+    ) as saver_connection:
+        await AsyncPostgresSaver(saver_connection).setup()
+    await _seed_legacy_runs(connection)
+    old_runs = await _fetchall(connection, "SELECT * FROM durable_execution.runs ORDER BY run_id")
+    old_pending = await _fetchall(connection, "SELECT * FROM durable_execution.pending_commands")
+    old_journal = await _fetchall(connection, "SELECT * FROM durable_execution.operation_journal")
+    old_saver_versions = await _fetchall(
+        connection, "SELECT v FROM durable_execution.checkpoint_migrations ORDER BY v",
+    )
+    old_artifact = await _schema_fingerprint(connection, "artifact_store")
+    await connection.rollback()
+
+    result = _run_migration(durable_execution_settings, database)
+    assert result.returncode == 0, result.stderr[-1000:]
+    assert await _fetchall(connection, "SELECT version_num FROM durable_execution.alembic_version") == [(EXPECTED_REVISION,)]
+    upgraded_runs = await _fetchall(connection, "SELECT * FROM durable_execution.runs ORDER BY run_id")
+    assert len(upgraded_runs) == len(old_runs)
+    assert [row[:len(old_runs[0])] for row in upgraded_runs] == old_runs
+    assert await _fetchall(connection, "SELECT * FROM durable_execution.pending_commands") == old_pending
+    assert await _fetchall(connection, "SELECT * FROM durable_execution.operation_journal") == old_journal
+    assert await _fetchall(connection, "SELECT cancel_requested_at, cancel_terminal_bytes, cancel_terminal_digest, cancel_base_checkpoint_id, cancel_base_checkpoint_digest FROM durable_execution.runs") == [(None, None, None, None, None)] * 3
+    assert await _schema_fingerprint(connection, "artifact_store") == old_artifact
+    assert await _fetchall(
+        connection, "SELECT v FROM durable_execution.checkpoint_migrations ORDER BY v",
+    ) == old_saver_versions
+    await check_durable_execution_schema(connection)
+    await connection.rollback()
+
+    before = await _schema_fingerprint(connection, "durable_execution")
+    await connection.rollback()
+    assert _run_migration(durable_execution_settings, database).returncode == 0
+    assert await _schema_fingerprint(connection, "durable_execution") == before
+    await check_durable_execution_schema(connection)
+    await connection.rollback()
+
+
+async def test_w01_new_cancel_checks_and_drift_are_enforced(db_connection) -> None:
+    digest = "sha256:" + "0" * 64
+    run_id = "55555555-5555-4555-8555-555555555555"
+    await db_connection.execute(
+        """
+        INSERT INTO durable_execution.runs
+            (run_id, trace_id, lifecycle, bootstrap_state, contract_id,
+             contract_schema_version, contract_bytes, contract_digest,
+             contract_size_bytes, latest_root_checkpoint_ns,
+             latest_root_checkpoint_id, latest_root_checkpoint_digest,
+             finalized_at)
+        VALUES (%s, '22222222-2222-4222-8222-222222222222',
+                'closed', 'bootstrap_checkpointed', 'test.contract', '1.0',
+                %s, %s, 1, '', 'checkpoint-closed', %s, clock_timestamp())
+        """,
+        (run_id, b"x", digest, digest),
+    )
+    invalid_updates = (
+        ("cancel_terminal_bytes = %s", (b"x",)),
+        ("cancel_terminal_bytes = %s, cancel_terminal_digest = %s, cancel_base_checkpoint_id = %s, cancel_base_checkpoint_digest = %s", (b"x", digest, "checkpoint-closed", digest)),
+        ("cancel_requested_at = clock_timestamp(), cancel_terminal_bytes = %s, cancel_terminal_digest = %s, cancel_base_checkpoint_id = %s, cancel_base_checkpoint_digest = %s", (b"x", "bad", "checkpoint-closed", digest)),
+        ("cancel_requested_at = clock_timestamp()", ()),
+        ("cancel_requested_at = clock_timestamp(), cancel_terminal_bytes = %s, cancel_terminal_digest = %s, cancel_base_checkpoint_id = %s, cancel_base_checkpoint_digest = %s", (b"", digest, "checkpoint-closed", digest)),
+        ("cancel_requested_at = clock_timestamp(), cancel_terminal_bytes = %s, cancel_terminal_digest = %s, cancel_base_checkpoint_id = %s, cancel_base_checkpoint_digest = %s", (b"x", digest, "", digest)),
+        ("cancel_requested_at = clock_timestamp(), cancel_terminal_bytes = %s, cancel_terminal_digest = %s, cancel_base_checkpoint_id = %s, cancel_base_checkpoint_digest = %s", (b"x", digest, "checkpoint-closed", "bad")),
+        ("cancel_requested_at = clock_timestamp(), cancel_terminal_bytes = %s, cancel_terminal_digest = %s, cancel_base_checkpoint_id = %s, cancel_base_checkpoint_digest = %s", (b"x", None, "checkpoint-closed", digest)),
+        ("cancel_requested_at = clock_timestamp(), cancel_terminal_bytes = %s, cancel_terminal_digest = %s, cancel_base_checkpoint_id = %s, cancel_base_checkpoint_digest = %s", (b"x", digest, None, digest)),
+        ("cancel_requested_at = clock_timestamp(), cancel_terminal_bytes = %s, cancel_terminal_digest = %s, cancel_base_checkpoint_id = %s, cancel_base_checkpoint_digest = %s", (b"x", digest, "checkpoint-closed", None)),
+    )
+    for assignment, params in invalid_updates:
+        await db_connection.execute("SAVEPOINT invalid_cancel_update")
+        with pytest.raises(CheckViolation):
+            await db_connection.execute(
+                f"UPDATE durable_execution.runs SET {assignment} WHERE run_id = %s",
+                (*params, run_id),
+            )
+        await db_connection.execute("ROLLBACK TO SAVEPOINT invalid_cancel_update")
+        await db_connection.execute("RELEASE SAVEPOINT invalid_cancel_update")
+    await db_connection.execute(
+        """
+        UPDATE durable_execution.runs
+        SET cancel_requested_at = clock_timestamp(), cancel_terminal_bytes = %s,
+            cancel_terminal_digest = %s, cancel_base_checkpoint_id = %s,
+            cancel_base_checkpoint_digest = %s
+        WHERE run_id = %s
+        """,
+        (b"x", digest, "checkpoint-closed", digest, run_id),
+    )
+    assert await _fetchall(db_connection, "SELECT cancel_terminal_bytes FROM durable_execution.runs WHERE run_id = %s", (run_id,)) == [(b"x",)]
+    await db_connection.rollback()
+    await _assert_drift_rejected_and_rolled_back(
+        db_connection,
+        "ALTER TABLE durable_execution.runs DROP COLUMN cancel_requested_at CASCADE",
+    )
+    await _assert_drift_rejected_and_rolled_back(
+        db_connection,
+        "ALTER TABLE durable_execution.runs DROP CONSTRAINT ck_runs_cancel_terminal_fields, "
+        "ADD CONSTRAINT ck_runs_cancel_terminal_fields CHECK (true)",
+    )
+    await _assert_drift_rejected_and_rolled_back(
+        db_connection,
+        "DROP INDEX durable_execution.ix_runs_created_at_run_id_desc",
+    )
+
+
+async def test_w01_downgrade_refuses_data_loss(db_connection, durable_execution_settings) -> None:
+    before = await _schema_fingerprint(db_connection, "durable_execution")
+    await db_connection.rollback()
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "/workspace/app/durable_execution/alembic.ini", "downgrade", "m11_0001"],
+        cwd=Path(__file__).parents[3],
+        env=_module_environment(durable_execution_settings, durable_execution_settings.database),
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode != 0
+    assert await _schema_fingerprint(db_connection, "durable_execution") == before
+    assert await _fetchall(db_connection, "SELECT version_num FROM durable_execution.alembic_version") == [(EXPECTED_REVISION,)]
     await db_connection.rollback()

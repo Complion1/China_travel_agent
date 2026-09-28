@@ -18,6 +18,7 @@ from app.durable_execution import (
     create_durable_execution_runtime,
 )
 from app.durable_execution.errors import DurableExecutionDependencyError, DurableExecutionStateError
+from app.durable_execution.errors import DurableExecutionUsageError
 from app.durable_execution.models import NodeRecoveryClass
 from app.durable_execution.repository import DurableExecutionRepository
 from app.durable_execution.runtime import DurableExecutionRuntime
@@ -40,6 +41,90 @@ from tests.support.durable_execution_fakes import (
 )
 from tests.requirement_subgraph_fakes import make_confirmed_transition
 from tests.unit.workflow_contracts.fakes import StrictSampleArtifact
+
+
+@pytest.mark.asyncio
+async def test_read_only_view_reads_real_m10_upstream_without_journal(durable_execution_settings):
+    settings = ArtifactPersistenceSettings(
+        host=durable_execution_settings.host, port=durable_execution_settings.port,
+        database=durable_execution_settings.database, user=durable_execution_settings.user,
+        password=durable_execution_settings.password,
+    )
+    artifact_runtime = await create_artifact_persistence_runtime(
+        settings=settings,
+        registry=ArtifactSchemaRegistry((ArtifactSchemaRegistration(
+            artifact_type="test.sample_artifact", schema_version="1.0", model=StrictSampleArtifact,
+        ),)),
+    )
+    def build(caps):
+        graph = StateGraph(TravelSessionState)
+        graph.add_node("requirements", lambda state: state)
+        graph.add_edge(START, "requirements")
+        graph.add_edge("requirements", END)
+        return graph
+    codec = FakeCommandCodec()
+    provider = FakeBudgetPlanProvider()
+    runtime = await create_durable_execution_runtime(
+        settings=durable_execution_settings, artifact_repository=artifact_runtime.repository,
+        contract=make_recovery_contract(nodes=(("requirements", NodeRecoveryClass.REPLAY_SAFE),)),
+        command_codec=codec, budget_plan_provider=provider, graph_factory=build,
+    )
+    run_id, trace_id = uuid4(), uuid4()
+    operation_id = OperationId(run_id=run_id, phase=WorkflowPhase.REQUIREMENTS, logical_step="upstream")
+    later_operation = OperationId(run_id=run_id, phase=WorkflowPhase.REQUIREMENTS, logical_step="next_day")
+    request = ArtifactWriteRequest(
+        operation_id=operation_id, artifact_type="test.sample_artifact", schema_version="1.0",
+        content={
+            "label": "upstream", "count": 1, "ratio": 1.5,
+            "occurred_on": "2026-08-11", "observed_at": "2026-08-11T09:30:00Z",
+            "note": "read-only evidence",
+        },
+    )
+    try:
+        await runtime._repository.create_run(
+            run_id=run_id, trace_id=trace_id, contract=runtime._contract,
+            start_plan=provider.plan_for_start(run_id=run_id),
+            initial_command=codec.encode_initial(run_id=run_id, trace_id=trace_id, command="start"),
+            initial_owner=runtime._owner,
+        )
+        ref = await artifact_runtime.repository.put(request)
+        later_ref = await artifact_runtime.repository.put(request.model_copy(update={
+            "operation_id": later_operation,
+            "content": {
+                "label": "next day", "count": 2, "ratio": 2.5,
+                "occurred_on": "2026-08-12", "observed_at": "2026-08-12T09:30:00Z",
+                "note": "cross-day read-only evidence",
+            },
+        }))
+        before = await runtime._repository.get_recovery_operation_evidence(run_id=run_id)
+        node = runtime._capabilities.for_node(node_name="requirements")
+        with runtime._capabilities.bind(
+            run_id=run_id, owner=runtime._owner, fencing_token=1,
+            command=None, node_name="requirements", checkpoint=None,
+        ):
+            view = node.read_only_artifact_repository
+            assert (await view.lookup(operation_id=operation_id)).ref == ref
+            result = await view.get(ref, expected_model=StrictSampleArtifact)
+            assert result.content.label == "upstream"
+            assert (await view.lookup(operation_id=later_operation)).ref == later_ref
+            assert (await view.get(later_ref, expected_model=StrictSampleArtifact)).content.label == "next day"
+            with pytest.raises(DurableExecutionUsageError):
+                await view.put(request)
+            with pytest.raises(DurableExecutionUsageError):
+                await view.get(ref.model_copy(update={"operation_id": OperationId(
+                    run_id=uuid4(), phase=WorkflowPhase.REQUIREMENTS, logical_step="upstream",
+                )}), expected_model=StrictSampleArtifact)
+            with pytest.raises(DurableExecutionUsageError):
+                await node.artifact_repository.put(request)
+            assert await runtime._repository.release_lease(
+                run_id=run_id, owner=runtime._owner, fencing_token=1,
+            )
+            with pytest.raises(DurableExecutionStateError):
+                await view.lookup(operation_id=operation_id)
+        assert before == await runtime._repository.get_recovery_operation_evidence(run_id=run_id) == ()
+    finally:
+        await runtime.close()
+        await artifact_runtime.close()
 
 
 class _JournalRecorder:

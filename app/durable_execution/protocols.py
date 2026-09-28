@@ -15,6 +15,7 @@ from app.requirement_subgraph import (
 )
 from app.workflow_contracts import (
     ArtifactRepository,
+    ContentHash,
     ExecutionBudgetManager,
     ExecutionBudgetPlan,
     TravelSessionState,
@@ -91,12 +92,22 @@ class DurableExecutionBudgetPlanProvider(Protocol):
     ) -> ExecutionBudgetPlan: ...
 
 
+class DurablePauseCredentialSink(Protocol):
+    async def store(
+        self, *, run_id: UUID, pause_generation: int,
+        contract_digest: ContentHash, pause_token: str,
+    ) -> None: ...
+
+
 class DurableExecutionNodeCapabilities(Protocol):
     @property
     def node_name(self) -> str: ...
 
     @property
     def artifact_repository(self) -> ArtifactRepository: ...
+
+    @property
+    def read_only_artifact_repository(self) -> ArtifactRepository: ...
 
     @property
     def execution_budget_manager(self) -> ExecutionBudgetManager: ...
@@ -126,4 +137,5 @@ __all__ = [
     "DurableExecutionBudgetPlanProvider",
     "DurableExecutionGraphCapabilities",
     "DurableExecutionNodeCapabilities",
+    "DurablePauseCredentialSink",
 ]

@@ -15,7 +15,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from langgraph.graph import StateGraph
-from langgraph.types import StateSnapshot
+from langgraph.types import Command, StateSnapshot
 from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel, TypeAdapter
 from psycopg.rows import dict_row
@@ -31,6 +31,7 @@ from app.durable_execution.checkpointer import (
 )
 from app.durable_execution.errors import (
     DurableExecutionConfigurationError,
+    DurableExecutionCancellationPendingError,
     DurableExecutionDependencyError,
     DurableExecutionError,
     DurableExecutionIncompatibleRunError,
@@ -45,11 +46,16 @@ from app.durable_execution.errors import (
 from app.durable_execution.models import (
     DEMO_DURABLE_EXECUTION_LIMITS,
     DurableExecutionContract,
+    DurableCancellationReceipt,
     DurableExecutionEncodedCommand,
     DurableExecutionLimits,
     DurableExecutionPaused,
     DurableExecutionPauseEnvelope,
     DurableExecutionResult,
+    DurableRunCursor,
+    DurableRunListRequest,
+    DurableRunPage,
+    DurableRunView,
     DurableExecutionTerminal,
     NodeRecoveryClass,
     contract_canonical_bytes,
@@ -59,6 +65,7 @@ from app.durable_execution.protocols import (
     DurableExecutionCommandCodec,
     DurableExecutionGraphCapabilities,
     DurableExecutionNodeCapabilities,
+    DurablePauseCredentialSink,
 )
 from app.durable_execution.repository import (
     DurableExecutionRepository,
@@ -72,6 +79,7 @@ from app.requirement_subgraph import (
     RequirementSubgraphDurablePause,
     RequirementSubgraphEmbeddedDriver,
     RequirementSubgraphPaused,
+    RequirementSubgraphResumeRejectedError,
 )
 from app.workflow_contracts import (
     ArtifactAbsent,
@@ -80,8 +88,10 @@ from app.workflow_contracts import (
     ArtifactRepository,
     ArtifactRepositoryDependencyError,
     ArtifactWriteRequest,
+    DeliveryStatus,
     ExecutionBudgetPlan,
     ExecutionBudgetScope,
+    ExecutionBudgetSnapshot,
     OperationId,
     OperationResultIndeterminateError,
     TravelSessionState,
@@ -457,6 +467,52 @@ class _ArtifactRepositoryAdapter:
         return fresh_ref
 
 
+class _ReadOnlyArtifactRepositoryAdapter:
+    __slots__ = ("_graph", "_node_name")
+
+    def __init__(self, graph: "_GraphCapabilities", node_name: str) -> None:
+        self._graph = graph
+        self._node_name = node_name
+
+    def _context(self) -> _TaskContext:
+        node = self._graph._nodes.get(self._node_name)
+        if node is None:
+            raise DurableExecutionUsageError() from None
+        return node._context()
+
+    async def _fence(self, context: _TaskContext) -> None:
+        await self._graph.repository.verify_fence(
+            run_id=context.run_id, owner=context.owner, fencing_token=context.fencing_token,
+        )
+        if self._context() is not context:
+            raise DurableExecutionUsageError() from None
+
+    async def lookup(self, *, operation_id: OperationId):
+        context = self._context()
+        operation = _fresh_model(OperationId, operation_id, DurableExecutionUsageError)
+        if operation.run_id != context.run_id:
+            raise DurableExecutionUsageError() from None
+        await self._fence(context)
+        result = await self._graph.artifact_repository.lookup(operation_id=operation)
+        await self._fence(context)
+        return result
+
+    async def get(self, ref: ArtifactRef, *, expected_model: type[BaseModel]):
+        context = self._context()
+        fresh_ref = _fresh_model(ArtifactRef, ref, DurableExecutionUsageError)
+        if fresh_ref.operation_id.run_id != context.run_id:
+            raise DurableExecutionUsageError() from None
+        if not isinstance(expected_model, type) or not issubclass(expected_model, BaseModel):
+            raise DurableExecutionUsageError() from None
+        await self._fence(context)
+        result = await self._graph.artifact_repository.get(fresh_ref, expected_model=expected_model)
+        await self._fence(context)
+        return result
+
+    async def put(self, request: ArtifactWriteRequest) -> ArtifactRef:
+        raise DurableExecutionUsageError() from None
+
+
 class _RunBoundBudgetManager:
     __slots__ = ("_capabilities", "_node_name", "_run_id")
 
@@ -510,6 +566,11 @@ class _NodeCapabilities:
         return self._graph.artifact_repository_for(node_name=self._node_name)
 
     @property
+    def read_only_artifact_repository(self) -> ArtifactRepository:
+        self._context()
+        return self._graph.read_only_artifact_repository_for(node_name=self._node_name)
+
+    @property
     def execution_budget_manager(self):
         return self._graph.execution_budget_manager_factory(node_name=self._node_name)(self._context().run_id)
 
@@ -555,7 +616,7 @@ class _NodeCapabilities:
 class _GraphCapabilities:
     __slots__ = (
         "repository", "artifact_repository", "contract", "provider", "limits",
-        "_nodes", "_managers", "_drivers", "_artifact_adapters",
+        "_nodes", "_managers", "_drivers", "_artifact_adapters", "_read_only_adapters",
     )
 
     def __init__(self, *, repository, artifact_repository, contract, provider, limits) -> None:
@@ -568,6 +629,7 @@ class _GraphCapabilities:
         self._managers: dict[tuple[str, UUID], _RunBoundBudgetManager] = {}
         self._drivers: dict[str, RequirementSubgraphEmbeddedDriver] = {}
         self._artifact_adapters: dict[str, _ArtifactRepositoryAdapter] = {}
+        self._read_only_adapters: dict[str, _ReadOnlyArtifactRepositoryAdapter] = {}
 
     @property
     def requirement_subgraph_limits(self):
@@ -607,6 +669,12 @@ class _GraphCapabilities:
         if node_name not in self._artifact_adapters:
             self._artifact_adapters[node_name] = _ArtifactRepositoryAdapter(self, node_name)
         return self._artifact_adapters[node_name]
+
+    def read_only_artifact_repository_for(self, *, node_name: str) -> ArtifactRepository:
+        self._rule(node_name)
+        if node_name not in self._read_only_adapters:
+            self._read_only_adapters[node_name] = _ReadOnlyArtifactRepositoryAdapter(self, node_name)
+        return self._read_only_adapters[node_name]
 
     def register_requirement_subgraph(self, *, node_name: str, driver: RequirementSubgraphEmbeddedDriver) -> None:
         if node_name != "requirements" or type(driver) is not RequirementSubgraphEmbeddedDriver:
@@ -737,10 +805,10 @@ class _GraphCapabilities:
             _CURRENT_CONTEXT.reset(token)
 
 class _NativeOperation:
-    def __init__(self, state: TravelSessionState) -> None:
+    def __init__(self, state: object) -> None:
         self._state = state
 
-    async def __aenter__(self) -> TravelSessionState:
+    async def __aenter__(self) -> object:
         return self._state
 
     async def __aexit__(self, exc_type, exc_value, traceback) -> bool:
@@ -842,12 +910,14 @@ class DurableExecutionRuntime:
         "_coordination_pool", "_checkpoint_pool", "_repository", "_capabilities",
         "_graph_template", "_owner", "_poisoned", "_operations", "_renew_tasks",
         "_requirement_contexts", "_requirement_results",
+        "_pause_credential_sink", "_cancellation_state_factory", "_graph_tasks",
     )
 
     def __init__(self, *, settings, artifact_repository, contract, command_codec,
                  budget_plan_provider, graph_factory, limits, coordination_pool,
                  checkpoint_pool, repository, capabilities, graph_template,
-                 requirement_contexts, requirement_results) -> None:
+                 requirement_contexts, requirement_results,
+                 pause_credential_sink, cancellation_state_factory) -> None:
         self._settings = settings
         self._artifact_repository = artifact_repository
         self._contract = contract
@@ -867,6 +937,22 @@ class DurableExecutionRuntime:
         self._renew_tasks: set[asyncio.Task[Any]] = set()
         self._requirement_contexts = requirement_contexts
         self._requirement_results = requirement_results
+        self._pause_credential_sink = pause_credential_sink
+        self._cancellation_state_factory = cancellation_state_factory
+        self._graph_tasks: dict[UUID, asyncio.Task[Any]] = {}
+
+    async def _store_pause_token(self, *, run_id: UUID, pause_generation: int, token: str) -> None:
+        if self._pause_credential_sink is None:
+            return
+        try:
+            await self._pause_credential_sink.store(
+                run_id=run_id, pause_generation=pause_generation,
+                contract_digest=self._contract.contract_digest, pause_token=token,
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise DurableExecutionDependencyError() from None
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -893,6 +979,262 @@ class DurableExecutionRuntime:
             if isinstance(exc, DurableExecutionRunNotFoundError):
                 return None
             raise
+
+    def _cancel_terminal(self, row: Mapping[str, object]) -> TravelSessionState | None:
+        data = row.get("cancel_terminal_bytes")
+        if data is None:
+            if any(row.get(name) is not None for name in (
+                "cancel_terminal_digest", "cancel_base_checkpoint_id", "cancel_base_checkpoint_digest",
+            )):
+                raise DurableExecutionStateError() from None
+            return None
+        if type(data) is not bytes or row.get("cancel_terminal_digest") != _digest(data):
+            raise DurableExecutionStateError() from None
+        pointer = _pointer(row)
+        if (
+            row.get("lifecycle") != "closed" or row.get("cancel_requested_at") is None
+            or row.get("finalized_at") is None or pointer is None
+            or row.get("cancel_base_checkpoint_id") != pointer[1]
+            or row.get("cancel_base_checkpoint_digest") != pointer[2]
+        ):
+            raise DurableExecutionStateError() from None
+        try:
+            state = _fresh_state(TypeAdapter(TravelSessionState).validate_json(data, strict=True))
+        except Exception:
+            raise DurableExecutionStateError() from None
+        if (
+            _canonical_bytes(state) != data or state.run_id != row["run_id"]
+            or state.trace_id != row["trace_id"]
+            or state.delivery_status is not DeliveryStatus.CANCELLED
+            or state.terminal_code != "cancelled_by_user"
+            or state.terminal_outcome is None
+            or state.terminal_outcome.category.value != "input"
+            or state.terminal_outcome.recoverable
+            or state.terminal_outcome.user_action_code is not None
+        ):
+            raise DurableExecutionStateError() from None
+        return state
+
+    async def request_cancel(self, *, run_id: UUID) -> DurableCancellationReceipt:
+        self._ensure_open()
+        if type(run_id) is not UUID:
+            raise DurableExecutionUsageError() from None
+        if self._cancellation_state_factory is None:
+            raise DurableExecutionConfigurationError() from None
+        row = await self._repository.get_run_row(run_id=run_id)
+        if row["lifecycle"] == "blocked":
+            return DurableCancellationReceipt(run_id=run_id, status="blocked", state=None)
+        await self._check_stored_contract(run_id)
+        status = await self._repository.request_cancellation(run_id=run_id)
+        if status == "blocked":
+            return DurableCancellationReceipt(run_id=run_id, status="blocked", state=None)
+        if status == "already_terminal":
+            terminal = await self._read_terminal_state(run_id)
+            return DurableCancellationReceipt(run_id=run_id, status="already_terminal", state=terminal.state)
+        graph_task = self._graph_tasks.get(run_id)
+        if graph_task is not None and not graph_task.done():
+            graph_task.cancel()
+        return DurableCancellationReceipt(run_id=run_id, status="requested", state=None)
+
+    async def settle_cancel(self, *, run_id: UUID) -> DurableCancellationReceipt:
+        self._ensure_open()
+        if type(run_id) is not UUID:
+            raise DurableExecutionUsageError() from None
+        if self._cancellation_state_factory is None:
+            raise DurableExecutionConfigurationError() from None
+        row = await self._repository.get_run_row(run_id=run_id)
+        if row["lifecycle"] == "blocked":
+            return DurableCancellationReceipt(run_id=run_id, status="blocked", state=None)
+        await self._check_stored_contract(run_id)
+        if row["lifecycle"] == "closed":
+            terminal = await self._read_terminal_state(run_id)
+            return DurableCancellationReceipt(run_id=run_id, status="already_terminal", state=terminal.state)
+        if row["cancel_requested_at"] is None:
+            raise DurableExecutionUsageError() from None
+        if run_id in self._graph_tasks and not self._graph_tasks[run_id].done():
+            return DurableCancellationReceipt(run_id=run_id, status="requested", state=None)
+        owner = self._owner
+        token = await self._repository.acquire_cancellation_lease(run_id=run_id, owner=owner)
+        if token is None:
+            current = await self._repository.get_run_row(run_id=run_id)
+            if current["lifecycle"] == "closed":
+                terminal = await self._read_terminal_state(run_id)
+                return DurableCancellationReceipt(run_id=run_id, status="already_terminal", state=terminal.state)
+            return DurableCancellationReceipt(run_id=run_id, status="requested", state=None)
+        should_block = False
+        try:
+            try:
+                row = await self._repository.get_run_row(run_id=run_id)
+                pointer = _pointer(row)
+                if pointer is None:
+                    raise DurableExecutionStateError() from None
+                state, _, actual = await self._read_verified_graph_state(run_id=run_id)
+                if actual != pointer or state.run_id != run_id or state.trace_id != row["trace_id"]:
+                    raise DurableExecutionStateError() from None
+                pending = await self._repository.get_pending_command(run_id=run_id)
+                if pending is None or pending["status"] not in {"awaiting_input", "accepted", "checkpointed", "cleared"}:
+                    raise DurableExecutionStateError() from None
+                if pending["status"] == "awaiting_input":
+                    self._check_waiting_pending(row, pending)
+                    if state.delivery_status is not DeliveryStatus.AWAITING_USER:
+                        raise DurableExecutionStateError() from None
+                elif pending["status"] == "accepted":
+                    self._check_accepted_pending(row, pending)
+                evidence = await self._repository.get_recovery_operation_evidence(run_id=run_id)
+                if any(item["journal_state"] != "completed" for item in evidence):
+                    raise DurableExecutionStateError() from None
+                await self._verify_budget_activations(run_id)
+                await self._reconcile_state_artifacts(state)
+            except DurableExecutionStateError:
+                should_block = True
+            if should_block:
+                return DurableCancellationReceipt(run_id=run_id, status="blocked", state=None)
+            try:
+                candidate = _fresh_state(self._cancellation_state_factory(_fresh_state(state)))
+            except Exception:
+                raise DurableExecutionStateError() from None
+            original = state.model_dump(mode="python", exclude_none=False)
+            changed = candidate.model_dump(mode="python", exclude_none=False)
+            for name in ("delivery_status", "terminal_code", "terminal_outcome"):
+                original.pop(name)
+                changed.pop(name)
+            if (
+                original != changed or candidate.delivery_status is not DeliveryStatus.CANCELLED
+                or candidate.terminal_code != "cancelled_by_user"
+                or candidate.terminal_outcome is None
+                or candidate.terminal_outcome.category.value != "input"
+                or candidate.terminal_outcome.recoverable
+                or candidate.terminal_outcome.user_action_code is not None
+            ):
+                raise DurableExecutionStateError() from None
+            await self._repository.commit_cancellation_terminal(
+                run_id=run_id, owner=owner, fencing_token=token,
+                pointer=pointer, terminal_bytes=_canonical_bytes(candidate),
+            )
+            return DurableCancellationReceipt(run_id=run_id, status="cancelled", state=candidate)
+        finally:
+            await self._safe_release(run_id, owner, token)
+            if should_block:
+                await self._block(run_id, _BlockCause.checkpoint_invalid())
+
+    async def _view_row(self, row: Mapping[str, object]) -> DurableRunView:
+        run_id = row["run_id"]
+        def view(activity: str, state: TravelSessionState | None = None) -> DurableRunView:
+            return DurableRunView(
+                run_id=run_id, trace_id=row["trace_id"], created_at=row["created_at"],
+                finalized_at=row["finalized_at"], lifecycle=row["lifecycle"], activity=activity,
+                phase=None if state is None else state.phase,
+                delivery_status=None if state is None else state.delivery_status,
+                terminal_code=None if state is None else state.terminal_code,
+                pause_generation=int(row["pause_generation"]),
+                cancel_requested=row["cancel_requested_at"] is not None,
+            )
+        try:
+            await self._check_stored_contract(run_id)
+        except DurableExecutionIncompatibleRunError:
+            return view("incompatible")
+        if row["lifecycle"] == "blocked":
+            return view("blocked")
+        try:
+            if row["lifecycle"] == "closed":
+                terminal = await self._read_terminal_state(run_id)
+                return view("terminal", terminal.state)
+            if row["cancel_requested_at"] is not None:
+                return view("cancelling")
+            if bool((await self._repository.get_lease_state(run_id=run_id))["active"]):
+                return view("executing")
+            pointer = _pointer(row)
+            if pointer is None:
+                return view("recovery_required")
+            state, _, actual = await self._read_verified_graph_state(run_id=run_id)
+            row2 = await self._repository.get_run_row(run_id=run_id)
+            if (
+                _pointer(row2) != pointer
+                or row2["lifecycle"] != row["lifecycle"]
+                or row2["pause_generation"] != row["pause_generation"]
+                or row2["cancel_requested_at"] != row["cancel_requested_at"]
+                or bool((await self._repository.get_lease_state(run_id=run_id))["active"])
+            ):
+                return view("executing")
+            if actual != pointer:
+                raise DurableExecutionStateError() from None
+            pending = await self._repository.get_pending_command(run_id=run_id)
+            if state.delivery_status is DeliveryStatus.AWAITING_USER and pending is not None:
+                self._check_waiting_pending(row, pending)
+                if bool((await self._repository.get_lease_state(run_id=run_id))["active"]):
+                    return view("executing")
+                return view("awaiting_user", state)
+            return view("recovery_required", state)
+        except DurableExecutionRunBusyError:
+            return view("executing")
+        except (DurableExecutionStateError, ValueError, TypeError):
+            fresh = await self._repository.get_run_row(run_id=run_id)
+            if (
+                fresh["lifecycle"] != row["lifecycle"]
+                or fresh["pause_generation"] != row["pause_generation"]
+                or fresh["cancel_requested_at"] != row["cancel_requested_at"]
+                or any(fresh[name] != row[name] for name in (
+                    "latest_root_checkpoint_ns", "latest_root_checkpoint_id",
+                    "latest_root_checkpoint_digest",
+                ))
+                or bool((await self._repository.get_lease_state(run_id=run_id))["active"])
+            ):
+                return view("executing")
+            return view("blocked")
+
+    async def get_run(self, *, run_id: UUID) -> DurableRunView:
+        self._ensure_open()
+        if type(run_id) is not UUID:
+            raise DurableExecutionUsageError() from None
+        return await self._view_row(await self._repository.get_run_row(run_id=run_id))
+
+    async def list_runs(self, *, request: DurableRunListRequest) -> DurableRunPage:
+        self._ensure_open()
+        if type(request) is not DurableRunListRequest:
+            raise DurableExecutionUsageError() from None
+        fresh = _fresh_model(DurableRunListRequest, request, DurableExecutionUsageError)
+        before = None if fresh.before is None else (fresh.before.created_at, fresh.before.run_id)
+        rows = await self._repository.list_run_rows(limit=fresh.limit + 1, before=before)
+        items = tuple([await self._view_row(row) for row in rows[:fresh.limit]])
+        cursor = None
+        if len(rows) > fresh.limit:
+            last = rows[fresh.limit - 1]
+            cursor = DurableRunCursor(created_at=last["created_at"], run_id=last["run_id"])
+        return DurableRunPage(items=items, next_cursor=cursor)
+
+    async def get_terminal_budget_snapshots(self, *, run_id: UUID) -> tuple[ExecutionBudgetSnapshot, ...]:
+        self._ensure_open()
+        if type(run_id) is not UUID:
+            raise DurableExecutionUsageError() from None
+        row = await self._repository.get_run_row(run_id=run_id)
+        if row["lifecycle"] == "blocked":
+            raise DurableExecutionRunBlockedError() from None
+        await self._check_stored_contract(run_id)
+        if row["lifecycle"] != "closed":
+            if row["cancel_requested_at"] is not None:
+                raise DurableExecutionCancellationPendingError() from None
+            if bool((await self._repository.get_lease_state(run_id=run_id))["active"]):
+                raise DurableExecutionRunBusyError() from None
+            raise DurableExecutionUsageError() from None
+        await self._read_terminal_state(run_id)
+        activations = await self._verify_budget_activations(run_id)
+        rows = await self._repository.get_terminal_budget_rows(
+            run_id=run_id, expected_source=row, expected_activations=activations,
+        )
+        snapshots = []
+        from app.workflow_contracts import ExecutionBudgetKey
+        for item in rows:
+            phase = None if item["scope"] == "run" else WorkflowPhase(str(item["phase_code"]))
+            key = ExecutionBudgetKey(
+                scope=ExecutionBudgetScope(str(item["scope"])),
+                name=str(item["name"]), phase=phase,
+            )
+            snapshots.append(ExecutionBudgetSnapshot(
+                schema_version="1.0", run_id=run_id, key=key,
+                limit=int(item["limit_value"]), consumed=int(item["consumed_value"]),
+                remaining=int(item["limit_value"]) - int(item["consumed_value"]),
+            ))
+        return tuple(_fresh_model(ExecutionBudgetSnapshot, item, DurableExecutionStateError) for item in snapshots)
 
     async def start(self, *, run_id: UUID, trace_id: UUID, command: object) -> DurableExecutionResult:
         self._ensure_open()
@@ -931,12 +1273,15 @@ class DurableExecutionRuntime:
 
     async def resume(self, *, run_id: UUID, pause_token: str, command: object) -> DurableExecutionResult:
         self._ensure_open()
-        self._check_poisoned(run_id)
         if type(run_id) is not UUID or type(pause_token) is not str:
             raise DurableExecutionUsageError() from None
         row = await self._repository.get_run_row(run_id=run_id)
+        if row["cancel_requested_at"] is None:
+            self._check_poisoned(run_id)
         self._check_resume_lifecycle(row)
         await self._check_stored_contract(run_id)
+        if row["cancel_requested_at"] is not None:
+            raise DurableExecutionCancellationPendingError() from None
         pending = await self._repository.get_pending_command(run_id=run_id)
         self._check_waiting_pending(row, pending)
         assert pending is not None
@@ -944,7 +1289,10 @@ class DurableExecutionRuntime:
         context = self._decode_pause_context(run_id, row, pending)
         driver = self._capabilities.drivers.get("requirements") if pending["pause_context_type"] == "requirement_subgraph.pause" else None
         if driver is not None:
-            driver.verify_pause_token(durable_pause=context, pause_token=pause_token)
+            try:
+                driver.verify_pause_token(durable_pause=context, pause_token=pause_token)
+            except RequirementSubgraphResumeRejectedError:
+                raise DurableExecutionResumeRejectedError() from None
         elif not hmac.compare_digest(str(pending["pause_token_digest"]), _native_token_digest(run_id, pause_token)):
             raise DurableExecutionResumeRejectedError() from None
         await self._verify_recovery_budget_activations(run_id)
@@ -986,15 +1334,19 @@ class DurableExecutionRuntime:
 
     async def recover(self, *, run_id: UUID) -> DurableExecutionResult:
         self._ensure_open()
-        self._check_poisoned(run_id)
         if type(run_id) is not UUID:
             raise DurableExecutionUsageError() from None
         row = await self._repository.get_run_row(run_id=run_id)
+        if row["cancel_requested_at"] is None:
+            self._check_poisoned(run_id)
         if row["lifecycle"] == "blocked":
             raise DurableExecutionRunBlockedError() from None
         if row["lifecycle"] == "closed":
+            await self._check_stored_contract(run_id)
             return await self._read_terminal_state(run_id)
         await self._check_stored_contract(run_id)
+        if row["cancel_requested_at"] is not None:
+            raise DurableExecutionCancellationPendingError() from None
         if bool((await self._repository.get_lease_state(run_id=run_id))["active"]):
             raise DurableExecutionRunBusyError() from None
         pending = await self._repository.get_pending_command(run_id=run_id)
@@ -1056,12 +1408,18 @@ class DurableExecutionRuntime:
 
     async def get_state(self, *, run_id: UUID) -> TravelSessionState:
         self._ensure_open()
-        self._check_poisoned(run_id)
         if type(run_id) is not UUID:
             raise DurableExecutionUsageError() from None
         row = await self._repository.get_run_row(run_id=run_id)
+        if row["cancel_requested_at"] is None:
+            self._check_poisoned(run_id)
         if row["lifecycle"] == "blocked":
             raise DurableExecutionRunBlockedError() from None
+        await self._check_stored_contract(run_id)
+        if row["lifecycle"] == "closed":
+            return (await self._read_terminal_state(run_id)).state
+        if row["cancel_requested_at"] is not None:
+            raise DurableExecutionCancellationPendingError() from None
         pointer = _pointer(row)
         if pointer is None:
             raise DurableExecutionStateError() from None
@@ -1325,7 +1683,7 @@ class DurableExecutionRuntime:
             elif driver is not None:
                 operation = driver.resume_accepted_operation(state=state, durable_pause=durable_pause, resume=command)
             else:
-                operation = _NativeOperation(state)
+                operation = _NativeOperation(Command(resume=True) if kind == "resume" else state)
             with self._capabilities.bind(
                 run_id=run_id, owner=owner, fencing_token=fencing_token,
                 command=decoded, node_name=node_name, checkpoint=pointer,
@@ -1356,6 +1714,7 @@ class DurableExecutionRuntime:
                                 graph.ainvoke(graph_input, config=config, durability="sync"),
                                 context=graph_context,
                             )
+                            self._graph_tasks[run_id] = graph_task
                             output = await graph_task
                             snapshot = await graph.aget_state(config, subgraphs=True)
                             if type(snapshot) is not StateSnapshot:
@@ -1363,6 +1722,7 @@ class DurableExecutionRuntime:
                             await saver._confirm_graph_state(snapshot)
                             result = self._resolve_graph_result(output=output, snapshot=snapshot, driver=driver)
                         finally:
+                            self._graph_tasks.pop(run_id, None)
                             if driver is not None:
                                 self._requirement_contexts.pop(run_id, None)
                                 self._requirement_results.pop(run_id, None)
@@ -1409,7 +1769,8 @@ class DurableExecutionRuntime:
                     return _fresh_state(child.values), (task.interrupts[0].value if task.interrupts else None)
                 except DurableExecutionStateError:
                     pass
-        return _fresh_state(output if output is not None else snapshot.values), None
+        source = snapshot.values if isinstance(output, Mapping) and "__interrupt__" in output else output
+        return _fresh_state(source if source is not None else snapshot.values), None
 
     def _resolve_graph_result(self, *, output, snapshot, driver):
         state, interrupt = self._snapshot_state(snapshot, output, driver=driver)
@@ -1435,6 +1796,12 @@ class DurableExecutionRuntime:
                 if type(resolved) is RequirementSubgraphPaused:
                     return resolved
         if state.delivery_status.value == "awaiting_user":
+            if driver is None and (
+                not isinstance(output, Mapping)
+                or "__interrupt__" not in output
+                or sum(len(getattr(task, "interrupts", ())) for task in snapshot.tasks) != 1
+            ):
+                raise DurableExecutionStateError() from None
             return ("native", state, secrets.token_hex(16))
         if state.delivery_status.value not in {"in_progress", "awaiting_user"}:
             return DurableExecutionTerminal(state=state)
@@ -1461,6 +1828,12 @@ class DurableExecutionRuntime:
             )
             context_bytes = _canonical_bytes(result.durable_pause)
             next_generation = await self._repository.advance_pause_generation(run_id=run_id, owner=owner, fencing_token=fencing_token)
+            try:
+                await self._store_pause_token(run_id=run_id, pause_generation=next_generation, token=result.pause.pause_token)
+            except DurableExecutionDependencyError:
+                await self._safe_release(run_id, owner, fencing_token)
+                await self._block(run_id, _BlockCause.pending_command_invalid())
+                raise
             if not pending_repaired:
                 await self._mark_completed(run_id, pause_generation, owner, fencing_token)
             await self._repository.create_pending_command(
@@ -1481,6 +1854,12 @@ class DurableExecutionRuntime:
                 owner=owner, fencing_token=fencing_token,
             )
             next_generation = await self._repository.advance_pause_generation(run_id=run_id, owner=owner, fencing_token=fencing_token)
+            try:
+                await self._store_pause_token(run_id=run_id, pause_generation=next_generation, token=token)
+            except DurableExecutionDependencyError:
+                await self._safe_release(run_id, owner, fencing_token)
+                await self._block(run_id, _BlockCause.pending_command_invalid())
+                raise
             context = {
                 "schema_version": "1.0", "run_id": str(run_id), "trace_id": str(state.trace_id),
                 "state_digest": _digest(_canonical_bytes(state)), "node_name": "__root__",
@@ -2324,8 +2703,29 @@ class DurableExecutionRuntime:
         return DurableExecutionTerminal(state=state)
 
     async def _read_terminal_state(self, run_id):
-        state, _ = await self._read_graph_state(run_id=run_id, owner=uuid4(), fencing_token=1)
-        if state.delivery_status.value in {"in_progress", "awaiting_user"}:
+        row = await self._repository.get_run_row(run_id=run_id)
+        cancelled = self._cancel_terminal(row)
+        if cancelled is not None:
+            base, _, actual_pointer = await self._read_verified_graph_state(run_id=run_id)
+            if actual_pointer != _pointer(row):
+                raise DurableExecutionStateError() from None
+            original = base.model_dump(mode="python", exclude_none=False)
+            final = cancelled.model_dump(mode="python", exclude_none=False)
+            for name in ("delivery_status", "terminal_code", "terminal_outcome"):
+                original.pop(name)
+                final.pop(name)
+            if original != final:
+                raise DurableExecutionStateError() from None
+            await self._reconcile_state_artifacts(cancelled)
+            return DurableExecutionTerminal(state=cancelled)
+        if row["cancel_requested_at"] is not None:
+            raise DurableExecutionStateError() from None
+        state, _, actual_pointer = await self._read_verified_graph_state(run_id=run_id)
+        if (
+            actual_pointer != _pointer(row) or state.run_id != run_id
+            or state.trace_id != row["trace_id"]
+            or state.delivery_status.value in {"in_progress", "awaiting_user"}
+        ):
             raise DurableExecutionStateError() from None
         return DurableExecutionTerminal(state=state)
 
@@ -2454,7 +2854,7 @@ class DurableExecutionRuntime:
         ):
             raise DurableExecutionIncompatibleRunError() from None
 
-    async def _verify_budget_activations(self, run_id: UUID) -> None:
+    async def _verify_budget_activations(self, run_id: UUID) -> tuple[Mapping[str, object], ...]:
         """只读核对全部已激活 phase 与不可变数据库投影。"""
 
         plan = _fresh_model(
@@ -2497,7 +2897,7 @@ class DurableExecutionRuntime:
             if ordinal > 0:
                 grouped.setdefault((ordinal, str(row["phase_code"])), []).append(row)
         if not grouped:
-            return
+            return rows
         saver = await create_fenced_checkpoint_saver(
             settings=self._settings, repository=self._repository, run_id=run_id,
             owner=uuid4(), fencing_token=1, limits=self._limits,
@@ -2549,6 +2949,7 @@ class DurableExecutionRuntime:
                         raise DurableExecutionStateError() from None
         finally:
             await saver.aclose()
+        return rows
 
 
 def _coordination_pool_kwargs(settings: DurableExecutionSettings) -> dict[str, object]:
@@ -2567,12 +2968,18 @@ async def create_durable_execution_runtime(*, settings: DurableExecutionSettings
                                            command_codec: DurableExecutionCommandCodec,
                                            budget_plan_provider: DurableExecutionBudgetPlanProvider,
                                            graph_factory: Callable[[DurableExecutionGraphCapabilities], StateGraph],
-                                           limits: DurableExecutionLimits = DEMO_DURABLE_EXECUTION_LIMITS) -> DurableExecutionRuntime:
+                                           limits: DurableExecutionLimits = DEMO_DURABLE_EXECUTION_LIMITS,
+                                           pause_credential_sink: DurablePauseCredentialSink | None = None,
+                                           cancellation_state_factory: Callable[[TravelSessionState], TravelSessionState] | None = None) -> DurableExecutionRuntime:
     if type(settings) is not DurableExecutionSettings or type(contract) is not DurableExecutionContract:
         raise DurableExecutionUsageError() from None
     if type(limits) is not DurableExecutionLimits or not callable(graph_factory):
         raise DurableExecutionUsageError() from None
     if not callable(getattr(budget_plan_provider, "plan_for_start", None)) or not callable(getattr(budget_plan_provider, "plan_for_phase", None)):
+        raise DurableExecutionConfigurationError() from None
+    if pause_credential_sink is not None and not callable(getattr(pause_credential_sink, "store", None)):
+        raise DurableExecutionConfigurationError() from None
+    if cancellation_state_factory is not None and not callable(cancellation_state_factory):
         raise DurableExecutionConfigurationError() from None
     coordination_pool = AsyncConnectionPool("", kwargs=_coordination_pool_kwargs(settings), min_size=1, max_size=4, open=False, timeout=10.0)
     checkpoint_pool = AsyncConnectionPool("", kwargs=_checkpoint_pool_kwargs(settings), min_size=1, max_size=1, open=False, timeout=10.0)
@@ -2611,6 +3018,8 @@ async def create_durable_execution_runtime(*, settings: DurableExecutionSettings
             repository=repository, capabilities=capabilities, graph_template=graph_template,
             requirement_contexts=requirement_contexts,
             requirement_results=requirement_results,
+            pause_credential_sink=pause_credential_sink,
+            cancellation_state_factory=cancellation_state_factory,
         )
     except DurableExecutionError:
         await checkpoint_pool.close()

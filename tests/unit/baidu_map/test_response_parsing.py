@@ -218,12 +218,12 @@ def test_response_parsers_reject_status_shapes_and_leaf_contract_drift() -> None
             directions_request,
             NOW,
         )
-    with pytest.raises(BaiduMapResponseError):
-        parse_directions(
-            {"status": 0, "result": {"routes": [{"distance": 1, "duration": 1, "steps": [_step()]}] * 4}},
-            directions_request,
-            NOW,
-        )
+    projected = parse_directions(
+        {"status": 0, "result": {"routes": [{"distance": 1, "duration": 1, "steps": [_step()]}] * 4}},
+        directions_request,
+        NOW,
+    )
+    assert len(projected.alternatives) == directions_request.alternatives_limit
     weather_request = WeatherRequest(location=POINT)
     with pytest.raises(BaiduMapResponseError):
         parse_weather({"status": 0, "result": {}}, weather_request, NOW)
@@ -610,6 +610,21 @@ def test_nontransit_directions_require_flat_nonblank_steps(mode: TravelMode) -> 
             {"status": 0, "result": {"routes": [{"distance": 10, "duration": 5, "steps": [[_step()]]}]}},
             _directions_request(mode), NOW,
         )
+
+
+@pytest.mark.parametrize("mode", list(TravelMode))
+@pytest.mark.parametrize("limit", [1, 2, 3])
+def test_directions_validates_all_provider_routes_before_ordered_projection(mode: TravelMode, limit: int) -> None:
+    request = _directions_request(mode).model_copy(update={"alternatives_limit": limit})
+    routes = [
+        {"distance": i, "duration": i, "steps": [[_step()]] if mode is TravelMode.TRANSIT else [_step()]}
+        for i in range(1, 6)
+    ]
+    outcome = parse_directions({"status": 0, "result": {"routes": routes}}, request, NOW)
+    assert tuple(route.distance_m for route in outcome.alternatives) == tuple(range(1, limit + 1))
+    routes[-1]["duration"] = "invalid"
+    with pytest.raises(BaiduMapResponseError):
+        parse_directions({"status": 0, "result": {"routes": routes}}, request, NOW)
 
 
 def test_transit_validates_then_filters_blank_steps_in_order() -> None:

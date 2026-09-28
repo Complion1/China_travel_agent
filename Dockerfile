@@ -24,10 +24,10 @@ COPY scripts ./scripts
 
 USER appuser
 
-# The end-to-end CLI is not implemented yet. Keep the runtime target honest by
-# validating the twelve production packages. Importing Modules 10 through 12
+# The web application is not implemented yet. Keep the runtime target honest by
+# validating the thirteen production packages. Importing Modules 10 through 13
 # does not connect to PostgreSQL or run migrations.
-CMD ["python", "-c", "import app.requirements, app.llm_runtime, app.requirement_extraction, app.workflow_contracts, app.requirement_subgraph, app.baidu_map, app.hotel_selection, app.candidate_research, app.itinerary_planning, app.artifact_persistence, app.durable_execution, app.result_formatting; print('modules 01-12 import successfully')"]
+CMD ["python", "-c", "import app.requirements, app.llm_runtime, app.requirement_extraction, app.workflow_contracts, app.requirement_subgraph, app.baidu_map, app.hotel_selection, app.candidate_research, app.itinerary_planning, app.artifact_persistence, app.durable_execution, app.result_formatting, app.demo_workflow; print('modules 01-13 import successfully')"]
 
 
 FROM runtime AS test

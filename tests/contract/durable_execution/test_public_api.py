@@ -29,6 +29,12 @@ EXPECTED_PUBLIC_API = (
     "DurableExecutionPaused",
     "DurableExecutionTerminal",
     "DurableExecutionResult",
+    "DurableCancellationReceipt",
+    "DurableRunCursor",
+    "DurableRunListRequest",
+    "DurableRunPage",
+    "DurableRunView",
+    "DurablePauseCredentialSink",
     "DurableExecutionRuntime",
     "create_durable_execution_runtime",
     "DurableExecutionError",
@@ -44,6 +50,7 @@ EXPECTED_PUBLIC_API = (
     "DurableExecutionIncompatibleRunError",
     "DurableExecutionRunBlockedError",
     "DurableExecutionStateError",
+    "DurableExecutionCancellationPendingError",
 )
 
 EXPECTED_PUBLIC_MODULES = {
@@ -64,6 +71,12 @@ EXPECTED_PUBLIC_MODULES = {
     "DurableExecutionPaused": "app.durable_execution.models",
     "DurableExecutionTerminal": "app.durable_execution.models",
     "DurableExecutionResult": "typing",
+    "DurableCancellationReceipt": "app.durable_execution.models",
+    "DurableRunCursor": "app.durable_execution.models",
+    "DurableRunListRequest": "app.durable_execution.models",
+    "DurableRunPage": "app.durable_execution.models",
+    "DurableRunView": "app.durable_execution.models",
+    "DurablePauseCredentialSink": "app.durable_execution.protocols",
     "DurableExecutionRuntime": "app.durable_execution.runtime",
     "create_durable_execution_runtime": "app.durable_execution.runtime",
     "DurableExecutionError": "app.durable_execution.errors",
@@ -79,6 +92,7 @@ EXPECTED_PUBLIC_MODULES = {
     "DurableExecutionIncompatibleRunError": "app.durable_execution.errors",
     "DurableExecutionRunBlockedError": "app.durable_execution.errors",
     "DurableExecutionStateError": "app.durable_execution.errors",
+    "DurableExecutionCancellationPendingError": "app.durable_execution.errors",
 }
 
 
@@ -105,7 +119,7 @@ def test_root_public_api_is_exact_and_does_not_expose_storage() -> None:
 
 
 def test_runtime_and_factory_have_the_fixed_public_signatures() -> None:
-    for method_name in ("start", "resume", "recover", "get_state", "close", "__aenter__", "__aexit__"):
+    for method_name in ("start", "resume", "recover", "get_state", "request_cancel", "settle_cancel", "get_run", "list_runs", "get_terminal_budget_snapshots", "close", "__aenter__", "__aexit__"):
         assert callable(getattr(DurableExecutionRuntime, method_name))
     assert "DurableExecutionResult" in str(inspect.signature(DurableExecutionRuntime.start).return_annotation)
     assert DurableExecutionResult is not None
@@ -117,6 +131,11 @@ def test_runtime_entrypoints_and_factory_parameter_order_are_exact() -> None:
         "resume": ("self", "run_id", "pause_token", "command"),
         "recover": ("self", "run_id"),
         "get_state": ("self", "run_id"),
+        "request_cancel": ("self", "run_id"),
+        "settle_cancel": ("self", "run_id"),
+        "get_run": ("self", "run_id"),
+        "list_runs": ("self", "request"),
+        "get_terminal_budget_snapshots": ("self", "run_id"),
         "close": ("self",),
         "__aenter__": ("self",),
         "__aexit__": ("self", "exc_type", "exc_value", "traceback"),
@@ -139,6 +158,7 @@ def test_runtime_entrypoints_and_factory_parameter_order_are_exact() -> None:
     assert tuple(factory_signature.parameters) == (
         "settings", "artifact_repository", "contract", "command_codec",
         "budget_plan_provider", "graph_factory", "limits",
+        "pause_credential_sink", "cancellation_state_factory",
     )
     assert all(
         parameter.kind is inspect.Parameter.KEYWORD_ONLY

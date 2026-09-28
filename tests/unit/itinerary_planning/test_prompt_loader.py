@@ -47,7 +47,11 @@ def test_prompt_exposes_the_controller_date_and_route_capacity_rules() -> None:
     assert "duration_s=1..1800 时必须排 30 分钟" in text
     assert "3600/5400/7200 秒" in text
     assert "7200/10800/14400 秒" in text
-    assert "抵达和离开接驳统一使用 ride_hailing/driving" in text
+    assert "抵达、离开接驳和日内各段路线均优先公共交通，网约车和步行其次" in text
+    assert "公交或地铁组合使用 public_transit/transit" in text
+    assert "calculate_route_matrix 不支持 transit" in text
+    assert "先为尚未覆盖的主路线保留 Directions 槽位" in text
+    assert "抵达和离开接驳统一使用 ride_hailing/driving" not in text
     assert "标准恰好 3 个" in text
     assert "规划迭代最多只有 6 轮" in text
     assert "随后立即单独 submit_itinerary" in text

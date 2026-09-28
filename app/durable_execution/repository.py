@@ -46,6 +46,7 @@ from app.workflow_contracts.errors import (
 
 from app.durable_execution.errors import (
     DurableExecutionCapacityExceededError,
+    DurableExecutionCancellationPendingError,
     DurableExecutionConfigurationError,
     DurableExecutionDependencyError,
     DurableExecutionError,
@@ -65,7 +66,7 @@ from app.durable_execution.models import (
 
 
 SCHEMA_NAME = "durable_execution"
-EXPECTED_REVISION = "m11_0001"
+EXPECTED_REVISION = "m11_0002"
 EXPECTED_BUSINESS_TABLES = (
     "capacity_state",
     "runs",
@@ -85,6 +86,7 @@ EXPECTED_TABLES = ("alembic_version",) + EXPECTED_BUSINESS_TABLES + EXPECTED_SAV
 EXPECTED_SAVER_MIGRATION_VERSIONS = tuple(range(10))
 EXPECTED_EXPLICIT_INDEXES = (
     "ix_runs_lifecycle",
+    "ix_runs_created_at_run_id_desc",
     "ix_run_leases_expires_at",
     "ix_operation_journal_operation",
     "ix_pending_commands_run_generation",
@@ -217,6 +219,11 @@ _EXPECTED_COLUMNS: dict[str, tuple[tuple[str, str, str, str, str | None], ...]] 
         ("blocked_reason_code", "character varying", "varchar", "NULL", None),
         ("created_at", "timestamp with time zone", "timestamptz", "NOT_NULL", "clock_timestamp()"),
         ("finalized_at", "timestamp with time zone", "timestamptz", "NULL", None),
+        ("cancel_requested_at", "timestamp with time zone", "timestamptz", "NULL", None),
+        ("cancel_terminal_bytes", "bytea", "bytea", "NULL", None),
+        ("cancel_terminal_digest", "text", "text", "NULL", None),
+        ("cancel_base_checkpoint_id", "text", "text", "NULL", None),
+        ("cancel_base_checkpoint_digest", "text", "text", "NULL", None),
     ),
     "run_leases": (
         ("run_id", "uuid", "uuid", "NOT_NULL", None),
@@ -336,6 +343,11 @@ _EXPECTED_COLUMN_FORMATS: dict[str, tuple[tuple[str, str, str, str | None], ...]
         ("blocked_reason_code", "character varying(64)", "NULL", None),
         ("created_at", "timestamp with time zone", "NOT_NULL", "clock_timestamp()"),
         ("finalized_at", "timestamp with time zone", "NULL", None),
+        ("cancel_requested_at", "timestamp with time zone", "NULL", None),
+        ("cancel_terminal_bytes", "bytea", "NULL", None),
+        ("cancel_terminal_digest", "text", "NULL", None),
+        ("cancel_base_checkpoint_id", "text", "NULL", None),
+        ("cancel_base_checkpoint_digest", "text", "NULL", None),
     ),
     "run_leases": (
         ("run_id", "uuid", "NOT_NULL", None), ("lease_owner", "uuid", "NULL", None),
@@ -500,6 +512,13 @@ _EXPECTED_CHECK_DEFINITION_HASHES = {
     "ck_runs_lifecycle": "b05a7d4adfc10ce14eaac4f8923308c141f17540e886e21bd979dfb9291862fa",
     "ck_runs_operation_count": "a367358ebd8509c718c5f75281c8d02da0de2b362b986e096f90578f1ce3e59b",
     "ck_runs_pause_generation": "530beda2993c1b031aef606c580344105f5ee8a25d7ae96813dd8256b80614f5",
+    "ck_runs_cancel_terminal_fields": "d3df7a36e26c870484c41bfd0f72bf21ba7467909aa372cc48b2bb3e3ba314a6",
+    "ck_runs_cancel_terminal_lifecycle": "a891c03010ac87544b0794290dd2f34fdc4ad515138f896a1eca9491adf160df",
+    "ck_runs_cancel_closed_requires_terminal": "7bc42ad8aa343171760468725405bf81f4586617d5ed74bc664264da70926db7",
+    "ck_runs_cancel_terminal_bytes": "a3fca693925c98ea4970f02ff7bdd91df7072e235073ef7f809b65e40846326d",
+    "ck_runs_cancel_terminal_digest": "61d6e4bbedb5e04d96a0da2ceb142f0ed709fba612f3882ff48458556c233b60",
+    "ck_runs_cancel_base_checkpoint_id": "635e8f21b0d32bceaa97a7ecfe74420a6bcfe76ab4b8dcae662ab7155ddb6c6a",
+    "ck_runs_cancel_base_checkpoint_digest": "197a0799c791a76ac694dff7499367b1e724487c9aea553bd2c6ac4aaf778289",
 }
 
 
@@ -516,6 +535,7 @@ _EXPECTED_INDEX_DEFINITION_HASHES = {
     "ix_pending_commands_run_generation": "4bff239dfdef44bbd339f8519d8f463da90b13e9d69d04014267c839f0934bba",
     "ix_run_leases_expires_at": "b80c3356232a4360f417c1e119f1f24a75294802dedb598f6632809c84448157",
     "ix_runs_lifecycle": "0aa9deff83c0e325cc7035b890cb8e313ffcd991ab74adb96118d12d7e8cda97",
+    "ix_runs_created_at_run_id_desc": "09005a425ccd59b43dcda064f73a9e953dab4178e12a479a6eab94ad9ac3b481",
     "pk_budget_limits": "38e0f37f54003bc4c22f4ec5cd03f1f3ca4b59bdccc831dde79e8562a4f00523",
     "pk_budget_operations": "ff56f214a2877b67035de74d7cdf92e698a18e019fc07282d5e8980773155ac5",
     "pk_capacity_state": "eed1c4d603581f60503d772668af5265699ff382fc39cab58fac726901e764c0",
@@ -637,6 +657,10 @@ async def _check_constraints(connection) -> None:
             "ck_runs_journal_count", "ck_runs_blocked_reason", "ck_runs_blocked_reason_lifecycle",
             "ck_runs_finalized_at", "ck_runs_checkpoint_pointer", "ck_runs_bootstrap_pointer",
             "ck_runs_closed_pointer",
+            "ck_runs_cancel_terminal_fields", "ck_runs_cancel_terminal_lifecycle",
+            "ck_runs_cancel_closed_requires_terminal", "ck_runs_cancel_terminal_bytes",
+            "ck_runs_cancel_terminal_digest", "ck_runs_cancel_base_checkpoint_id",
+            "ck_runs_cancel_base_checkpoint_digest",
         },
         "run_leases": {"pk_run_leases", "fk_run_leases_run", "ck_run_leases_fencing_token", "ck_run_leases_fields"},
         "budget_limits": {
@@ -770,6 +794,7 @@ async def _check_indexes(connection) -> None:
         raise DurableExecutionConfigurationError() from None
     expected_fragments = {
         "ix_runs_lifecycle": "ON durable_execution.runs USING btree (lifecycle)",
+        "ix_runs_created_at_run_id_desc": "ON durable_execution.runs USING btree (created_at DESC, run_id DESC)",
         "ix_run_leases_expires_at": "ON durable_execution.run_leases USING btree (expires_at) WHERE (lease_owner IS NOT NULL)",
         "ix_operation_journal_operation": "ON durable_execution.operation_journal USING btree (run_id, operation_phase, operation_logical_step, transition_ordinal DESC)",
         "ix_pending_commands_run_generation": "ON durable_execution.pending_commands USING btree (run_id, pause_generation DESC)",
@@ -1677,11 +1702,13 @@ class DurableExecutionRepository:
             row = await self._one(
                 connection,
                 """
-                SELECT run_id, trace_id, lifecycle, bootstrap_state,
+                SELECT run_id, trace_id, created_at, lifecycle, bootstrap_state,
                        latest_root_checkpoint_ns, latest_root_checkpoint_id,
                        latest_root_checkpoint_digest, pause_generation,
                        managed_operation_count, journal_row_count,
-                       blocked_reason_code, finalized_at
+                       blocked_reason_code, finalized_at, cancel_requested_at,
+                       cancel_terminal_bytes, cancel_terminal_digest,
+                       cancel_base_checkpoint_id, cancel_base_checkpoint_digest
                 FROM durable_execution.runs
                 WHERE run_id = %s
                 """,
@@ -1690,6 +1717,197 @@ class DurableExecutionRepository:
             if row is None:
                 raise DurableExecutionRunNotFoundError() from None
             return dict(row)
+
+    async def list_run_rows(self, *, limit: int, before: tuple[datetime, UUID] | None) -> tuple[Mapping[str, object], ...]:
+        if type(limit) is not int or not 1 <= limit <= 101 or (before is not None and (
+            type(before) is not tuple or len(before) != 2 or type(before[0]) is not datetime or type(before[1]) is not UUID
+        )):
+            raise DurableExecutionUsageError() from None
+        async with self._transaction() as connection:
+            rows = await self._all(
+                connection,
+                """
+                SELECT run_id, trace_id, created_at, lifecycle, bootstrap_state,
+                       latest_root_checkpoint_ns, latest_root_checkpoint_id,
+                       latest_root_checkpoint_digest, pause_generation,
+                       blocked_reason_code, finalized_at, cancel_requested_at,
+                       cancel_terminal_bytes, cancel_terminal_digest,
+                       cancel_base_checkpoint_id, cancel_base_checkpoint_digest
+                FROM durable_execution.runs
+                WHERE %s::timestamptz IS NULL OR (created_at, run_id) < (%s::timestamptz, %s::uuid)
+                ORDER BY created_at DESC, run_id DESC LIMIT %s
+                """,
+                (None if before is None else before[0], None if before is None else before[0], None if before is None else before[1], limit),
+            )
+            return tuple(dict(row) for row in rows)
+
+    async def request_cancellation(self, *, run_id: UUID) -> str:
+        if type(run_id) is not UUID:
+            raise DurableExecutionUsageError() from None
+        for attempt in range(2):
+            try:
+                async with self._transaction(
+                    run_id=run_id, commit_unknown=True,
+                    commit_unknown_point="cancel_request_commit_unknown",
+                ) as connection:
+                    row = await self._one(connection,
+                        "SELECT lifecycle, cancel_requested_at FROM durable_execution.runs WHERE run_id = %s FOR UPDATE", (run_id,))
+                    if row is None:
+                        raise DurableExecutionRunNotFoundError() from None
+                    if row["lifecycle"] == "blocked":
+                        return "blocked"
+                    if row["lifecycle"] == "closed":
+                        return "already_terminal"
+                    if row["cancel_requested_at"] is None:
+                        await connection.execute(
+                            "UPDATE durable_execution.runs SET cancel_requested_at = clock_timestamp() WHERE run_id = %s", (run_id,))
+                    return "requested"
+            except _CommitUnknown:
+                fresh = await self.get_run_row(run_id=run_id)
+                if fresh["lifecycle"] == "blocked":
+                    return "blocked"
+                if fresh["lifecycle"] == "closed":
+                    return "already_terminal"
+                if fresh["cancel_requested_at"] is not None:
+                    return "requested"
+                if attempt == 1:
+                    raise DurableExecutionDependencyError() from None
+        raise DurableExecutionDependencyError() from None
+
+    async def acquire_cancellation_lease(self, *, run_id: UUID, owner: UUID) -> int | None:
+        if type(run_id) is not UUID or type(owner) is not UUID:
+            raise DurableExecutionUsageError() from None
+        async with self._transaction(run_id=run_id) as connection:
+            run = await self._one(connection,
+                "SELECT lifecycle, cancel_requested_at FROM durable_execution.runs WHERE run_id = %s FOR UPDATE", (run_id,))
+            if run is None:
+                raise DurableExecutionRunNotFoundError() from None
+            if run["lifecycle"] == "blocked":
+                raise DurableExecutionRunBlockedError() from None
+            if run["lifecycle"] == "closed":
+                return None
+            if run["cancel_requested_at"] is None:
+                raise DurableExecutionUsageError() from None
+            lease = await self._one(connection,
+                """SELECT lease_owner, fencing_token,
+                          (lease_owner IS NOT NULL AND expires_at > clock_timestamp()) AS active
+                   FROM durable_execution.run_leases WHERE run_id = %s FOR UPDATE""", (run_id,))
+            if lease is None:
+                raise DurableExecutionDependencyError() from None
+            if lease["active"]:
+                return None
+            token = int(lease["fencing_token"]) + 1
+            result = await connection.execute(
+                """UPDATE durable_execution.run_leases
+                   SET lease_owner = %s, fencing_token = %s,
+                       expires_at = clock_timestamp() + (%s * interval '1 second'),
+                       renewed_at = clock_timestamp()
+                   WHERE run_id = %s AND fencing_token = %s""",
+                (owner, token, self._limits.lease_duration_seconds, run_id, lease["fencing_token"]),
+            )
+            if getattr(result, "rowcount", 1) != 1:
+                raise DurableExecutionRunBusyError() from None
+            return token
+
+    async def commit_cancellation_terminal(
+        self, *, run_id: UUID, owner: UUID, fencing_token: int,
+        pointer: tuple[str, str, str], terminal_bytes: bytes,
+    ) -> None:
+        for attempt in range(2):
+            try:
+                await self._commit_cancellation_terminal_once(
+                    run_id=run_id, owner=owner, fencing_token=fencing_token,
+                    pointer=pointer, terminal_bytes=terminal_bytes,
+                )
+                return
+            except _CommitUnknown:
+                fresh = await self.get_run_row(run_id=run_id)
+                if fresh["lifecycle"] == "closed":
+                    if fresh["cancel_terminal_bytes"] == terminal_bytes and fresh["cancel_terminal_digest"] == (
+                        "sha256:" + hashlib.sha256(terminal_bytes).hexdigest()
+                    ):
+                        return
+                    raise DurableExecutionStateError() from None
+                if attempt == 1:
+                    raise DurableExecutionDependencyError() from None
+        raise DurableExecutionDependencyError() from None
+
+    async def _commit_cancellation_terminal_once(
+        self, *, run_id: UUID, owner: UUID, fencing_token: int,
+        pointer: tuple[str, str, str], terminal_bytes: bytes,
+    ) -> None:
+        normalized = _normalize_pointer(pointer)
+        if (type(run_id) is not UUID or type(owner) is not UUID or type(fencing_token) is not int
+            or normalized is None or normalized[0] != "" or type(terminal_bytes) is not bytes
+            or not 1 <= len(terminal_bytes) <= self._limits.max_payload_bytes):
+            raise DurableExecutionUsageError() from None
+        digest = "sha256:" + hashlib.sha256(terminal_bytes).hexdigest()
+        async with self._transaction(
+            run_id=run_id, capacity_lock=True, commit_unknown=True,
+            commit_unknown_point="cancel_terminal_commit_unknown",
+        ) as connection:
+            run = await self._one(connection,
+                """SELECT lifecycle, cancel_requested_at, latest_root_checkpoint_ns,
+                          latest_root_checkpoint_id, latest_root_checkpoint_digest
+                   FROM durable_execution.runs WHERE run_id = %s FOR UPDATE""", (run_id,))
+            if run is None:
+                raise DurableExecutionRunNotFoundError() from None
+            if run["lifecycle"] != "open" or run["cancel_requested_at"] is None or (
+                run["latest_root_checkpoint_ns"], run["latest_root_checkpoint_id"],
+                run["latest_root_checkpoint_digest"]
+            ) != normalized:
+                raise DurableExecutionStateError() from None
+            lease = await self._one(connection,
+                """SELECT lease_owner, fencing_token,
+                          (expires_at > clock_timestamp()) AS active
+                   FROM durable_execution.run_leases WHERE run_id = %s FOR UPDATE""", (run_id,))
+            if lease is None or lease["lease_owner"] != owner or lease["fencing_token"] != fencing_token or not lease["active"]:
+                raise DurableExecutionRunBusyError() from None
+            pending = await self._one(connection,
+                """SELECT status FROM durable_execution.pending_commands
+                   WHERE run_id = %s ORDER BY pause_generation DESC LIMIT 1 FOR UPDATE""", (run_id,))
+            if pending is None or pending["status"] not in {"awaiting_input", "accepted", "checkpointed", "cleared"}:
+                raise DurableExecutionStateError() from None
+            unsafe = await self._one(connection,
+                """SELECT 1 AS unsafe FROM durable_execution.budget_operations AS b
+                   LEFT JOIN LATERAL (
+                       SELECT journal_state FROM durable_execution.operation_journal AS j
+                       WHERE j.run_id = b.run_id AND j.operation_phase = b.operation_phase
+                         AND j.operation_logical_step = b.operation_logical_step
+                       ORDER BY transition_ordinal DESC LIMIT 1
+                   ) AS latest ON TRUE
+                   WHERE b.run_id = %s AND latest.journal_state IS DISTINCT FROM 'completed'
+                   LIMIT 1""", (run_id,))
+            if unsafe is not None:
+                raise DurableExecutionStateError() from None
+            if pending["status"] != "cleared":
+                await connection.execute(
+                    """UPDATE durable_execution.pending_commands
+                       SET status = 'cleared', command_bytes = NULL, pause_context_bytes = NULL,
+                           checkpointed_at = NULL, cleared_at = clock_timestamp()
+                       WHERE run_id = %s AND status = %s""", (run_id, pending["status"]),
+                )
+            await connection.execute(
+                """UPDATE durable_execution.runs
+                   SET lifecycle = 'closed', finalized_at = clock_timestamp(),
+                       cancel_terminal_bytes = %s, cancel_terminal_digest = %s,
+                       cancel_base_checkpoint_id = %s, cancel_base_checkpoint_digest = %s
+                   WHERE run_id = %s AND lifecycle = 'open'""",
+                (terminal_bytes, digest, normalized[1], normalized[2], run_id),
+            )
+            await connection.execute(
+                """UPDATE durable_execution.run_leases
+                   SET lease_owner = NULL, expires_at = NULL, renewed_at = NULL
+                   WHERE run_id = %s AND lease_owner = %s AND fencing_token = %s""",
+                (run_id, owner, fencing_token),
+            )
+            result = await connection.execute(
+                """UPDATE durable_execution.capacity_state
+                   SET active_run_count = active_run_count - 1
+                   WHERE singleton_id = 1 AND active_run_count > 0""",
+            )
+            if getattr(result, "rowcount", 1) != 1:
+                raise DurableExecutionConfigurationError() from None
 
     async def get_run_contract(self, *, run_id: UUID) -> Mapping[str, object]:
         """读取 run 的不可变执行契约元数据，不返回任何业务明文。"""
@@ -2044,13 +2262,15 @@ class DurableExecutionRepository:
         async with self._transaction(run_id=run_id) as connection:
             run = await self._one(
                 connection,
-                "SELECT lifecycle FROM durable_execution.runs WHERE run_id = %s FOR UPDATE",
+                "SELECT lifecycle, cancel_requested_at FROM durable_execution.runs WHERE run_id = %s FOR UPDATE",
                 (run_id,),
             )
             if run is None:
                 raise DurableExecutionRunNotFoundError() from None
             if run["lifecycle"] != "open":
                 raise DurableExecutionStateError() from None
+            if run["cancel_requested_at"] is not None:
+                raise DurableExecutionCancellationPendingError() from None
             lease = await self._one(
                 connection,
                 """
@@ -2115,7 +2335,7 @@ class DurableExecutionRepository:
             run = await self._one(
                 connection,
                 """
-                SELECT lifecycle, latest_root_checkpoint_ns,
+                SELECT lifecycle, cancel_requested_at, latest_root_checkpoint_ns,
                        latest_root_checkpoint_id, latest_root_checkpoint_digest
                 FROM durable_execution.runs WHERE run_id = %s FOR UPDATE
                 """,
@@ -2123,6 +2343,8 @@ class DurableExecutionRepository:
             )
             if run is None:
                 raise DurableExecutionRunNotFoundError() from None
+            if run["cancel_requested_at"] is not None:
+                raise DurableExecutionCancellationPendingError() from None
             actual_pointer = (
                 None
                 if run["latest_root_checkpoint_id"] is None
@@ -2201,8 +2423,10 @@ class DurableExecutionRepository:
                         renewed_at = clock_timestamp()
                     WHERE run_id = %s AND lease_owner = %s AND fencing_token = %s
                       AND expires_at > clock_timestamp()
+                      AND EXISTS (SELECT 1 FROM durable_execution.runs
+                                  WHERE run_id = %s AND cancel_requested_at IS NULL)
                     """,
-                    (self._limits.lease_duration_seconds, run_id, owner, fencing_token),
+                    (self._limits.lease_duration_seconds, run_id, owner, fencing_token, run_id),
                 )
                 if getattr(result, "rowcount", 1) != 1:
                     raise DurableExecutionStateError() from None
@@ -2246,7 +2470,7 @@ class DurableExecutionRepository:
             SELECT 1 AS valid
             FROM durable_execution.runs AS r
             JOIN durable_execution.run_leases AS l ON l.run_id = r.run_id
-            WHERE r.run_id = %s AND r.lifecycle = 'open'
+            WHERE r.run_id = %s AND r.lifecycle = 'open' AND r.cancel_requested_at IS NULL
               AND l.lease_owner = %s AND l.fencing_token = %s
               AND l.expires_at > clock_timestamp()
             FOR UPDATE OF r, l
@@ -2270,6 +2494,12 @@ class DurableExecutionRepository:
                 fencing_token=fencing_token,
             )
             yield connection
+
+    async def verify_fence(self, *, run_id: UUID, owner: UUID, fencing_token: int) -> None:
+        if type(run_id) is not UUID or type(owner) is not UUID or type(fencing_token) is not int or fencing_token < 1:
+            raise DurableExecutionUsageError() from None
+        async with self._transaction(run_id=run_id) as connection:
+            await self._assert_fence(connection, run_id=run_id, owner=owner, fencing_token=fencing_token)
 
     async def activate_phase(
         self,
@@ -2930,6 +3160,91 @@ class DurableExecutionRepository:
                 )
             return tuple(snapshots)
 
+    async def get_terminal_budget_rows(
+        self, *, run_id: UUID, expected_source: Mapping[str, object],
+        expected_activations: tuple[Mapping[str, object], ...],
+    ) -> tuple[Mapping[str, object], ...]:
+        if type(run_id) is not UUID:
+            raise DurableExecutionUsageError() from None
+        async with self._transaction() as connection:
+            await connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            run = await self._one(connection,
+                """SELECT lifecycle, finalized_at, cancel_requested_at, cancel_terminal_bytes,
+                          cancel_terminal_digest, cancel_base_checkpoint_id,
+                          cancel_base_checkpoint_digest, latest_root_checkpoint_ns,
+                          latest_root_checkpoint_id, latest_root_checkpoint_digest
+                   FROM durable_execution.runs WHERE run_id = %s""", (run_id,))
+            if run is None:
+                raise DurableExecutionRunNotFoundError() from None
+            source_fields = (
+                "lifecycle", "finalized_at", "cancel_requested_at", "cancel_terminal_bytes",
+                "cancel_terminal_digest", "cancel_base_checkpoint_id", "cancel_base_checkpoint_digest",
+                "latest_root_checkpoint_ns", "latest_root_checkpoint_id", "latest_root_checkpoint_digest",
+            )
+            if any(run[name] != expected_source[name] for name in source_fields):
+                raise DurableExecutionStateError() from None
+            if run["lifecycle"] != "closed":
+                raise DurableExecutionUsageError() from None
+            if (run["latest_root_checkpoint_ns"] != "" or run["latest_root_checkpoint_id"] is None
+                or run["latest_root_checkpoint_digest"] is None):
+                raise DurableExecutionStateError() from None
+            terminal_bytes = run["cancel_terminal_bytes"]
+            if terminal_bytes is None:
+                if run["cancel_requested_at"] is not None or any(run[name] is not None for name in (
+                    "cancel_terminal_digest", "cancel_base_checkpoint_id", "cancel_base_checkpoint_digest",
+                )):
+                    raise DurableExecutionStateError() from None
+            elif (
+                type(terminal_bytes) is not bytes
+                or run["cancel_requested_at"] is None
+                or run["cancel_terminal_digest"] != "sha256:" + hashlib.sha256(terminal_bytes).hexdigest()
+                or run["cancel_base_checkpoint_id"] != run["latest_root_checkpoint_id"]
+                or run["cancel_base_checkpoint_digest"] != run["latest_root_checkpoint_digest"]
+            ):
+                raise DurableExecutionStateError() from None
+            rows = await self._all(connection,
+                """SELECT l.scope, l.name, l.phase_code, l.limit_value,
+                          l.consumed_value, l.activation_ordinal, l.activation_digest,
+                          l.activation_checkpoint_ns, l.activation_checkpoint_id,
+                          l.activation_checkpoint_digest,
+                          COALESCE(sum(CASE WHEN b.outcome = 'consumed' THEN b.amount ELSE 0 END), 0) AS ledger_consumed,
+                          COALESCE(bool_and(
+                              b.snapshot_limit = l.limit_value
+                              AND b.snapshot_consumed <= l.consumed_value
+                              AND ((b.outcome = 'consumed' AND b.snapshot_consumed >= b.amount)
+                                   OR (b.outcome = 'exceeded' AND b.snapshot_consumed + b.amount > l.limit_value))
+                          ), TRUE) AS ledger_valid
+                   FROM durable_execution.budget_limits AS l
+                   LEFT JOIN durable_execution.budget_operations AS b
+                     ON b.run_id = l.run_id AND b.budget_scope = l.scope
+                    AND b.budget_name = l.name AND b.budget_phase_code = l.phase_code
+                   WHERE l.run_id = %s
+                   GROUP BY l.scope, l.name, l.phase_code, l.limit_value,
+                            l.consumed_value, l.activation_ordinal, l.activation_digest,
+                            l.activation_checkpoint_ns, l.activation_checkpoint_id,
+                            l.activation_checkpoint_digest
+                   ORDER BY CASE l.scope WHEN 'run' THEN 0 ELSE 1 END,
+                            l.activation_ordinal, l.name""", (run_id,))
+            activation_fields = (
+                "scope", "name", "phase_code", "limit_value", "activation_ordinal",
+                "activation_digest", "activation_checkpoint_ns", "activation_checkpoint_id",
+                "activation_checkpoint_digest",
+            )
+            current_activations = tuple(sorted(
+                (tuple(row[name] for name in activation_fields) for row in rows),
+                key=lambda item: (item[4], item[0], item[1], item[2]),
+            ))
+            checked_activations = tuple(sorted(
+                (tuple(row[name] for name in activation_fields) for row in expected_activations),
+                key=lambda item: (item[4], item[0], item[1], item[2]),
+            ))
+            if not rows or any(
+                int(row["ledger_consumed"]) != int(row["consumed_value"]) or not row["ledger_valid"]
+                for row in rows
+            ) or current_activations != checked_activations:
+                raise DurableExecutionStateError() from None
+            return tuple(dict(row) for row in rows)
+
     async def append_journal_transition(
         self,
         *,
@@ -3337,7 +3652,7 @@ class DurableExecutionRepository:
             await self._assert_fence(connection, run_id=run_id, owner=owner, fencing_token=fencing_token)
             row = await self._one(
                 connection,
-                "SELECT lifecycle FROM durable_execution.runs WHERE run_id = %s FOR UPDATE",
+                "SELECT lifecycle, cancel_requested_at FROM durable_execution.runs WHERE run_id = %s FOR UPDATE",
                 (run_id,),
             )
             if row is None:
@@ -3555,7 +3870,7 @@ class DurableExecutionRepository:
                 """
                 UPDATE durable_execution.pending_commands
                 SET status = 'checkpointed', checkpointed_at = clock_timestamp(),
-                    command_bytes = NULL
+                    command_bytes = NULL, pause_context_bytes = NULL
                 WHERE run_id = %s AND pause_generation = %s AND status = 'dispatch_started'
                 """,
                 (run_id, pause_generation),
@@ -3603,7 +3918,7 @@ class DurableExecutionRepository:
             )
             run = await self._one(
                 connection,
-                "SELECT lifecycle FROM durable_execution.runs WHERE run_id = %s FOR UPDATE",
+                "SELECT lifecycle, cancel_requested_at FROM durable_execution.runs WHERE run_id = %s FOR UPDATE",
                 (run_id,),
             )
             if run is None:
@@ -3612,6 +3927,8 @@ class DurableExecutionRepository:
                 raise DurableExecutionRunBlockedError() from None
             if run["lifecycle"] == "closed":
                 return
+            if run["cancel_requested_at"] is not None:
+                raise DurableExecutionCancellationPendingError() from None
             lease = await self._one(
                 connection,
                 """

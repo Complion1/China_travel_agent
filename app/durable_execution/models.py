@@ -6,6 +6,7 @@ import hashlib
 import json
 import unicodedata
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Literal
 from uuid import UUID
@@ -18,9 +19,11 @@ from app.workflow_contracts import (
     ArtifactSchemaVersion,
     ArtifactRepository,
     ContentHash,
+    DeliveryStatus,
     ExecutionBudgetPlan,
     TravelSessionState,
     WorkflowPhase,
+    TerminalCode,
 )
 
 from app.durable_execution.errors import DurableExecutionConfigurationError
@@ -309,6 +312,102 @@ DurableExecutionResult = Annotated[
 ]
 
 
+def _utc(value: datetime) -> datetime:
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() != timezone.utc.utcoffset(value):
+        raise ValueError("timestamp must be UTC")
+    return value
+
+
+class DurableCancellationReceipt(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    run_id: UUID
+    status: Literal["requested", "cancelled", "already_terminal", "blocked"]
+    state: TravelSessionState | None = Field(repr=False)
+
+    @model_validator(mode="after")
+    def validate_receipt(self) -> "DurableCancellationReceipt":
+        if self.status in {"requested", "blocked"}:
+            if self.state is not None:
+                raise ValueError("state is unavailable")
+        else:
+            if self.state is None:
+                raise ValueError("terminal state is required")
+            object.__setattr__(self, "state", _fresh_state(self.state))
+            if self.state.run_id != self.run_id or self.state.delivery_status in {DeliveryStatus.IN_PROGRESS, DeliveryStatus.AWAITING_USER}:
+                raise ValueError("invalid terminal state")
+            if self.status == "cancelled" and self.state.delivery_status is not DeliveryStatus.CANCELLED:
+                raise ValueError("invalid cancellation state")
+        return self
+
+
+class DurableRunCursor(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    created_at: datetime
+    run_id: UUID
+
+    @model_validator(mode="after")
+    def validate_timestamp(self) -> "DurableRunCursor":
+        _utc(self.created_at)
+        return self
+
+
+class DurableRunListRequest(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    limit: int = Field(default=20, ge=1, le=100)
+    before: DurableRunCursor | None = None
+
+    @model_validator(mode="after")
+    def fresh_cursor(self) -> "DurableRunListRequest":
+        if self.before is not None:
+            object.__setattr__(self, "before", _fresh_model(DurableRunCursor, self.before))
+        return self
+
+
+class DurableRunView(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    run_id: UUID
+    trace_id: UUID
+    created_at: datetime
+    finalized_at: datetime | None
+    lifecycle: Literal["open", "closed", "blocked"]
+    activity: Literal["executing", "awaiting_user", "recovery_required", "cancelling", "terminal", "blocked", "incompatible"]
+    phase: WorkflowPhase | None
+    delivery_status: DeliveryStatus | None
+    terminal_code: TerminalCode | None
+    pause_generation: int | None = Field(ge=0)
+    cancel_requested: bool
+
+    @model_validator(mode="after")
+    def validate_view(self) -> "DurableRunView":
+        _utc(self.created_at)
+        if self.finalized_at is not None:
+            _utc(self.finalized_at)
+        return self
+
+
+class DurableRunPage(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    items: tuple[DurableRunView, ...] = Field(max_length=100)
+    next_cursor: DurableRunCursor | None
+
+    @model_validator(mode="after")
+    def fresh_nested(self) -> "DurableRunPage":
+        object.__setattr__(self, "items", tuple(_fresh_model(DurableRunView, item) for item in self.items))
+        if self.next_cursor is not None:
+            object.__setattr__(self, "next_cursor", _fresh_model(DurableRunCursor, self.next_cursor))
+        return self
+
+
 class DurableExecutionLimits(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
 
@@ -404,6 +503,11 @@ __all__ = [
     "DurableExecutionPaused",
     "DurableExecutionTerminal",
     "DurableExecutionResult",
+    "DurableCancellationReceipt",
+    "DurableRunCursor",
+    "DurableRunListRequest",
+    "DurableRunView",
+    "DurableRunPage",
     "DurableExecutionLimits",
     "DEMO_DURABLE_EXECUTION_LIMITS",
 ]
