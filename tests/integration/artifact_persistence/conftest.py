@@ -19,7 +19,7 @@ from app.workflow_contracts.artifacts.models import ArtifactRepositoryLimits
 
 _IDENTITY_TOKEN = "MODULE10_TEST_IDENTITY_TOKEN"
 _PREFIX = "MODULE10_TEST_PREFIX"
-_EXPECTED_REVISION = "m10_0001"
+_EXPECTED_REVISION = "m10_0002"
 
 TEST_REPOSITORY_LIMITS = ArtifactRepositoryLimits(
     max_artifact_bytes=1_000_000,
@@ -68,7 +68,7 @@ def migrated_artifact_database(
             )
             revisions = [row[0] for row in cursor.fetchall()]
     if revisions != [_EXPECTED_REVISION]:
-        pytest.fail("isolated database is not migrated to m10_0001")
+        pytest.fail("isolated database is not migrated to m10_0002")
 
 
 @pytest.fixture

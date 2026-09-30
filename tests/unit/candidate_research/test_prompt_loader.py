@@ -20,6 +20,8 @@ def test_frozen_prompt_resources_load_and_hash():
     assert "Do not repeat an effective Search or Details request" in action
     assert "exactly one property named output" in action
     assert "do not return outcome_type at the top level" in action
+    assert "include interest and meal_intent and copy them exactly" in action
+    assert "Query wording never substitutes for these fields" in action
     assert "candidate's evidence_handles" in observation
     assert "shared by those defaulted candidates" in observation
     assert "When requirements is empty, requirement_group_updates must be empty" in observation

@@ -55,7 +55,7 @@ CANDIDATE_RESEARCH_PROFILE = ModelProfile(
 ITINERARY_PLANNING_PROFILE = ModelProfile(
     role=ModelRole.ITINERARY_PLANNING,
     read_timeout_seconds=120,
-    semantic_invocation_limit=12,
+    semantic_invocation_limit=17,
     max_request_utf8_bytes=2_097_152,
     max_output_tokens=49_152,
 )

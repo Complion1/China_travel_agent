@@ -5,6 +5,9 @@ from app.artifact_persistence.errors import (
     ArtifactPersistenceDependencyError,
     ArtifactPersistenceError,
 )
+from app.artifact_persistence.interaction_records import (
+    InteractionStoreLimits, DEMO_INTERACTION_STORE_LIMITS, InteractionStoreReadError,
+)
 from app.artifact_persistence.runtime import (
     ArtifactPersistenceRuntime,
     create_artifact_persistence_runtime,
@@ -22,4 +25,7 @@ __all__ = [
     "ArtifactPersistenceDependencyError",
     "create_artifact_persistence_runtime",
     "load_artifact_persistence_settings",
+    "InteractionStoreLimits",
+    "DEMO_INTERACTION_STORE_LIMITS",
+    "InteractionStoreReadError",
 ]

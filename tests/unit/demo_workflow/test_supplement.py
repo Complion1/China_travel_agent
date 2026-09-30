@@ -71,7 +71,7 @@ async def test_incomplete_research_continues_but_no_draft_planning_stops_with_re
         hotel_selection_ref=scenario.refs["hotel_selection"],candidate_set_ref=scenario.refs["candidate_set"],operation_plan=plan))
     incomplete = ItineraryPlanningArtifact.model_validate_json(canonical(artifact), strict=True)
     terminal_ref = await cap.artifact_repository.put(ArtifactWriteRequest(operation_id=plan.terminal_successor_operation_id,
-        artifact_type="itinerary_planning.itinerary", schema_version="1.0", content=incomplete.model_dump(mode="json")))
+        artifact_type="itinerary_planning.itinerary", schema_version="2.0", content=incomplete.model_dump(mode="json")))
     planning_result = ItineraryPlanningIncomplete.model_validate_json(canonical(dict(
         itinerary_ref=None, summary=incomplete.record.summary.model_dump(mode="json"), budgets=incomplete.record.budgets.model_dump(mode="json"),
         stop_reasons=["no_legal_action"], gaps=[dict(gap_type="planning_process", gap_id="stop", evidence_refs=[], process_reason="no_legal_action")])), strict=True)

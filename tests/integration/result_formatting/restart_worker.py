@@ -123,11 +123,12 @@ def result_manifest(loaded: ResultFormattingLoaded, *, mode: str) -> dict[str, o
     }
 
 
-async def seed(repository) -> dict[str, object]:
+async def seed(repository, *, transit: bool = False) -> dict[str, object]:
     index_operation = operation(RESTART_RUN_ID, INDEX_STEP)
     require(isinstance(await repository.lookup(operation_id=index_operation), ArtifactAbsent),
             "M12_RESTART_SEED_ALREADY_EXISTS")
-    scenario = await make_scenario(repository=repository, days=RESTART_DAYS, run_id=RESTART_RUN_ID)
+    instructions = ("步行到合成甲站", "乘坐合成1号线至乙站", "换乘合成20路至丙站") if transit else None
+    scenario = await make_scenario(repository=repository, days=RESTART_DAYS, run_id=RESTART_RUN_ID, transit_instructions=instructions)
     service = ResultFormattingService(artifact_repository=repository)
     prepared = await service.prepare(scenario.request)
     require(type(prepared) is ResultFormattingPrepared, "M12_SEED_PREPARE_FAILED")
@@ -138,6 +139,9 @@ async def seed(repository) -> dict[str, object]:
     loaded = await service.load(make_read_request(scenario, index_ref))
     require(type(loaded) is ResultFormattingLoaded, "M12_SEED_LOAD_FAILED")
     require(len(loaded.days) == RESTART_DAYS, "M12_SEED_DAY_COUNT_MISMATCH")
+    if transit:
+        require("1. 步行到合成甲站\n  2. 乘坐合成1号线至乙站\n  3. 换乘合成20路至丙站" in loaded.markdown, "M12_TRANSIT_STEPS_MISSING")
+        require("未选中方案" not in loaded.markdown, "M12_WRONG_TRANSIT_ALTERNATIVE")
     return result_manifest(loaded, mode="seed")
 
 
@@ -168,7 +172,7 @@ async def verify(repository) -> dict[str, object]:
         terminal_code=None, terminal_outcome=None, requirement_state=confirmation.state,
         requirement_outcome=confirmation.outcome, artifact_refs=(found_source.ref, found_index.ref),
     )
-    request = ResultReadRequest(schema_version="1.0", state=state, index_ref=found_index.ref)
+    request = ResultReadRequest(schema_version='2.0', state=state, index_ref=found_index.ref)
     loaded = await ResultFormattingService(artifact_repository=repository).load(request)
     require(type(loaded) is ResultFormattingLoaded, "M12_RESTART_LOAD_FAILED")
     require(len(loaded.days) == RESTART_DAYS, "M12_RESTART_DAY_COUNT_MISMATCH")
@@ -178,13 +182,13 @@ async def verify(repository) -> dict[str, object]:
 async def run(mode: str) -> dict[str, object]:
     runtime = await open_runtime(isolated_settings())
     try:
-        return await (seed(runtime.repository) if mode == "seed" else verify(runtime.repository))
+        return await (seed(runtime.repository, transit=mode == "seed-transit") if mode in {"seed", "seed-transit"} else verify(runtime.repository))
     finally:
         await runtime.close()
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in {"seed", "verify"}:
+    if len(sys.argv) != 2 or sys.argv[1] not in {"seed", "seed-transit", "verify"}:
         print("M12_WORKER_INVALID_MODE", file=sys.stderr)
         return 2
     try:

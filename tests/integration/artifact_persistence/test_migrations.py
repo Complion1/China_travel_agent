@@ -39,6 +39,7 @@ def test_revision_is_in_artifact_store_and_public_has_no_version_table(
             "alembic_version",
             "artifacts",
             "capacity_state",
+            "interaction_records",
         ]
         cursor.execute(
             """
@@ -47,7 +48,7 @@ def test_revision_is_in_artifact_store_and_public_has_no_version_table(
             ORDER BY version_num
             """
         )
-        assert [row[0] for row in cursor.fetchall()] == ["m10_0001"]
+        assert [row[0] for row in cursor.fetchall()] == ["m10_0002"]
         cursor.execute("SELECT to_regclass('public.alembic_version')")
         assert cursor.fetchone()[0] is None
 
@@ -223,7 +224,7 @@ def test_downgrade_is_rejected_without_changing_the_schema(
         command.downgrade(_alembic_config(), "-1")
     with db_connection.cursor() as cursor:
         cursor.execute("SELECT version_num FROM artifact_store.alembic_version")
-        assert cursor.fetchone() == ("m10_0001",)
+        assert cursor.fetchone() == ("m10_0002",)
         cursor.execute(
             "SELECT to_regclass('artifact_store.artifacts'), "
             "to_regclass('artifact_store.capacity_state')"
@@ -272,7 +273,7 @@ def test_failed_first_revision_rolls_back_schema_version_and_business_tables(
         command.upgrade(_alembic_config(), "head")
     with db_connection.cursor() as cursor:
         cursor.execute("SELECT version_num FROM artifact_store.alembic_version")
-        assert cursor.fetchall() == [("m10_0001",)]
+        assert cursor.fetchall() == [("m10_0002",)]
 
 
 class _DisposeFailingEngine:

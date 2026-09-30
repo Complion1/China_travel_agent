@@ -484,7 +484,7 @@ async def test_module07_08_09_registrations_put_and_get_without_production_compo
         request = ArtifactWriteRequest(
             operation_id=operation_id,
             artifact_type=artifact_type,
-            schema_version="3.0" if artifact_type.endswith("model_action") else "1.0",
+            schema_version=artifact.schema_version,
             content=artifact.model_dump(mode="json"),
         )
         ref = await repository.put(request)

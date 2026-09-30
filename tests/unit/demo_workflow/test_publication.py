@@ -22,7 +22,7 @@ from tests.unit.result_formatting.fakes import make_scenario
 @pytest.mark.asyncio
 async def test_every_formatting_failure_has_exact_safe_disposition(code):
     nodes, state, _, _ = await hotel_nodes()
-    failure = ResultFormattingFailed(schema_version="1.0", outcome_type="failed", code=code)
+    failure = ResultFormattingFailed(schema_version='2.0', outcome_type="failed", code=code)
     if code is ResultFormattingFailureCode.UNSAFE_TEXT:
         result = formatting_failure(state, failure)
         assert result.goto == "__end__" and result.update["terminal_code"] == "workflow_output_failed"
@@ -61,7 +61,7 @@ async def test_real_formatter_days_then_index_and_delivery_rules(days, transit, 
     assert state.delivery_status is expected
     index_ref = next(ref for ref in state.artifact_refs if ref.artifact_type == "result_formatting.index")
     loaded = await ResultFormattingService(artifact_repository=cap.artifact_repository).load(
-        ResultReadRequest(schema_version="1.0", state=state, index_ref=index_ref))
+        ResultReadRequest(schema_version='2.0', state=state, index_ref=index_ref))
     assert loaded.outcome_type == "loaded" and len(loaded.days) == days
     assert loaded.index.core.weather_status == "not_collected"
     assert (await cap.execution_budget_manager.get_snapshot(key=RESULT_WRITE_KEY)).consumed == days + 1

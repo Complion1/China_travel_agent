@@ -26,6 +26,42 @@ def test_persistence_failure_flags_are_conservative() -> None:
     assert outcome.possible_duplicate is True
 
 
+@pytest.mark.parametrize("copy_interest", (False, True))
+@pytest.mark.asyncio
+async def test_search_query_wording_does_not_replace_required_objective_interest(copy_interest) -> None:
+    from tests.unit.candidate_research.test_service_initial import _action_batch_from_prompt
+
+    run_id = uuid4()
+    request, hotel_ref, hotel_artifact, _ = _request(run_id, place_width=8)
+    operation = FakeModelOperation()
+
+    def action_response(_count):
+        batch = _action_batch_from_prompt(operation, 8)
+        actions = tuple(
+            action.model_copy(update={
+                "query": f"杭州{action.interest.value}景点",
+                "interest": action.interest if copy_interest else None,
+            }) if action.interest is not None else action
+            for action in batch.actions
+        )
+        return structured(batch.model_copy(update={"actions": actions}))
+
+    operation.responses.append(action_response)
+    repository = FakeRepository()
+    repository.seed(hotel_ref, hotel_artifact)
+    maps = FakeMapAdapter(tuple(BaiduMapTimeoutError(capability=MapCapability.PLACE_SEARCH) for _ in range(3)))
+    service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=maps,
+        artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
+    result = await service.research_initial(request)
+
+    if copy_interest:
+        assert result.failure.failure_type == "map_failure"
+        assert len(maps.search_requests) == 3
+    else:
+        assert result.failure.code is CandidateResearchControlFailureCode.ACTION_BATCH_INVALID
+        assert not maps.search_requests
+
+
 @pytest.mark.asyncio
 async def test_public_judgment_rejection_persists_the_actual_proposed_patch() -> None:
     run_id = uuid4()

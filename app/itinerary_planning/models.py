@@ -41,10 +41,10 @@ from app.workflow_contracts import (
 )
 
 
-ITINERARY_PLANNING_SCHEMA_VERSION: Literal["1.0"] = "1.0"
-ITINERARY_PLANNING_ITERATION_BUDGET_KEY = ExecutionBudgetKey(
+ITINERARY_PLANNING_SCHEMA_VERSION: Literal["2.0"] = "2.0"
+ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY = ExecutionBudgetKey(
     scope=ExecutionBudgetScope.PHASE,
-    name="planning.iteration",
+    name="planning.model_invocation",
     phase=WorkflowPhase.ITINERARY_PLANNING,
 )
 ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY = ExecutionBudgetKey(
@@ -168,14 +168,14 @@ class PlanningFailureCode(str, Enum):
     INTERNAL_INVARIANT_BROKEN = "internal_invariant_broken"
 
 
-class PlanningIterationOperationIds(_Model):
-    schema_version: Literal["1.0"] = "1.0"
-    invocation_slot_index: Annotated[int, Field(ge=0, le=5)]
+class PlanningInvocationOperationIds(_Model):
+    schema_version: Literal["2.0"] = "2.0"
+    invocation_slot_index: Annotated[int, Field(ge=0, le=16)]
     action_operation_id: OperationId
     planning_state_operation_id: OperationId
 
     @model_validator(mode="after")
-    def _validate_ids(self) -> PlanningIterationOperationIds:
+    def _validate_ids(self) -> PlanningInvocationOperationIds:
         ids = (self.action_operation_id, self.planning_state_operation_id)
         if any(item.phase is not WorkflowPhase.ITINERARY_PLANNING for item in ids):
             raise ValueError("planning operation ids must use itinerary_planning phase")
@@ -187,22 +187,21 @@ class PlanningIterationOperationIds(_Model):
 
 
 class ItineraryPlanningOperationPlan(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     run_id: UUID
-    iteration_slots: Annotated[tuple[PlanningIterationOperationIds, ...], Field(min_length=0, max_length=6)]
+    invocation_slots: Annotated[tuple[PlanningInvocationOperationIds, ...], Field(min_length=0, max_length=17)]
     hub_geocode_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=0, max_length=2)]
-    matrix_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=0, max_length=360)]
+    matrix_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=0, max_length=1020)]
     direction_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=0, max_length=482)]
-    terminal_action_operation_id: OperationId
     terminal_successor_operation_id: OperationId
 
     @model_validator(mode="after")
     def _validate_plan(self) -> ItineraryPlanningOperationPlan:
-        slots = self.iteration_slots
+        slots = self.invocation_slots
         indexes = tuple(slot.invocation_slot_index for slot in slots)
         if indexes and indexes != tuple(range(indexes[0], indexes[0] + len(indexes))):
             raise ValueError("iteration slots must be a contiguous increasing subsequence")
-        all_ids: list[OperationId] = [self.terminal_action_operation_id, self.terminal_successor_operation_id]
+        all_ids: list[OperationId] = [self.terminal_successor_operation_id]
         for slot in slots:
             all_ids.extend((slot.action_operation_id, slot.planning_state_operation_id))
         all_ids.extend(self.hub_geocode_operation_ids)
@@ -219,7 +218,7 @@ class ItineraryPlanningOperationPlan(_Model):
 
 
 class ItineraryPlanningInitialRequest(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     confirmed: ConfirmedTravelRequirement
     hotel_selection_ref: ArtifactRef
     candidate_set_ref: ArtifactRef
@@ -227,16 +226,16 @@ class ItineraryPlanningInitialRequest(_Model):
 
     @model_validator(mode="after")
     def _validate_initial(self) -> ItineraryPlanningInitialRequest:
-        indexes = tuple(item.invocation_slot_index for item in self.operation_plan.iteration_slots)
-        if indexes != (0, 1, 2, 3, 4, 5):
-            raise ValueError("initial request requires iteration slots 0 through 5")
+        indexes = tuple(item.invocation_slot_index for item in self.operation_plan.invocation_slots)
+        if indexes != tuple(range(17)):
+            raise ValueError("initial request requires invocation slots 0 through 16")
         _require_ref(self.hotel_selection_ref, "hotel.selection", WorkflowPhase.HOTEL_SELECTION, self.operation_plan.run_id)
         _require_ref(self.candidate_set_ref, "candidate_research.candidate_set", WorkflowPhase.CANDIDATE_RESEARCH, self.operation_plan.run_id)
         return self
 
 
 class ItineraryPlanningResumeRequest(_Model):
-    schema_version: Literal["2.0"] = "2.0"
+    schema_version: Literal["3.0"] = "3.0"
     predecessor_planning_ref: ArtifactRef
     supplemented_candidate_set_ref: ArtifactRef
     operation_plan: ItineraryPlanningOperationPlan
@@ -254,7 +253,7 @@ class ItineraryPlanningResumeRequest(_Model):
 
 
 def _require_ref(ref: ArtifactRef, artifact_type: str, phase: WorkflowPhase, run_id: UUID) -> None:
-    if ref.artifact_type != artifact_type or ref.schema_version != "1.0":
+    if ref.artifact_type != artifact_type or ref.schema_version != ("2.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"):
         raise ValueError("artifact reference type/version mismatch")
     if ref.operation_id.phase is not phase or ref.operation_id.run_id != run_id:
         raise ValueError("artifact reference run/phase mismatch")
@@ -265,7 +264,7 @@ def _require_itinerary_ref(ref: ArtifactRef | None, *, required: bool = False) -
         if required:
             raise ValueError("itinerary reference is required")
         return
-    if ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version != "1.0" or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING:
+    if ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version != "2.0" or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING:
         raise ValueError("reference must point to an itinerary planning artifact")
 
 
@@ -422,6 +421,13 @@ class RouteAlternativeSummary(_Model):
     distance_m: Annotated[int, Field(ge=0)]
     duration_s: Annotated[int, Field(ge=0)]
     step_count: Annotated[int, Field(ge=1, le=128)]
+    transit_instructions: Annotated[tuple[Annotated[str, Field(min_length=1, max_length=1024, pattern=r"\S")], ...], Field(max_length=128)] = Field(default=(), repr=False, exclude_if=lambda value: not value)
+
+    @model_validator(mode="after")
+    def _instruction_count(self):
+        if self.transit_instructions and len(self.transit_instructions) != self.step_count:
+            raise ValueError("transit instructions must match step count")
+        return self
 
 
 class RouteLeg(_Model):
@@ -484,7 +490,7 @@ class BackupOption(_Model):
     backup_kind: Literal["attraction", "lunch", "dinner"]
     core_visit_id: StableId
     candidate: CandidateLocationRef
-    matrix_observation_index: Annotated[int, Field(ge=0, le=359)]
+    matrix_observation_index: Annotated[int, Field(ge=0, le=1019)]
     matrix_mode: MatrixTravelMode
     distance_m: Annotated[int, Field(ge=0, le=3000)]
     business_hours_state: BusinessHoursState
@@ -680,7 +686,7 @@ class ProposedRouteLeg(_Model):
     origin_handle: Handle
     destination_handle: Handle
     start_at: datetime
-    end_at: datetime
+    end_at: datetime | None = Field(default=None, description="Use null: code derives arrival from start_at and the selected Directions duration. Legacy explicit values must match exactly.")
     transport_semantic: TransportSemantic
     route_mode: TravelMode
     directions_handle: Handle = Field(
@@ -690,7 +696,7 @@ class ProposedRouteLeg(_Model):
 
     @model_validator(mode="after")
     def _leg(self) -> ProposedRouteLeg:
-        if not _aware_shanghai(self.start_at) or not _aware_shanghai(self.end_at) or self.start_at > self.end_at:
+        if not _aware_shanghai(self.start_at) or (self.end_at is not None and (not _aware_shanghai(self.end_at) or self.start_at > self.end_at)):
             raise ValueError("invalid proposed route interval")
         expected = {
             TransportSemantic.WALKING: TravelMode.WALKING,
@@ -1277,26 +1283,37 @@ PlanningGapSummary: TypeAlias = Annotated[
 
 
 class PlanningBudgetSummary(_Model):
-    schema_version: Literal["1.0"] = "1.0"
-    iteration_limit: Literal[6] = 6
-    iterations_consumed: Annotated[int, Field(ge=0, le=6)]
+    schema_version: Literal["2.0"]
+    model_invocation_limit: Literal[17]
+    model_invocations_consumed: Annotated[int, Field(ge=0, le=17)]
+    preparation_limit: Literal[2]
+    preparation_used: Annotated[int, Field(ge=0, le=2)]
+    transport_limit: Literal[5]
+    transport_used: Annotated[int, Field(ge=0, le=5)]
+    submit_repair_limit: Literal[5]
+    submit_repair_used: Annotated[int, Field(ge=0, le=5)]
+    supplement_request_limit: Literal[5]
+    supplement_request_used: Annotated[int, Field(ge=0, le=5)]
     direction_call_limit: Annotated[int, Field(ge=2)]
     direction_calls_consumed: Annotated[int, Field(ge=0)]
     budget_snapshot_complete: bool
-    semantic_invocation_limit: Literal[12] = 12
-    semantic_invocations_consumed: Annotated[int, Field(ge=0, le=12)]
-    known_provider_attempts: Annotated[int, Field(ge=0, le=24)]
+    semantic_invocation_limit: Literal[17]
+    semantic_invocations_consumed: Annotated[int, Field(ge=0, le=17)]
+    known_provider_attempts: Annotated[int, Field(ge=0, le=34)]
     provider_attempts_complete: bool
     known_usage: LLMUsage
     usage_complete: bool
     cache_hits: Annotated[int, Field(ge=0)]
 
     @model_validator(mode="after")
-    def _budget(self) -> PlanningBudgetSummary:
+    def _budget(self):
+        classified = self.preparation_used + self.transport_used + self.submit_repair_used + self.supplement_request_used
         if self.direction_calls_consumed > self.direction_call_limit:
             raise ValueError("direction budget exceeded")
-        if self.known_provider_attempts < self.semantic_invocations_consumed:
-            raise ValueError("provider attempts cannot be below invocations")
+        if self.budget_snapshot_complete and (classified != self.model_invocations_consumed or self.semantic_invocations_consumed != self.model_invocations_consumed):
+            raise ValueError("planning invocation classification mismatch")
+        if self.provider_attempts_complete and self.known_provider_attempts < self.semantic_invocations_consumed:
+            raise ValueError("provider attempts below known invocations")
         return self
 
 
@@ -1321,7 +1338,7 @@ class LLMPlanningFailure(_Model):
     schema_version: Literal["1.0"] = "1.0"
     failure_type: Literal["llm"] = "llm"
     error: LLMRuntimeError
-    invocation_index: Annotated[int, Field(ge=0, le=11)]
+    invocation_index: Annotated[int, Field(ge=0, le=16)]
     retryable: bool
     possible_duplicate: bool
 
@@ -1391,7 +1408,7 @@ PlanningFailure: TypeAlias = Annotated[
 
 
 class ItineraryPlanningCompleted(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     outcome_type: Literal["completed"] = "completed"
     itinerary_ref: ArtifactRef
     summary: PlanningSummary
@@ -1404,7 +1421,7 @@ class ItineraryPlanningCompleted(_Model):
 
 
 class ItineraryPlanningIncomplete(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     outcome_type: Literal["incomplete"] = "incomplete"
     itinerary_ref: ArtifactRef | None
     summary: PlanningSummary
@@ -1422,7 +1439,7 @@ class ItineraryPlanningIncomplete(_Model):
 
 
 class ItineraryPlanningCandidateSupplementRequested(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     outcome_type: Literal["candidate_supplement_requested"] = "candidate_supplement_requested"
     planning_ref: ArtifactRef
     candidate_set_ref: ArtifactRef
@@ -1441,7 +1458,7 @@ class ItineraryPlanningCandidateSupplementRequested(_Model):
 
 
 class ItineraryPlanningFailed(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     outcome_type: Literal["failed"] = "failed"
     failure: PlanningFailure
     last_consistent_itinerary_ref: ArtifactRef | None
@@ -1462,9 +1479,9 @@ class ItineraryPlanningFailed(_Model):
                 "itinerary_planning.itinerary",
             }
             expected_schema_version = (
-                "4.0"
+                "5.0"
                 if self.failure_artifact_ref.artifact_type == "itinerary_planning.model_action"
-                else "1.0"
+                else "2.0" if self.failure_artifact_ref.artifact_type == "itinerary_planning.itinerary" else "1.0"
             )
             if self.failure_artifact_ref.artifact_type not in allowed or self.failure_artifact_ref.schema_version != expected_schema_version:
                 raise ValueError("failure artifact ref must be a Module 09 artifact")
@@ -1481,10 +1498,10 @@ ItineraryPlanningOutcome: TypeAlias = Annotated[
 
 
 __all__ = (
-    "ITINERARY_PLANNING_SCHEMA_VERSION", "ITINERARY_PLANNING_ITERATION_BUDGET_KEY",
+    "ITINERARY_PLANNING_SCHEMA_VERSION", "ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY",
     "ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY", "PlanningDayKind", "VisitKind",
     "BusinessHoursState", "PlanningTool", "PlanningStopReason", "TransportSemantic",
-    "PlanningFailureCode", "PlanningIterationOperationIds", "ItineraryPlanningOperationPlan",
+    "PlanningFailureCode", "PlanningInvocationOperationIds", "ItineraryPlanningOperationPlan",
     "ItineraryPlanningInitialRequest", "ItineraryPlanningResumeRequest", "CandidateLocationRef",
     "HotelLocationRef", "HubLocationRef", "PlanningLocationRef", "TimeInterval",
     "RouteTimeInterval", "DailyTimeRule", "TimeSensitiveMustAnchor", "TransportPolicyRule",

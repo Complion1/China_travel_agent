@@ -4,9 +4,14 @@ import asyncio
 import inspect
 import threading
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import Any, cast, Literal
+from app.llm_runtime.interaction_recording import (
+    InteractionCallIdentity, _recorded_call, _mark_admitted, _call_identity,
+    _begin_attempt, _capture_failure, _attempt_processed,
+)
 
 from pydantic import BaseModel, ValidationError
+from .diagnostics import record_error, validation_details, locations
 
 from app.llm_runtime.models import (
     InvocationMetadata,
@@ -164,6 +169,7 @@ class ModelOperation:
             if self._semantic_invocations_used >= self._profile.semantic_invocation_limit:
                 return LLMErrorCode.QUOTA_EXHAUSTED
             self._semantic_invocations_used += 1
+            _mark_admitted(self._semantic_invocations_used - 1)
             return None
 
     def _record_attempt(self) -> None:
@@ -213,7 +219,21 @@ class ModelOperation:
         possible_duplicate = False
         for attempt in (1, 2):
             self._record_attempt()
+            _begin_attempt(attempt)
             result = await provider_call()
+            code = None
+            if isinstance(result, ProviderFailure):
+                try:
+                    code = LLMErrorCode(result.code)
+                except ValueError:
+                    code = LLMErrorCode.MALFORMED_PROVIDER_RESPONSE
+                await _capture_failure(code)
+            elif not isinstance(result, ProviderResponse):
+                code = LLMErrorCode.MALFORMED_PROVIDER_RESPONSE
+                await _capture_failure(code)
+            elif result.finish_reason == "insufficient_system_resource":
+                code = LLMErrorCode.PROVIDER_UNAVAILABLE
+            await _attempt_processed(code)
             if not isinstance(result, (ProviderResponse, ProviderFailure)):
                 return None, attempt, possible_duplicate, _runtime_error(
                     LLMErrorCode.MALFORMED_PROVIDER_RESPONSE, self.role
@@ -332,6 +352,7 @@ class ModelOperation:
         assert response is not None
         return self._decode_structured(response, schema, attempts, duplicate)
 
+    @_recorded_call
     async def ainvoke_structured(
         self,
         prompt: PromptEnvelope,
@@ -443,36 +464,38 @@ class ModelOperation:
         assert response is not None
         return self._decode_tool_response(response, attempts, duplicate)
 
+    async def _admit_tools_async(self, *, prompt, tools, definitions, history, admission_callback):
+        async with self._async_lock:
+            self._check_closed()
+            gate = check_byte_gate(len(canonical_request_bytes(profile=self._profile, prompt=prompt,
+                json_schema=None, tools=definitions, internal_tool_history=history)), self._profile.max_request_utf8_bytes, self.role)
+            if gate is not None:
+                return gate
+            if self._semantic_invocations_used >= self._profile.semantic_invocation_limit:
+                return _runtime_error(LLMErrorCode.QUOTA_EXHAUSTED, self.role)
+            identity = _call_identity(self._semantic_invocations_used)
+            if admission_callback is not None:
+                await admission_callback(identity)
+            self._semantic_invocations_used += 1
+            _mark_admitted(self._semantic_invocations_used - 1)
+            self._tool_prompt, self._tool_contracts, self._tool_definitions = prompt, tools, definitions
+        return None
+
+    @_recorded_call
     async def ainvoke_tools(
-        self,
-        prompt: PromptEnvelope,
-        tools: tuple[ToolContract[Any], ...],
+        self, prompt: PromptEnvelope, tools: tuple[ToolContract[Any], ...], *,
+        admission_callback: Callable[[InteractionCallIdentity], Awaitable[None]] | None = None,
+        request_stage: Literal["preparation", "transport", "submit_repair"] | None = None,
     ) -> ToolTurnOutcome:
         self._set_mode("async")
         definitions, preflight_error = self._prepare_tools(tools)
         if preflight_error is not None or definitions is None:
             return self._tool_failure(preflight_error or LLMErrorCode.INVALID_REQUEST)
-        gate = check_byte_gate(
-            len(
-                canonical_request_bytes(
-                    profile=self._profile,
-                    prompt=prompt,
-                    json_schema=None,
-                    tools=definitions,
-                )
-            ),
-            self._profile.max_request_utf8_bytes,
-            self.role,
-        )
+        gate = await self._admit_tools_async(prompt=prompt, tools=tools, definitions=definitions, history=(),
+            admission_callback=admission_callback)
         if gate is not None:
             self.close()
             return LLMInvocationFailure(error=gate)
-        quota_error = await self._claim_semantic_async()
-        if quota_error is not None:
-            return self._tool_failure(quota_error)
-        self._tool_prompt = prompt
-        self._tool_contracts = tools
-        self._tool_definitions = definitions
         response, attempts, duplicate, error = await self._invoke_async(
             lambda: self._provider.ainvoke_tools(
                 ProviderToolRequest(
@@ -532,7 +555,12 @@ class ModelOperation:
                     canonical_json(arguments),
                     strict=True,
                 )
-            except (ValidationError, TypeError, ValueError):
+            except (ValidationError, TypeError, ValueError) as error:
+                record_error("tool_arguments_invalid", role=self.role.value,
+                             invocation=self._semantic_invocations_used,
+                             tool=contract.name,
+                             errors=validation_details(error, contract.args_schema) if isinstance(error, ValidationError) else [],
+                             location=locations(error))
                 return self._tool_failure(LLMErrorCode.TOOL_ARGUMENTS_INVALID)
             validated_calls.append(
                 ValidatedToolCall(
@@ -633,31 +661,26 @@ class ModelOperation:
         assert response is not None
         return self._decode_tool_response(response, attempts, duplicate)
 
-    async def acontinue_tools(self, results: tuple[ToolResult, ...]) -> ToolTurnOutcome:
+    @_recorded_call
+    async def acontinue_tools(
+        self, results: tuple[ToolResult, ...], *, tools: tuple[ToolContract[Any], ...] | None = None,
+        admission_callback: Callable[[InteractionCallIdentity], Awaitable[None]] | None = None,
+        request_stage: Literal["preparation", "transport", "submit_repair"] | None = None,
+    ) -> ToolTurnOutcome:
         self._set_mode("async")
         result_messages = self._validated_result_messages(results)
         if result_messages is None or self._tool_prompt is None:
             return self._tool_failure(LLMErrorCode.INVALID_REQUEST)
+        effective_tools = self._tool_contracts if tools is None else tools
+        definitions, preflight_error = self._prepare_tools(effective_tools)
+        if preflight_error is not None or definitions is None:
+            return self._tool_failure(preflight_error or LLMErrorCode.INVALID_REQUEST)
         candidate_history = tuple(self._private_tool_history) + result_messages
-        gate = check_byte_gate(
-            len(
-                canonical_request_bytes(
-                    profile=self._profile,
-                    prompt=self._tool_prompt,
-                    json_schema=None,
-                    tools=self._tool_definitions,
-                    internal_tool_history=candidate_history,
-                )
-            ),
-            self._profile.max_request_utf8_bytes,
-            self.role,
-        )
+        gate = await self._admit_tools_async(prompt=self._tool_prompt, tools=effective_tools, definitions=definitions,
+            history=candidate_history, admission_callback=admission_callback)
         if gate is not None:
             self.close()
             return LLMInvocationFailure(error=gate)
-        quota_error = await self._claim_semantic_async()
-        if quota_error is not None:
-            return self._tool_failure(quota_error)
         messages = self._continuation_messages(candidate_history)
         response, attempts, duplicate, error = await self._invoke_async(
             lambda: self._provider.ainvoke_tool_continuation(

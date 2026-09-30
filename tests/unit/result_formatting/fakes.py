@@ -181,6 +181,7 @@ async def make_scenario(
     resume: bool = False, transit_only: bool = False, cross_midnight: bool = False,
     zero_route: bool = False, run_id: UUID = RUN_ID,
     budget_total_cny: float | None = 10000.5,
+    transit_instructions: tuple[str, ...] | None = None,
 ) -> Scenario:
     """Persist complete evidence; return request, itinerary, evidence and repository.
 
@@ -319,8 +320,9 @@ async def make_scenario(
     planning_digest = digest("planning-original-request")
     action = await save("planning_action", ItineraryPlanningModelActionArtifact,
                         "itinerary_planning.model_action", WorkflowPhase.ITINERARY_PLANNING, {
-        "schema_version": "4.0", "request_digest": planning_digest, "invocation_index": 0,
-        "prompt_version": "planning-v4", "prompt_hash": digest("synthetic-prompt"),
+        "schema_version": "5.0", "request_digest": planning_digest, "invocation_index": 0,
+        "request_stage": "preparation", "budget_category": "preparation",
+        "prompt_version": "planning-v5", "prompt_hash": digest("synthetic-prompt"),
         "action_kind": "tool_calls", "call_summaries": [{"schema_version": "1.0",
             "call_id": "synthetic-geocode", "ordinal": 0, "tool": "geocode_hub",
             "arguments_fingerprint": digest("arguments"), "handle_count": 0,
@@ -353,17 +355,28 @@ async def make_scenario(
                     *, zero: bool = False) -> dict[str, Any]:
         index = len(direction_refs)
         duration, distance, minutes = (0, 0, 0) if zero else (601, 1201, 30)
+        mode = "walking" if transit_instructions is None else "transit"
+        semantic = "walking" if transit_instructions is None else "public_transit"
+        alternatives = [{"schema_version": "1.0", "alternative_index": 0,
+                         "distance_m": distance, "duration_s": duration, "step_count": 1}]
+        if transit_instructions is not None:
+            alternatives[0]["schema_version"] = "1.1"
+            alternatives[0]["transit_instructions"] = ["未选中方案，不得展示"]
+            alternatives.append({"schema_version": "1.1" if transit_instructions else "1.0", "alternative_index": 1,
+                                 "distance_m": distance, "duration_s": duration,
+                                 "step_count": len(transit_instructions) or 1,
+                                 **({"transit_instructions": list(transit_instructions)} if transit_instructions else {})})
+        selected = len(alternatives) - 1
         direction_refs.append(await save(
             key, ItineraryPlanningDirectionsObservationArtifact, "itinerary_planning.directions_observation",
             WorkflowPhase.ITINERARY_PLANNING, {**base_observation, "leg_ordinal": index,
                 "leg_fingerprint": digest(key), "origin": origin, "destination": destination,
-                "transport_semantic": "walking", "route_mode": "walking", "alternatives_limit": 1,
-                "alternatives": [{"schema_version": "1.0", "alternative_index": 0,
-                                  "distance_m": distance, "duration_s": duration, "step_count": 1}],
+                "transport_semantic": semantic, "route_mode": mode, "alternatives_limit": len(alternatives),
+                "alternatives": alternatives,
                 "provenance": provenance("directions", planning=True)}))
         return {"schema_version": "1.0", "leg_id": key, "origin": origin, "destination": destination,
-                "interval": interval(start, start + timedelta(minutes=minutes)), "transport_semantic": "walking",
-                "route_mode": "walking", "directions_observation_index": index, "alternative_index": 0,
+                "interval": interval(start, start + timedelta(minutes=minutes)), "transport_semantic": semantic,
+                "route_mode": mode, "directions_observation_index": index, "alternative_index": selected,
                 "distance_m": distance, "duration_s": duration, "scheduled_minutes": minutes}
 
     arrival_route = await route("arrival_route", hubs[0], hotel_location,
@@ -432,7 +445,7 @@ async def make_scenario(
                  arrival_transfer=transfers[0], days=plan_days, departure_transfer=transfers[1], upstream_gap_ids=[])
     itinerary_ref = await save("itinerary", ItineraryPlanningArtifact, "itinerary_planning.itinerary",
                                 WorkflowPhase.ITINERARY_PLANNING, {
-        "schema_version": "1.0", "request_digest": digest("planning-resume-request") if resume else planning_digest,
+        "schema_version": "2.0", "request_digest": digest("planning-resume-request") if resume else planning_digest,
         "parent_planning_ref": None, "directories": directories, "record": {
             "schema_version": "1.0", "record_type": "completed", "draft": draft,
             "summary": dict(schema_version="1.0", effective_pace="标准", sightseeing_days=days,
@@ -441,9 +454,11 @@ async def make_scenario(
                 dinner_count=0 if transit_only else days, unique_main_candidates=0 if transit_only else 2 * days + 1,
                 boundary_transfers=2, route_legs=len(direction_refs), backups=0 if transit_only else 3 * days,
                 unknown_hours=0 if transit_only else 6 * days - 1),
-            "budgets": dict(schema_version="1.0", iteration_limit=6, iterations_consumed=1,
+            "budgets": dict(schema_version="2.0", preparation_limit=2, preparation_used=1, transport_limit=5, transport_used=0,
+                submit_repair_limit=5, submit_repair_used=0, supplement_request_limit=5, supplement_request_used=0,
+                model_invocation_limit=17, model_invocations_consumed=1,
                 direction_call_limit=8 * days + 2, direction_calls_consumed=len(direction_refs),
-                budget_snapshot_complete=True, semantic_invocation_limit=12, semantic_invocations_consumed=1,
+                budget_snapshot_complete=True, semantic_invocation_limit=17, semantic_invocations_consumed=1,
                 known_provider_attempts=1, provider_attempts_complete=True, known_usage=ZERO_USAGE,
                 usage_complete=True, cache_hits=0)},
     })
@@ -453,7 +468,7 @@ async def make_scenario(
         requirement_outcome=confirmed, artifact_refs=(itinerary_ref,))
     from app.result_formatting import ResultFormattingRequest
 
-    request = ResultFormattingRequest(schema_version="1.0", state=state, itinerary_ref=itinerary_ref)
+    request = ResultFormattingRequest(schema_version='2.0', state=state, itinerary_ref=itinerary_ref)
     return Scenario(request=request, itinerary=evidence[itinerary_ref.artifact_id].content,
                     evidence=evidence, repository=repository, refs=refs)
 
@@ -466,13 +481,13 @@ async def replace_itinerary(scenario: Scenario, payload: dict[str, Any],
         operation_id=OperationId(run_id=scenario.request.state.run_id,
                                  phase=WorkflowPhase.ITINERARY_PLANNING,
                                  logical_step=logical_step),
-        artifact_type="itinerary_planning.itinerary", schema_version="1.0", content=tree(artifact),
+        artifact_type="itinerary_planning.itinerary", schema_version="2.0", content=tree(artifact),
     ))
     read = await scenario.repository.get(ref, expected_model=ItineraryPlanningArtifact)
     state = TravelSessionState.model_validate(
         {**scenario.request.state.model_dump(mode="python"), "artifact_refs": (ref,)}, strict=True,
     )
-    request = type(scenario.request)(schema_version="1.0", state=state, itinerary_ref=ref)
+    request = type(scenario.request)(schema_version="2.0", state=state, itinerary_ref=ref)
     return replace(scenario, request=request, itinerary=read.content,
                    evidence={**scenario.evidence, ref.artifact_id: read},
                    refs={**scenario.refs, "itinerary": ref})
@@ -553,4 +568,4 @@ def make_read_request(scenario: Scenario, index_ref: ArtifactRef, *, include_sou
         **scenario.request.state.model_dump(mode="python"),
         "phase": WorkflowPhase.OUTPUT_FORMATTING, "artifact_refs": refs,
     }, strict=True)
-    return ResultReadRequest(schema_version="1.0", state=state, index_ref=index_ref)
+    return ResultReadRequest(schema_version='2.0', state=state, index_ref=index_ref)

@@ -13,10 +13,10 @@ from tests.unit.result_formatting.fakes import make_confirmed
 def test_plans_use_shared_limits_and_unique_call_names(days):
     run_id = uuid4()
     assert len(hotel_plan(run_id).search_operation_ids) == 3
-    for consumed in (0, 5, 6):
+    for consumed in (0, 5, 17):
         plan = planning_plan(run_id, days, 2, consumed, 1)
-        assert tuple(s.invocation_slot_index for s in plan.iteration_slots) == tuple(range(consumed, 6))
-        assert len(plan.matrix_operation_ids) == (6 - consumed) * days
+        assert tuple(s.invocation_slot_index for s in plan.invocation_slots) == tuple(range(consumed, 17))
+        assert len(plan.matrix_operation_ids) == (17 - consumed) * days
         assert len(plan.direction_operation_ids) == 1
         assert plan == planning_plan(run_id, days, 2, consumed, 1)
     assert planning_plan(run_id, days, 0).terminal_successor_operation_id != planning_plan(run_id, days, 1).terminal_successor_operation_id
@@ -38,7 +38,7 @@ async def test_budget_provider_preserves_run_and_phase_amounts():
         "requirement_outcome": transition.outcome,
     }, strict=True)
     days = confirmed.requirement_outcome.requirement.time_window.sightseeing_days
-    for phase, expected in zip(BUDGETED_PHASES[1:], ((3,), (6, 48), (6, days * 8 + 2), (days + 1,))):
+    for phase, expected in zip(BUDGETED_PHASES[1:], ((3,), (6, 48), (17, days * 8 + 2), (days + 1,))):
         plan = provider.plan_for_phase(run_id=state.run_id, phase=phase, state=confirmed.model_copy(update={"phase": phase}))
         assert tuple(item.limit for item in plan.limits) == expected
     with pytest.raises(DemoWorkflowUsageError):

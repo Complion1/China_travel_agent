@@ -32,7 +32,7 @@ DEMO_TERMINAL_REGISTRATIONS = BASE_TERMINAL_CODE_REGISTRATIONS + tuple(
 
 class DemoControlArtifact(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     sequence: Annotated[int, Field(ge=0, le=31)]
     previous_ref: ArtifactRef | None
     hotel_invalid_count: Annotated[int, Field(ge=0, le=3)]
@@ -59,7 +59,7 @@ class DemoControlArtifact(BaseModel):
             raise ValueError("invalid control predecessor")
         if self.previous_ref is not None and (
             self.previous_ref.artifact_type != "demo.control"
-            or self.previous_ref.schema_version != "1.0"
+            or self.previous_ref.schema_version != "2.0"
             or self.previous_ref.operation_id.logical_step != f"control_{self.sequence - 1:02d}"
         ):
             raise ValueError("invalid control predecessor")
@@ -79,7 +79,7 @@ class DemoControlArtifact(BaseModel):
             (self.candidate_set_ref, "candidate_research.candidate_set", WorkflowPhase.CANDIDATE_RESEARCH),
             (self.planning_ref, "itinerary_planning.itinerary", WorkflowPhase.ITINERARY_PLANNING),
         ):
-            if ref is not None and (ref.artifact_type != artifact_type or ref.schema_version != "1.0" or ref.operation_id.phase is not phase):
+            if ref is not None and (ref.artifact_type != artifact_type or ref.schema_version != ("2.0" if artifact_type == "itinerary_planning.itinerary" else "1.0") or ref.operation_id.phase is not phase):
                 raise ValueError("upstream reference contract mismatch")
         refs = tuple(ref for ref in (self.previous_ref, self.hotel_candidate_ref,
             self.hotel_selection_ref, self.candidate_set_ref, self.planning_ref) if ref is not None)
@@ -89,5 +89,5 @@ class DemoControlArtifact(BaseModel):
 
 
 DEMO_ARTIFACT_REGISTRATIONS = (
-    ArtifactSchemaRegistration(artifact_type="demo.control", schema_version="1.0", model=DemoControlArtifact),
+    ArtifactSchemaRegistration(artifact_type="demo.control", schema_version="2.0", model=DemoControlArtifact),
 )

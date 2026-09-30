@@ -188,7 +188,7 @@ async def test_load_rechecks_saved_index_semantics_and_explicit_state_membership
 @pytest.mark.asyncio
 async def test_unknown_result_schema_is_rejected_before_get_but_invalid_template_uses_registry(scenario):
     _, _, index, index_ref = await saved_bundle(scenario)
-    unknown = parsed(ArtifactRef, {**tree(index_ref), "schema_version": "2.0"})
+    unknown = parsed(ArtifactRef, {**tree(index_ref), "schema_version": "3.0"})
     repository = RecordingReadRepository(scenario.repository)
     service = ResultFormattingService(artifact_repository=repository)
     assert_failed(await service.load(make_read_request(scenario, unknown)), "unsupported_result_version")
@@ -226,10 +226,10 @@ async def test_input_business_preconditions_fail_before_io(scenario, invalid):
             "delivery_status": DeliveryStatus.AWAITING_USER}, strict=True)
         expected = "input_not_ready"
     else:
-        ref = parsed(ArtifactRef, {**tree(ref), "schema_version": "2.0"})
+        ref = parsed(ArtifactRef, {**tree(ref), "schema_version": "3.0"})
         state = TravelSessionState.model_validate({**state.model_dump(mode="python"), "artifact_refs": (ref,)}, strict=True)
         expected = "artifact_contract_error"
-    request = ResultFormattingRequest(schema_version="1.0", state=state, itinerary_ref=ref)
+    request = ResultFormattingRequest(schema_version='2.0', state=state, itinerary_ref=ref)
     repository = RecordingReadRepository(scenario.repository)
     assert_failed(await ResultFormattingService(artifact_repository=repository).prepare(request), expected)
     assert repository.get_calls == []

@@ -9,6 +9,7 @@ from app.llm_runtime import (
     ModelOperation,
     PromptEnvelope,
     StructuredInvocationSuccess,
+    interaction_call,
 )
 from app.requirements import (
     ExtractionAttemptOutcome,
@@ -103,10 +104,11 @@ class DeepSeekRequirementExtractionSession:
         attempt_kind: Literal["extract", "repair"],
         semantic_call_number: Literal[1, 2],
     ) -> ExtractionAttemptOutcome:
-        outcome = await self._operation.ainvoke_structured(
-            prompt,
-            StrictRequirementPatchDTO,
-        )
+        with interaction_call(attempt_kind):
+            outcome = await self._operation.ainvoke_structured(
+                prompt,
+                StrictRequirementPatchDTO,
+            )
         final_state: _SessionState = (
             "repair_available" if attempt_kind == "extract" else "repair_finished"
         )

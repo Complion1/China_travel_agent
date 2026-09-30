@@ -68,7 +68,7 @@ class TestProfiles:
         expected = {
             ModelRole.REQUIREMENT_EXTRACTION: (32_768, 2, 32_768),
             ModelRole.CANDIDATE_RESEARCH: (32_768, 12, 262_144),
-            ModelRole.ITINERARY_PLANNING: (49_152, 12, 2_097_152),
+            ModelRole.ITINERARY_PLANNING: (49_152, 17, 2_097_152),
             ModelRole.REPLANNING: (32_768, 8, 262_144),
         }
         for role, (output_tokens, semantic_limit, request_bytes) in expected.items():

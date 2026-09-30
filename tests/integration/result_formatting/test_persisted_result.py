@@ -19,10 +19,12 @@ from tests.unit.result_formatting.fakes import (
 
 
 @pytest.mark.asyncio
-async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory, database_snapshot):
-    run_id = UUID("12000000-0000-4000-8000-00000000c101")
+@pytest.mark.parametrize("with_transit_steps", [False, True])
+async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory, database_snapshot, with_transit_steps):
+    run_id = UUID("12000000-0000-4000-8000-00000000c111" if with_transit_steps else "12000000-0000-4000-8000-00000000c101")
     runtime = await runtime_factory()
-    scenario = await make_scenario(repository=runtime.repository, days=3, run_id=run_id)
+    instructions = ("步行到合成甲站", "乘坐合成1号线至乙站", "换乘合成20路至丙站") if with_transit_steps else None
+    scenario = await make_scenario(repository=runtime.repository, days=3, run_id=run_id, transit_instructions=instructions)
     service = ResultFormattingService(artifact_repository=runtime.repository)
     prepared = await service.prepare(scenario.request)
     assert type(prepared) is ResultFormattingPrepared
@@ -33,6 +35,9 @@ async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory
     request_json = make_read_request(scenario, index_ref).model_dump_json()
     first = await service.load(ResultReadRequest.model_validate_json(request_json, strict=True))
     assert type(first) is ResultFormattingLoaded
+    if with_transit_steps:
+        assert "1. 步行到合成甲站\n  2. 乘坐合成1号线至乙站\n  3. 换乘合成20路至丙站" in first.markdown
+        assert "未选中方案" not in first.markdown
     before_manifest = result_manifest(first, mode="reopen")
     original_bytes = (checked_canonical(first.index, first.index_ref), *(
         checked_canonical(day, entry.ref) for day, entry in zip(first.days, first.index.days, strict=True)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from .artifacts import ResultCore, ResultDayData, ResultInterval, ResultPlace, ResultRoute, ResultVisit
+from .artifacts import ResultCore, ResultDayData, ResultInterval, ResultPlace, ResultRoute, ResultTransitRoute, ResultVisit
 from .errors import ResultFormattingFailureCode as Code
 from .projection import ProjectionFailure
 
@@ -95,10 +95,14 @@ def _place_map(core: ResultCore) -> dict[int, ResultPlace]:
 def _route_line(route: ResultRoute, places: dict[int, ResultPlace]) -> str:
     origin = _escape(places[route.origin_place_id].name)
     destination = _escape(places[route.destination_place_id].name)
-    return (f"- {_interval(route.interval)}｜交通：{origin} → {destination}；"
+    summary = (f"- {_interval(route.interval)}｜交通：{origin} → {destination}；"
             f"{_TRANSPORT[route.transport_semantic]}；{route.distance_m} 米；"
             f"{_duration(route.duration_s)}（百度获取时路线估算）〔来源 {route.source_id}〕；"
             f"日程预留 {route.scheduled_minutes} 分钟；费用未核验。")
+    if not isinstance(route, ResultTransitRoute):
+        return summary
+    steps = "\n".join(f"  {index}. {_escape(instruction)}" for index, instruction in enumerate(route.transit_instructions, 1))
+    return summary + "\n\n  乘车顺序（查询时路线说明，班次与实时运营未核验）：\n\n" + steps
 
 
 def _business(place: ResultPlace, state: str, business_source_ids: tuple[int, ...]) -> str:

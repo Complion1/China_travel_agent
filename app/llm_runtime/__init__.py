@@ -14,3 +14,7 @@ from app.llm_runtime.settings import load_project_env, load_settings, DeepSeekSe
 from app.llm_runtime.protocols import ProviderAdapter, Sleeper
 from app.llm_runtime.runtime import DeepSeekRuntime, ModelOperation
 from app.llm_runtime.probe import run_capability_probe
+from app.llm_runtime.interaction_recording import (
+    InteractionRecord, InteractionRecorder, InteractionWriteResult,
+    InteractionCallIdentity, interaction_run_context, interaction_call,
+)

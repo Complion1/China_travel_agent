@@ -56,7 +56,7 @@ def day_node(nodes, number):
         await cap.ensure_phase_budget(state=state)
         control, _ = await nodes.control(state, cap)
         prepared = await ResultFormattingService(artifact_repository=cap.read_only_artifact_repository).prepare(
-            ResultFormattingRequest(schema_version="1.0", state=state, itinerary_ref=control.planning_ref))
+            ResultFormattingRequest(schema_version="2.0", state=state, itinerary_ref=control.planning_ref))
         if type(prepared) is ResultFormattingFailed:
             return formatting_failure(state, prepared)
         if type(prepared) is not ResultFormattingPrepared or len(prepared.days) != days_for(state):
@@ -80,7 +80,7 @@ def index_node(nodes):
         except KeyError:
             raise DurableExecutionStateError() from None
         result = await ResultFormattingService(artifact_repository=cap.read_only_artifact_repository).build_index(
-            ResultFormattingRequest(schema_version="1.0", state=state, itinerary_ref=control.planning_ref), day_refs=day_refs)
+            ResultFormattingRequest(schema_version="2.0", state=state, itinerary_ref=control.planning_ref), day_refs=day_refs)
         if type(result) is ResultFormattingFailed:
             return formatting_failure(state, result)
         if type(result) is not ResultIndexReady:

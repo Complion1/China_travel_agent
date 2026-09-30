@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
+from app.llm_runtime import InteractionRecorder
 from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
@@ -99,6 +100,7 @@ class DemoWorkflowDependencies:
     diagnostics: DemoDiagnostics
     durable_limits: DurableExecutionLimits
     artifact_limits: ArtifactRepositoryLimits
+    interaction_recorder: InteractionRecorder | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "durable_limits", fresh(self.durable_limits, DurableExecutionLimits))

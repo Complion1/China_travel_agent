@@ -60,7 +60,7 @@ from app.itinerary_planning import (
     ItineraryPlanningOperationPlan,
     ItineraryPlanningService,
     PlanningFailureCode,
-    PlanningIterationOperationIds,
+    PlanningInvocationOperationIds,
     PlanningStopReason,
     PlanningTool,
     ItineraryPlanningUsageError,
@@ -72,7 +72,7 @@ from app.itinerary_planning.models import (
     ItineraryDraft,
     PlanningDayKind,
     ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
-    ITINERARY_PLANNING_ITERATION_BUDGET_KEY,
+    ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY,
     ProposedBoundaryTransfer,
     ProposedDayPlan,
     ProposedDailyTimeRule,
@@ -147,7 +147,7 @@ UTC_NOW = datetime(2026, 9, 3, tzinfo=timezone.utc)
 
 def _ref(run_id: UUID, artifact_type: str, phase: WorkflowPhase, step: str, content: str = "d") -> ArtifactRef:
     return ArtifactRef(
-        artifact_id=uuid4(), artifact_type=artifact_type, schema_version="1.0",
+        artifact_id=uuid4(), artifact_type=artifact_type, schema_version="2.0" if artifact_type == "itinerary_planning.itinerary" else "1.0",
         content_hash="sha256:" + content * 64,
         operation_id=OperationId(run_id=run_id, phase=phase, logical_step=step.replace("-", "_")),
         created_at=UTC_NOW, size_bytes=1,
@@ -266,10 +266,10 @@ def _upstream(run_id: UUID) -> tuple[ArtifactRef, ArtifactRef, HotelSelectionArt
     return hotel_ref, candidate_ref, hotel, candidate_artifact
 
 
-def _plan(run_id: UUID, *, suffix: str = "initial", slots: tuple[int, ...] = (0, 1, 2, 3, 4, 5)) -> ItineraryPlanningOperationPlan:
+def _plan(run_id: UUID, *, suffix: str = "initial", slots: tuple[int, ...] = tuple(range(17))) -> ItineraryPlanningOperationPlan:
     phase = WorkflowPhase.ITINERARY_PLANNING
-    iteration_slots = tuple(
-        PlanningIterationOperationIds(
+    invocation_slots = tuple(
+        PlanningInvocationOperationIds(
             invocation_slot_index=index,
             action_operation_id=OperationId(run_id=run_id, phase=phase, logical_step=f"{suffix}_action_{index}"),
             planning_state_operation_id=OperationId(run_id=run_id, phase=phase, logical_step=f"{suffix}_state_{index}"),
@@ -277,9 +277,9 @@ def _plan(run_id: UUID, *, suffix: str = "initial", slots: tuple[int, ...] = (0,
         for index in slots
     )
     return ItineraryPlanningOperationPlan(
-        run_id=run_id, iteration_slots=iteration_slots, hub_geocode_operation_ids=(), matrix_operation_ids=(),
+        run_id=run_id, invocation_slots=invocation_slots,
+        hub_geocode_operation_ids=tuple(OperationId(run_id=run_id, phase=phase, logical_step=f"{suffix}_hub_{i}") for i in range(2)), matrix_operation_ids=(),
         direction_operation_ids=(),
-        terminal_action_operation_id=OperationId(run_id=run_id, phase=phase, logical_step=f"{suffix}_terminal_action"),
         terminal_successor_operation_id=OperationId(run_id=run_id, phase=phase, logical_step=f"{suffix}_terminal"),
     )
 
@@ -298,10 +298,17 @@ def _fixture(*responses: object):
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel)
     repository.seed(candidate_ref, candidate)
+    responses = list(responses)
+    if responses and isinstance(responses[0], ToolCallsReady) and any(call.tool_name in {"calculate_route_matrix", "plan_directions", "submit_itinerary"} for call in responses[0].calls):
+        from app.itinerary_planning.models import GeocodeHubArgs
+        responses.insert(0, ToolCallsReady(calls=tuple(ValidatedToolCall(call_id=f"prepare-{endpoint}", tool_name="geocode_hub",
+            arguments=GeocodeHubArgs(endpoint_kind=endpoint)) for endpoint in ("arrival", "departure")), metadata=_metadata()))
     operation = FakeModelOperation(responses)
     runtime = FakeRuntime(operation)
     service = ItineraryPlanningService(
-        runtime=runtime, map_adapter=FakeMapAdapter(), artifact_repository=repository,
+        runtime=runtime, map_adapter=FakeMapAdapter(geocode_factory=lambda _: GeocodeSuccess(
+            result=GeocodeCandidate(formatted_address="合成测试枢纽", coordinate=BaiduCoordinate(latitude=31.2, longitude=121.5), confidence=0.98),
+            provenance=map_provenance(MapCapability.GEOCODING))), artifact_repository=repository,
         budget_manager=make_planning_budget_manager(run_id),
     )
     request = ItineraryPlanningInitialRequest(
@@ -666,7 +673,7 @@ async def test_empty_tool_calls_are_failed_with_replayable_terminal_artifact() -
 
     assert result.outcome_type == "failed"
     assert result.failure.code is PlanningFailureCode.MODEL_CONTRACT_INVALID
-    assert result.budgets is not None and result.budgets.iterations_consumed == 0
+    assert result.budgets is not None and result.budgets.model_invocations_consumed == 1
     terminal = [item for item in repository.put_requests if item.artifact_type == "itinerary_planning.itinerary"]
     assert terminal
     replay = await service.plan_initial(request)
@@ -674,7 +681,7 @@ async def test_empty_tool_calls_are_failed_with_replayable_terminal_artifact() -
 
 
 @pytest.mark.asyncio
-async def test_six_business_cycles_use_terminal_only_once() -> None:
+async def test_preparation_cap_stops_when_hubs_remain_unresolved() -> None:
     responses = [
         ToolCallsReady(
             calls=(ValidatedToolCall(
@@ -691,10 +698,10 @@ async def test_six_business_cycles_use_terminal_only_once() -> None:
     result = await service.plan_initial(request)
 
     assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
-    assert result.stop_reasons == (PlanningStopReason.NO_PROGRESS,)
-    assert result.budgets.iterations_consumed == 3
-    assert operation.call_count == 3
-    assert len(operation.continuations) == 2
+    assert result.stop_reasons == (PlanningStopReason.ITERATION_LIMIT_REACHED,)
+    assert result.budgets.model_invocations_consumed == 2
+    assert operation.call_count == 2
+    assert len(operation.continuations) == 1
 
 
 @pytest.mark.asyncio
@@ -751,7 +758,7 @@ async def test_service_dispatches_matrix_and_directions_then_persists_both_obser
     result = await service.plan_initial(request)
 
     assert isinstance(result, ItineraryPlanningIncomplete), f"{type(result).__name__}: {result.failure.model_dump(mode='json')}"
-    assert len(operation.continuations) == 2
+    assert len(operation.continuations) == 3
     for continuation in operation.continuations:
         payloads = tuple(json.loads(item.content) for item in continuation)
         assert all("planning_context" not in payload for payload in payloads)
@@ -1030,7 +1037,8 @@ async def test_public_initial_accepts_cross_midnight_hotel_closure_and_marks_nex
 
 
 @pytest.mark.asyncio
-async def test_invalid_submit_is_rejected_as_business_feedback_and_consumes_one_iteration() -> None:
+@pytest.mark.parametrize("terminal_only", (False,))
+async def test_invalid_submit_is_rejected_as_business_feedback_and_consumes_one_iteration(terminal_only, caplog, monkeypatch) -> None:
     shanghai = ZoneInfo("Asia/Shanghai")
     route = ProposedRouteLeg(
         leg_id="invalid-leg",
@@ -1063,8 +1071,15 @@ async def test_invalid_submit_is_rejected_as_business_feedback_and_consumes_one_
     result = await service.plan_initial(request)
 
     assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
-    assert result.budgets.iterations_consumed == 1
-    assert operation.call_count == 2
+    assert result.budgets.model_invocations_consumed == 3
+    assert operation.call_count == 3
+    diagnostic = next(json.loads(r.message) for r in caplog.records if r.name == "app.error_location" and json.loads(r.message)["event"] == "planning_submit_rejected")
+    assert diagnostic["budget_category"] == "submit_repair"
+    assert diagnostic["reason"] == "proposal_structure_or_reference_invalid"
+    assert diagnostic["field"] == "draft"
+    assert diagnostic["run_id"] == str(request.operation_plan.run_id)
+    assert diagnostic["location"]
+    assert "空白日" not in caplog.text and "hotel-handle" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1210,7 +1225,7 @@ async def test_service_rejects_transit_only_day_without_actual_boundary_transfer
     assert isinstance(first, ItineraryPlanningIncomplete), first.model_dump(mode="json")
     assert second == first
     assert first.itinerary_ref is None
-    assert first.budgets.iterations_consumed == 3
+    assert first.budgets.model_invocations_consumed == 4
     assert operation.call_count == 4
     assert all(item.day_kind is not PlanningDayKind.TRANSIT_ONLY for item in first.gaps if hasattr(item, "day_kind"))
 
@@ -1305,7 +1320,7 @@ _R16_POLICY_CASES = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ("supported", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
+@pytest.mark.parametrize("case", ("supported", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
 async def test_service_completed_requires_main_plan_and_valid_optional_backups(case: str) -> None:
     service, request, _, operation, repository = _fixture()
     if case == "must_valid":
@@ -1682,6 +1697,14 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         departure_transfer=ProposedBoundaryTransfer(transfer_kind="departure", hub_handle="hub-location-departure", hotel_handle="hotel-handle", route_leg=route_values[5]),
         upstream_gap_ids=(),
     )
+    if case == "derived_route_times":
+        def derived(leg):
+            return leg.model_copy(update={"end_at": None})
+        proposal = proposal.model_copy(update={
+            "arrival_transfer": proposal.arrival_transfer.model_copy(update={"route_leg": derived(proposal.arrival_transfer.route_leg)}),
+            "departure_transfer": proposal.departure_transfer.model_copy(update={"route_leg": derived(proposal.departure_transfer.route_leg)}),
+            "days": tuple(day.model_copy(update={"route_legs": tuple(derived(leg) for leg in day.route_legs)}) for day in proposal.days),
+        })
     submit = SubmitItineraryArgs(effective_policy=ProposedEffectivePlanningPolicy(effective_pace=TravelPace.RELAXED, daily_time_rules=(), time_sensitive_must=(), transport_rules=()), draft=proposal)
     if case in _R12_ANCHOR_CASES:
         source, source_handle, _, anchor_hour, anchor_minute = _R12_ANCHOR_CASES[case]
@@ -1855,6 +1878,13 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         submit_responses = [
             ToolCallsReady(calls=(ValidatedToolCall(call_id="bad_backup_slots", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=bad_submit),), metadata=_metadata()),
             ToolCallsReady(calls=(ValidatedToolCall(call_id="corrected_backup_slots", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=submit),), metadata=_metadata()),
+        ]
+    if case == "route_end_mismatch_repair":
+        wrong = proposal.arrival_transfer.route_leg.model_copy(update={"end_at": proposal.arrival_transfer.route_leg.end_at + timedelta(minutes=30)})
+        bad = submit.model_copy(update={"draft": proposal.model_copy(update={"arrival_transfer": proposal.arrival_transfer.model_copy(update={"route_leg": wrong})})})
+        submit_responses = [
+            ToolCallsReady(calls=(ValidatedToolCall(call_id="wrong_end", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=bad),), metadata=_metadata()),
+            ToolCallsReady(calls=(ValidatedToolCall(call_id="fixed_end", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=submit),), metadata=_metadata()),
         ]
     if case == "route_rebind_repair":
         mismatched_arrival = proposal.arrival_transfer.model_copy(update={
@@ -2066,14 +2096,14 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             "content_hash": "sha256:" + hashlib.sha256(encoded).hexdigest(), "size_bytes": len(encoded)})
         repository.seed(successor_ref, successor)
         resume_plan = _plan(base.run_id, suffix="preserve_resume")
-        resume_plan = resume_plan.model_copy(update={"iteration_slots": resume_plan.iteration_slots[run.iterations:]})
+        resume_plan = resume_plan.model_copy(update={"invocation_slots": resume_plan.invocation_slots[run.invocation_count:]})
         resume = ItineraryPlanningResumeRequest(predecessor_planning_ref=awaiting.planning_ref,
             supplemented_candidate_set_ref=successor_ref, supplemental_operation_plan=actual_plan, operation_plan=resume_plan)
         operation.responses.append(ToolTurnCompleted(final_text="结束", metadata=_metadata()))
         resumed = await service.plan_resume(resume)
         assert isinstance(resumed, ItineraryPlanningIncomplete), resumed.model_dump(mode="json")
         assert run.map_executor.cache is cache
-        assert run.iterations == saved.budgets.iterations_consumed
+        assert run.invocation_count == saved.budgets.model_invocations_consumed + 1
         assert operation.call_count == 6
         assert len(service._map_adapter.directions_calls) == 6
         for spec, observation in zip(route_specs, cached_routes, strict=True):
@@ -2097,7 +2127,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         assert isinstance(result, ItineraryPlanningCompleted)
         assert replay == result
         assert result.summary.backups == (0 if case == "missing_backups" else 1)
-        assert result.budgets.iterations_consumed == 3
+        assert result.budgets.model_invocations_consumed == 4
         assert operation.call_count == 4
         assert len(service._map_adapter.directions_calls) == 6
         assert service._runs[base.run_id].pending_gaps == []
@@ -2140,7 +2170,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         assert isinstance(result, ItineraryPlanningCompleted if expected else ItineraryPlanningIncomplete), result.model_dump(mode="json")
         assert replay == result
         assert operation.call_count == (4 if expected else 5)
-        assert result.budgets.iterations_consumed == (3 if expected else 4)
+        assert result.budgets.model_invocations_consumed == (4 if expected else 5)
         assert result.budgets.direction_calls_consumed == 6
         assert len(service._map_adapter.directions_calls) == 6
         terminal_ref = repository.refs[request.operation_plan.terminal_successor_operation_id]
@@ -2217,13 +2247,13 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
             assert result.itinerary_ref is None
             assert result.stop_reasons == (PlanningStopReason.NO_TERMINAL_SUBMISSION,)
-            assert result.budgets.iterations_consumed == 4
+            assert result.budgets.model_invocations_consumed == 5
             assert result.budgets.semantic_invocations_consumed == 5
             assert result.budgets.direction_calls_consumed == 6
             assert operation.call_count == 5
             assert len(operation.continuations) == 4
             feedback = json.loads(operation.continuations[-1][0].content)
-            assert feedback["tool_result"] == {"status": "rejected", "code": "policy_rejected"}
+            assert feedback["tool_result"] == {"status": "rejected", "code": "policy_rejected", "reason": "structured_demo_deferred_policy_rule_rejected", "field": "effective_policy"}
             terminal_ref = repository.refs[request.operation_plan.terminal_successor_operation_id]
             persisted = (await repository.get(terminal_ref, expected_model=ItineraryPlanningArtifact)).content.record
             assert persisted.record_type == "incomplete"
@@ -2300,18 +2330,20 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             if json.loads(item.content).get("tool_result", {}).get("status") == "rejected"
         ]
         expected_rejections = 1 if case in {"r14_f01_relaxed_delete_anchor", "r14_keep_policy_continue"} else 2
-        assert feedback == [{"status": "rejected", "code": "policy_rejected"}] * expected_rejections
+        assert len(feedback) == expected_rejections
+        assert all(item["status"] == "rejected" and item["code"] == "policy_rejected" for item in feedback)
+        assert all(item["reason"] in {"structured_demo_deferred_policy_rule_rejected", "locked_policy_rejected", "pace_conflicts_with_requirement"} and item["field"] in {"draft", "effective_policy"} for item in feedback)
         expected_calls = 5 if case in {"r14_f01_relaxed_delete_anchor", "r14_keep_policy_continue"} else 6
         expected_iterations = 4 if case == "r14_keep_policy_continue" else 5
         assert operation.call_count == expected_calls
-        assert result.budgets.iterations_consumed == expected_iterations
+        assert result.budgets.model_invocations_consumed == expected_calls
         assert result.budgets.semantic_invocations_consumed == expected_calls
         assert result.budgets.direction_calls_consumed == 6
         before_counts = (
             operation.call_count,
             len(operation.continuations),
             len(repository.put_requests),
-            result.budgets.iterations_consumed,
+            result.budgets.model_invocations_consumed,
             result.budgets.semantic_invocations_consumed,
             result.budgets.direction_calls_consumed,
         )
@@ -2321,7 +2353,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             operation.call_count,
             len(operation.continuations),
             len(repository.put_requests),
-            replay.budgets.iterations_consumed,
+            replay.budgets.model_invocations_consumed,
             replay.budgets.semantic_invocations_consumed,
             replay.budgets.direction_calls_consumed,
         ) == before_counts
@@ -2384,7 +2416,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             assert persisted.draft is None
             assert operation.call_count == 5
             assert len(operation.continuations) == 4
-            assert result.budgets.iterations_consumed == 5
+            assert result.budgets.model_invocations_consumed == 5
             assert result.budgets.semantic_invocations_consumed == 5
             assert result.budgets.direction_calls_consumed == 6
         elif case == "r15_f02_supplement_evidence":
@@ -2393,7 +2425,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             assert persisted.draft is None
             assert operation.call_count == 4
             assert len(operation.continuations) == 3
-            assert result.budgets.iterations_consumed == 3
+            assert result.budgets.model_invocations_consumed == 4
             assert result.budgets.semantic_invocations_consumed == 4
             assert result.budgets.direction_calls_consumed == 6
         else:
@@ -2404,7 +2436,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             assert persisted.draft.days[0].backups == ()
             assert operation.call_count == 5
             assert len(operation.continuations) == 4
-            assert result.budgets.iterations_consumed == 4
+            assert result.budgets.model_invocations_consumed == 5
             assert result.budgets.semantic_invocations_consumed == 5
             assert result.budgets.direction_calls_consumed == 6
         return
@@ -2416,23 +2448,23 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         persisted = (await repository.get(terminal_ref, expected_model=ItineraryPlanningArtifact)).content.record
         assert replay == result
         expected_counts = {
-            "r16_pace_match_submit": (4, 3, 17, 6, 3, 4, 6),
-            "r16_pace_conflict_submit": (5, 4, 19, 6, 4, 5, 6),
-            "r16_pace_match_supplement": (4, 3, 17, 6, 3, 4, 6),
-            "r16_pace_conflict_supplement": (4, 3, 17, 6, 3, 4, 6),
-            "r16_daily_source_missing_submit": (5, 4, 19, 6, 4, 5, 6),
-            "r16_daily_source_missing_supplement": (4, 3, 17, 6, 3, 4, 6),
-            "r16_transport_source_missing_submit": (5, 4, 19, 6, 4, 5, 6),
-            "r16_transport_source_missing_supplement": (4, 3, 17, 6, 3, 4, 6),
-            "r16_daily_source_valid_submit": (4, 3, 17, 6, 3, 4, 6),
-            "r16_transport_source_valid_submit": (4, 3, 17, 6, 3, 4, 6),
+            "r16_pace_match_submit": (4, 3, 17, 6, 4, 4, 6),
+            "r16_pace_conflict_submit": (5, 4, 19, 6, 5, 5, 6),
+            "r16_pace_match_supplement": (4, 3, 17, 6, 4, 4, 6),
+            "r16_pace_conflict_supplement": (4, 3, 17, 6, 4, 4, 6),
+            "r16_daily_source_missing_submit": (5, 4, 19, 6, 5, 5, 6),
+            "r16_daily_source_missing_supplement": (4, 3, 17, 6, 4, 4, 6),
+            "r16_transport_source_missing_submit": (5, 4, 19, 6, 5, 5, 6),
+            "r16_transport_source_missing_supplement": (4, 3, 17, 6, 4, 4, 6),
+            "r16_daily_source_valid_submit": (4, 3, 17, 6, 4, 4, 6),
+            "r16_transport_source_valid_submit": (4, 3, 17, 6, 4, 4, 6),
         }
         assert (
             operation.call_count,
             len(operation.continuations),
             len(repository.put_requests),
             len(service._map_adapter.directions_calls),
-            result.budgets.iterations_consumed,
+            result.budgets.model_invocations_consumed,
             result.budgets.semantic_invocations_consumed,
             result.budgets.direction_calls_consumed,
         ) == expected_counts[case]
@@ -2447,7 +2479,11 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             "r16_pace_conflict_submit", "r16_daily_source_missing_submit",
             "r16_transport_source_missing_submit",
         }
-        assert feedback == ([{"status": "rejected", "code": "policy_rejected"}] if expected_rejected else [])
+        assert len(feedback) == int(expected_rejected)
+        if feedback:
+            assert feedback[0]["status"] == "rejected" and feedback[0]["code"] == "policy_rejected"
+            assert feedback[0]["reason"] in {"pace_conflicts_with_requirement", "policy_source_unconfirmed"}
+            assert feedback[0]["field"] == "effective_policy"
 
         if case == "r16_pace_match_supplement":
             assert isinstance(result, ItineraryPlanningCandidateSupplementRequested), result.model_dump(mode="json")
@@ -2456,7 +2492,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             assert persisted.state.effective_policy is not None
             assert persisted.state.effective_policy.effective_pace == TravelPace.RELAXED.value
             assert persisted.state.draft is None
-            assert result.budgets.iterations_consumed == 3
+            assert result.budgets.model_invocations_consumed == 4
             assert result.budgets.semantic_invocations_consumed == 4
             assert operation.call_count == 4
         elif case.endswith("_supplement"):
@@ -2472,7 +2508,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
                 and write.content["record"]["record_type"] == "in_progress"
             ]
             assert states and all(state["effective_policy"] is None for state in states)
-            assert result.budgets.iterations_consumed == 3
+            assert result.budgets.model_invocations_consumed == 4
             assert result.budgets.semantic_invocations_consumed == 4
             assert operation.call_count == 4
         elif case == "r16_pace_conflict_submit":
@@ -2481,7 +2517,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             assert result.itinerary_ref == terminal_ref
             assert persisted.draft is not None
             assert persisted.draft.effective_policy.effective_pace is TravelPace.RELAXED
-            assert result.budgets.iterations_consumed == 4
+            assert result.budgets.model_invocations_consumed == 5
             assert result.budgets.semantic_invocations_consumed == 5
             assert operation.call_count == 5
         elif case.endswith("_missing_submit"):
@@ -2497,7 +2533,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
                 and write.content["record"]["record_type"] == "in_progress"
             ]
             assert states and all(state["effective_policy"] is None for state in states)
-            assert result.budgets.iterations_consumed == 4
+            assert result.budgets.model_invocations_consumed == 5
             assert result.budgets.semantic_invocations_consumed == 5
             assert operation.call_count == 5
         else:
@@ -2513,13 +2549,13 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             else:
                 assert persisted.draft.effective_policy.daily_time_rules == ()
                 assert persisted.draft.effective_policy.transport_rules == ()
-            assert result.budgets.iterations_consumed == 3
+            assert result.budgets.model_invocations_consumed == 4
             assert result.budgets.semantic_invocations_consumed == 4
             assert operation.call_count == 4
         assert result.budgets.direction_calls_consumed == 6
         return
 
-    if case not in {"supported", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "must_valid"}:
+    if case not in {"supported", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "must_valid"}:
         assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
         assert replay == result
         if case == "meal_intent_mismatch_feedback":
@@ -2527,18 +2563,19 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             assert feedback == {
                 "status": "rejected",
                 "code": "policy_rejected",
-                "reason": "meal_intent_mismatch",
+                "reason": "meal_intent_mismatch", "field": "draft",
             }
         if case.startswith("prefix_"):
             assert result.itinerary_ref is not None
             assert not any(gap.gap_type == "backup_unavailable" for gap in result.gaps)
             from app.itinerary_planning import ItineraryPlanningArtifact
-            states = [(await repository.get(repository.refs[slot.planning_state_operation_id], expected_model=ItineraryPlanningArtifact)).content.record.state for slot in request.operation_plan.iteration_slots if slot.planning_state_operation_id in repository.refs]
+            states = [(await repository.get(repository.refs[slot.planning_state_operation_id], expected_model=ItineraryPlanningArtifact)).content.record.state for slot in request.operation_plan.invocation_slots if slot.planning_state_operation_id in repository.refs]
             saved = [state for state in states if state.draft is not None]
             counts = [sum(len(day.visits) for day in item.draft.days) for item in saved]
             if case == "prefix_3_to_1":
                 assert counts[-2:] == [3, 3]
-                assert saved[-1].no_progress_streak == 1
+                assert saved[-1].no_progress_streak == 0
+                assert saved[-1].last_rejection is not None
             elif case == "prefix_1_to_3":
                 assert counts[-2:] == [1, 3]
                 assert saved[-1].no_progress_streak == 0
@@ -2552,7 +2589,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
     if case.startswith("backup_slots_"):
         feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
         assert feedback == {
-            "status": "rejected", "code": "policy_rejected", "reason": "backup_slots_mismatch",
+            "status": "rejected", "code": "policy_rejected", "reason": "backup_slots_mismatch", "field": "draft",
             "day_no": 1, "expected_backup_kinds": (
                 ["attraction", "lunch"] if case == "backup_slots_duplicate_repair"
                 else ["attraction", "lunch", "dinner"]
@@ -2560,16 +2597,20 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             "actual_backup_kinds": [item.backup_kind for item in bad_backups],
         }
         assert bad_submit.draft.days[0].backups == bad_backups
-        assert result.budgets.iterations_consumed == 4
+        assert result.budgets.model_invocations_consumed == operation.call_count == 5
         assert result.budgets.semantic_invocations_consumed == operation.call_count == 5
         assert result.budgets.direction_calls_consumed == len(service._map_adapter.directions_calls) == 6
         assert len(service._map_adapter.matrix_calls) == 1
         assert json.loads(operation.continuations[-1][0].content)["tool_result"]["code"] != "success"
+    if case == "route_end_mismatch_repair":
+        feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+        assert feedback == {"status": "rejected", "code": "policy_rejected", "reason": "route_end_time_mismatch", "field": "draft.arrival_transfer.route_leg.end_at"}
     if case == "route_rebind_repair":
         feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
         assert feedback == {
             "status": "rejected",
             "code": "policy_rejected",
+            "field": "draft",
             "reason": "route_leg_binding_mismatch",
         }
     if case == "backup_distance_repair":
@@ -2577,6 +2618,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         assert feedback == {
             "status": "rejected",
             "code": "policy_rejected",
+            "field": "draft",
             "reason": "backup_distance_exceeded",
         }
     if case in {"duplicate_main_repair", "duplicate_backup_repair"}:
@@ -2584,6 +2626,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         assert feedback == {
             "status": "rejected",
             "code": "policy_rejected",
+            "field": "draft",
             "reason": (
                 "main_candidate_duplicate"
                 if case == "duplicate_main_repair"
@@ -2687,7 +2730,7 @@ async def test_repeated_matrix_cache_hits_stop_after_two_no_progress_iterations(
 
     assert isinstance(result, ItineraryPlanningIncomplete)
     assert result.stop_reasons == (PlanningStopReason.NO_PROGRESS,)
-    assert operation.call_count == 3
+    assert operation.call_count == 4
 
 
 @pytest.mark.asyncio
@@ -2754,10 +2797,11 @@ async def test_two_rejected_submits_persist_progress_and_stop_without_ordinary_t
     assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
     assert result.stop_reasons == (PlanningStopReason.NO_PROGRESS,)
     assert result.itinerary_ref is None
-    assert result.budgets.iterations_consumed == 2
-    assert operation.call_count == 2
-    assert len([item for item in repository.put_requests if item.artifact_type == "itinerary_planning.model_action"]) == 2
-    assert len([item for item in repository.put_requests if item.artifact_type == "itinerary_planning.itinerary"]) == 3
+    assert result.budgets.model_invocations_consumed == 3
+    assert result.budgets.submit_repair_used == 2
+    assert operation.call_count == 3
+    assert len([item for item in repository.put_requests if item.artifact_type == "itinerary_planning.model_action"]) == 3
+    assert len([item for item in repository.put_requests if item.artifact_type == "itinerary_planning.itinerary"]) == 4
 
 
 @pytest.mark.asyncio
@@ -2838,9 +2882,9 @@ async def test_service_gate_helpers_cover_replay_resume_and_typed_safety_branche
             candidate_handles=("candidate-handle-0000",),
         ),
     )
-    service._validate_batch(run, (evidence_call,), terminal_only=True)
+    service._validate_batch(run, (evidence_call,), effective_tools=service._effective_tools(run))
     with pytest.raises(ToolBatchError):
-        service._validate_batch(run, (), terminal_only=False)
+        service._validate_batch(run, (), effective_tools=service._effective_tools(run))
     with pytest.raises(ToolBatchError):
         service._validate_batch(run, (
             evidence_call,
@@ -2848,7 +2892,7 @@ async def test_service_gate_helpers_cover_replay_resume_and_typed_safety_branche
                 "call_id": "terminal_evidence_2",
                 "arguments": evidence_call.arguments.model_copy(update={"candidate_handles": ("candidate-handle-0001",)}),
             }),
-        ), terminal_only=True)
+        ), effective_tools=tuple(tool for tool in service._effective_tools(run) if tool.name == PlanningTool.SUBMIT_ITINERARY.value))
     with pytest.raises(ToolBatchError):
         service._validate_batch(run, (
             ValidatedToolCall(
@@ -2859,19 +2903,21 @@ async def test_service_gate_helpers_cover_replay_resume_and_typed_safety_branche
                     location_handles=("candidate-handle-0000", "hotel-handle"),
                 ),
             ),
-        ), terminal_only=False)
-    assert service._iteration_slot(run, 0).invocation_slot_index == 0
+        ), effective_tools=service._effective_tools(run))
+    assert service._invocation_slot(run, 0).invocation_slot_index == 0
     with pytest.raises(ToolBatchError):
-        service._iteration_slot(run, 99)
+        service._invocation_slot(run, 99)
 
     progress_empty = ToolDispatchResult((ToolObservation("evidence", "get_candidate_evidence", _CandidateEvidenceObservation(status="no_result", candidates=(), evidence_handles=(), reason_code=None)),), False, 0)
     assert service._dispatch_made_progress(run, progress_empty) is False
     run.no_progress = 2
     assert service._current_gaps(run)[-1].process_reason == "no_progress"
     run.no_progress = 0
-    run.iterations = 6
+    run.submit_repair_used = 5
+    run.invocation_count = 5
     assert service._current_gaps(run)[-1].process_reason == "iteration_limit_reached"
-    run.iterations = 0
+    run.invocation_count = 0
+    run.submit_repair_used = 0
     draft = SimpleNamespace(days=(
         SimpleNamespace(day_kind=PlanningDayKind.FULL, visits=(), route_legs=(), backups=()),
         SimpleNamespace(day_kind=PlanningDayKind.PARTIAL, visits=(), route_legs=(), backups=()),
@@ -2892,3 +2938,18 @@ async def test_service_gate_helpers_cover_replay_resume_and_typed_safety_branche
     service._budget = _BrokenBudget()
     budget = await service._budget_summary(run)
     assert budget.budget_snapshot_complete is False
+
+@pytest.mark.asyncio
+async def test_batch_rejection_records_rule_location_before_terminal(caplog):
+    from app.itinerary_planning.models import GetCandidateEvidenceArgs
+    calls = tuple(ValidatedToolCall(call_id=f'evidence-{i}', tool_name=PlanningTool.GET_CANDIDATE_EVIDENCE.value,
+                                   arguments=GetCandidateEvidenceArgs(candidate_handles=('candidate-handle-0000',))) for i in range(2))
+    service, request, _, _, _ = _fixture(ToolCallsReady(calls=calls, metadata=_metadata()))
+    result = await service.plan_initial(request)
+    assert result.failure.code is PlanningFailureCode.ACTION_BATCH_INVALID
+    diagnostic = next(json.loads(r.message) for r in caplog.records if r.name == 'app.error_location' and json.loads(r.message)['event'] == 'planning_batch_rejected')
+    assert diagnostic['run_id'] == str(request.operation_plan.run_id)
+    assert diagnostic['call_count'] == 2
+    assert diagnostic['reason'] == 'action_batch_invalid'
+    assert any(p['file'] == 'tooling.py' and p['function'] == 'validate_tool_batch' for p in diagnostic['location'])
+    assert 'candidate-handle-0000' not in caplog.text

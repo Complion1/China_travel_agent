@@ -168,6 +168,26 @@ def _construct(model: type[_T], error_capability: MapCapability, **values: objec
     return result
 
 
+def parse_transit_no_path_error(
+    result: CallToolResult, request: BaseModel, retrieved_at: datetime
+) -> DirectionsNoResult | None:
+    """Qualified Baidu MCP exception: exact transit-only no-path envelope."""
+    if (
+        type(request) is DirectionsRequest
+        and request.mode is TravelMode.TRANSIT
+        and type(result) is CallToolResult
+        and result.isError is True
+        and result.structuredContent is None
+        and type(result.content) is list
+        and len(result.content) == 1
+        and type(result.content[0]) is TextContent
+        and result.content[0].text == "API response error: no bus path"
+    ):
+        return _construct(DirectionsNoResult, MapCapability.DIRECTIONS,
+                          provenance=_provenance(MapCapability.DIRECTIONS, retrieved_at))
+    return None
+
+
 def select_response_object(result: CallToolResult, capability: MapCapability) -> dict[str, Any]:
     """Apply isError, structuredContent and single-full-JSON-text precedence."""
     if type(result) is not CallToolResult:

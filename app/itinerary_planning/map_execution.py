@@ -460,6 +460,7 @@ class MapExecutor:
                     distance_m=item.distance_m,
                     duration_s=item.duration_s,
                     step_count=len(item.steps),
+                    transit_instructions=tuple(step.instruction for step in item.steps) if spec.route_mode is TravelMode.TRANSIT else (),
                 )
                 for index, item in enumerate(outcome.alternatives)
             )

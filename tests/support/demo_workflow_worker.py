@@ -53,7 +53,7 @@ async def execute(request):
         if request["mode"] == "read_result":
             index = next(r for r in state.artifact_refs if r.artifact_type == "result_formatting.index")
             loaded = await ResultFormattingService(artifact_repository=context.artifacts.repository).load(
-                ResultReadRequest(schema_version="1.0",state=state,index_ref=index))
+                ResultReadRequest(schema_version="2.0",state=state,index_ref=index))
             assert type(loaded) is ResultFormattingLoaded
             budgets = await context.runtime.get_terminal_budget_snapshots(run_id=state.run_id)
             summary = await context.dependencies.diagnostics.finish(state=state,budget_snapshots=budgets)

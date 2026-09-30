@@ -32,7 +32,7 @@ EXPECTED_FIELDS = {
 def test_exact_exports_versions_and_no_internal_dtos():
     assert formatting.__all__ == EXPECTED_EXPORTS
     assert all(hasattr(formatting, name) for name in EXPECTED_EXPORTS)
-    assert formatting.RESULT_FORMATTING_SCHEMA_VERSION == "1.0"
+    assert formatting.RESULT_FORMATTING_SCHEMA_VERSION == "2.0"
     assert formatting.RESULT_FORMATTING_TEMPLATE_VERSION == "zh-guide-v1"
     for name in ("ResultCore", "ResultDayData", "ResultSource", "render_day", "project_result", "ArtifactRepository"):
         assert not hasattr(formatting, name)
@@ -95,10 +95,10 @@ def test_outcome_unions_have_the_fixed_discriminator(outcome, success):
     discriminator = adapter.json_schema()["discriminator"]
     assert discriminator["propertyName"] == "outcome_type"
     assert set(discriminator["mapping"]) == {success, "failed"}
-    failed = adapter.validate_json('{"outcome_type":"failed","schema_version":"1.0","code":"source_mismatch"}', strict=True)
+    failed = adapter.validate_json('{"outcome_type":"failed","schema_version":"2.0","code":"source_mismatch"}', strict=True)
     assert type(failed) is formatting.ResultFormattingFailed
     with pytest.raises(ValidationError):
-        adapter.validate_json('{"outcome_type":"failed","schema_version":"1.0","code":"source_mismatch","detail":"private"}', strict=True)
+        adapter.validate_json('{"outcome_type":"failed","schema_version":"2.0","code":"source_mismatch","detail":"private"}', strict=True)
 
 
 def test_constructor_rejects_missing_read_port_without_owning_resources():

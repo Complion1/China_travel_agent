@@ -15,7 +15,7 @@ from .errors import (
 )
 from .models import (
     ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
-    ITINERARY_PLANNING_ITERATION_BUDGET_KEY,
+    ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY,
     ITINERARY_PLANNING_SCHEMA_VERSION,
     BackupOption,
     BoundaryTransfer,
@@ -47,7 +47,7 @@ from .models import (
     PlanningFailureCode,
     PlanningGap,
     PlanningGapSummary,
-    PlanningIterationOperationIds,
+    PlanningInvocationOperationIds,
     PlanningStopReason,
     PlanningSummary,
     PlanningTool,
@@ -71,7 +71,7 @@ from .service import ItineraryPlanningService
 
 __all__ = (
     "ITINERARY_PLANNING_SCHEMA_VERSION",
-    "ITINERARY_PLANNING_ITERATION_BUDGET_KEY",
+    "ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY",
     "ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY",
     "ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS",
     "PlanningDayKind",
@@ -81,7 +81,7 @@ __all__ = (
     "PlanningStopReason",
     "TransportSemantic",
     "PlanningFailureCode",
-    "PlanningIterationOperationIds",
+    "PlanningInvocationOperationIds",
     "ItineraryPlanningOperationPlan",
     "ItineraryPlanningInitialRequest",
     "ItineraryPlanningResumeRequest",

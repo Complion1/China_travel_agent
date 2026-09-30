@@ -30,6 +30,7 @@ from pydantic import BaseModel, ValidationError
 
 from app.baidu_map._response_parsing import (
     parse_directions,
+    parse_transit_no_path_error,
     parse_geocode,
     parse_place_details,
     parse_place_search,
@@ -647,8 +648,10 @@ class BaiduMapMcpGateway:
                     CallToolResult,
                     request_read_timeout_seconds=timedelta(seconds=remaining),
                 )
-            selected = select_response_object(result, capability)
-            result_value = parser(selected, request, self._clock.now())
+            result_value = parse_transit_no_path_error(result, request, self._clock.now())
+            if result_value is None:
+                selected = select_response_object(result, capability)
+                result_value = parser(selected, request, self._clock.now())
             if time.monotonic() - started > timeout_s:
                 raise asyncio.TimeoutError
         except asyncio.CancelledError as error:

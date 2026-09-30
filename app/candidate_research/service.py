@@ -40,6 +40,7 @@ from app.baidu_map import (
 )
 from app.hotel_selection import HotelSelectedDecision, HotelSelectionArtifact
 from app.llm_runtime import (
+    InteractionCallIdentity, interaction_call,
     DeepSeekRuntime,
     InvocationMetadata,
     LLMErrorCode,
@@ -291,6 +292,7 @@ class _Run:
     last_judgment_metadata: ArtifactInvocationMetadataSnapshot | None = None
     supplemental_baseline_uids: frozenset[str] = frozenset()
     replayed_place_refs: dict[OperationId, ArtifactRef] = field(default_factory=dict)
+    action_interaction: InteractionCallIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1332,6 +1334,9 @@ class CandidateResearchService:
                 if operation_id is None:
                     continue
                 if mapped.contract_failure:
+                    if run.action_interaction is not None:
+                        await run.action_interaction.record_tool_result(tool_name=("search_places" if isinstance(mapped.action, ProposedSearchAction) else "get_place_details"),
+                            ordinal=mapped.action.ordinal, outcome="failure", feedback='{"status":"failure","code":"dependency_contract_error"}')
                     if primary_failure is None:
                         primary_failure = ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
                     continue
@@ -1367,6 +1372,12 @@ class CandidateResearchService:
                     primary_failure_ref = obs
 
         fresh_results = await self._map_wave(fresh_place_actions, run, on_wave=persist_wave) if fresh_place_actions else ()
+        if run.action_interaction is not None:
+            issued_actions = {id(item.action) for item in fresh_results}
+            for action in fresh_place_actions:
+                if id(action) not in issued_actions:
+                    await run.action_interaction.record_tool_result(tool_name=("search_places" if isinstance(action, ProposedSearchAction) else "get_place_details"),
+                        ordinal=action.ordinal, outcome="not_issued", feedback='{"status":"not_issued","reason":"previous_wave_failed"}')
         fresh_iter = iter(fresh_results)
         map_results_list: list[_MapResult] = []
         for action, operation_id in zip(place_actions, slot.place_observation_operation_ids):
@@ -1408,6 +1419,9 @@ class CandidateResearchService:
             if failure is not None and primary_failure is None:
                 primary_failure = failure
                 primary_failure_ref = obs
+            if run.action_interaction is not None and operation_id in run.replayed_place_refs:
+                await run.action_interaction.record_tool_result(tool_name=("search_places" if isinstance(action, ProposedSearchAction) else "get_place_details"),
+                    ordinal=action.ordinal, outcome="cached", feedback=json.dumps({"status": "cached", "observation_ref": obs.model_dump(mode="json")}), observation_ref_json=obs.model_dump_json())
             if already_in_state:
                 continue
             if isinstance(action, ProposedDetailsAction) and isinstance(mapped.outcome, PlaceDetailsSuccess):
@@ -1716,7 +1730,9 @@ class CandidateResearchService:
 
     async def _invoke_action(self, run: _Run, prompt: PromptEnvelope) -> tuple[object, ArtifactInvocationMetadataSnapshot] | LLMResearchFailure | ControlResearchFailure:
         try:
-            result = await run.operation.ainvoke_structured(prompt, _ActionModelEnvelope)
+            with interaction_call("research_action") as identity:
+                result = await run.operation.ainvoke_structured(prompt, _ActionModelEnvelope)
+            run.action_interaction = identity
         except (RuntimeError, TypeError, ValueError, AttributeError):
             run.semantic_invocations += 1
             run.provider_attempts_complete = False
@@ -2025,6 +2041,10 @@ class CandidateResearchService:
             action_ordinal=action.ordinal, tool=tool, action_fingerprint=fp, result=obs,
         )
         ref = await self._put(run, operation_id, "candidate_research.place_observation", artifact)
+        if run.action_interaction is not None:
+            status = "failure" if isinstance(obs, (PlaceMapFailureObservation, PlaceUnverifiedResultObservation)) else "no_result" if isinstance(obs, (PlaceSearchNoResultObservation, PlaceDetailsNoResultObservation)) else "success"
+            await run.action_interaction.record_tool_result(tool_name=tool.value, ordinal=action.ordinal, outcome=status,
+                feedback=artifact.model_dump_json(), observation_ref_json=ref.model_dump_json())
         if mapped.error is not None:
             failure = MapResearchFailure(tool=tool, action_ordinal=action.ordinal, code=mapped.error.code, capability=expected_capability, observation_ref=ref)
         elif isinstance(obs, PlaceMapFailureObservation) and failure is None:
@@ -2047,7 +2067,11 @@ class CandidateResearchService:
             action_fingerprint=action_fingerprint(action, run.destination),
             result=PlaceNotIssuedObservation(record_type="not_issued", reason_code="reservation_barrier_failed"),
         )
-        return await self._put(run, operation_id, "candidate_research.place_observation", artifact)
+        ref = await self._put(run, operation_id, "candidate_research.place_observation", artifact)
+        if run.action_interaction is not None:
+            await run.action_interaction.record_tool_result(tool_name=tool.value, ordinal=action.ordinal, outcome="not_issued",
+                feedback=artifact.model_dump_json(), observation_ref_json=ref.model_dump_json())
+        return ref
 
     @staticmethod
     def _observation_snapshot(outcome: object, capability: MapCapability, run: _Run) -> PlaceObservationRecord:
@@ -2229,7 +2253,8 @@ class CandidateResearchService:
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.ARTIFACT_ERROR)
         prompt = build_observation_prompt(prompt_payload)
         try:
-            result = await run.operation.ainvoke_structured(prompt, JudgmentPatch)
+            with interaction_call("research_judgment") as identity:
+                result = await run.operation.ainvoke_structured(prompt, JudgmentPatch)
         except (RuntimeError, TypeError, ValueError, AttributeError):
             run.semantic_invocations += 1
             run.provider_attempts_complete = False
@@ -2275,7 +2300,9 @@ class CandidateResearchService:
         except (ValidationError, ValueError, TypeError):
             if run.last_judgment_patch is None:
                 return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+            await identity.record_validation(stage="policy", passed=False, code="judgment_patch_invalid")
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.JUDGMENT_PATCH_INVALID)
+        await identity.record_validation(stage="policy", passed=True)
         resolved = self._resolve_patch(patch, refs, run.state.requirement_group_states)
         artifact = CandidateResearchModelJudgmentArtifact(schema_version="1.0", run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=OBSERVATION_PROMPT_VERSION, prompt_sha256=OBSERVATION_PROMPT_CONTENT_DIGEST, evidence_refs=refs, result=ModelJudgmentAcceptedRecord(record_type="accepted", patch=resolved, metadata=self._metadata(result.metadata)))
         ref = await self._put(run, slot.judgment_operation_id, "candidate_research.model_judgment", artifact)
@@ -2828,7 +2855,23 @@ class CandidateResearchService:
 
     async def _write_model_action(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int, record: object) -> ArtifactRef:
         artifact = CandidateResearchModelActionArtifact(schema_version="1.0", run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=ACTION_PROMPT_VERSION, prompt_sha256=ACTION_PROMPT_CONTENT_DIGEST, input_digest=run.request_digest, result=record)
-        return await self._put(run, slot.action_operation_id, "candidate_research.model_action", artifact)
+        ref = await self._put(run, slot.action_operation_id, "candidate_research.model_action", artifact)
+        if run.action_interaction is not None:
+            accepted = record.record_type == "accepted"
+            code = None if accepted else getattr(record, "code", getattr(record, "reason_code", "action_failed"))
+            await run.action_interaction.record_validation(stage="policy" if record.record_type == "policy_rejected" else "batch", passed=accepted, code=code)
+            actions = getattr(getattr(record, "output", None), "actions", ())
+            dispositions = {item.action_ordinal: item for item in getattr(record, "action_dispositions", ())}
+            for action in actions:
+                disposition = dispositions.get(action.ordinal)
+                if not accepted or (disposition is not None and disposition.disposition != "accepted"):
+                    cached = accepted and disposition.disposition == "duplicate_action"
+                    reused = disposition.reused_observation_ref if cached else None
+                    await run.action_interaction.record_tool_result(tool_name=action.action_type, ordinal=action.ordinal,
+                        outcome="cached" if cached else "not_issued" if accepted else "rejected",
+                        feedback=json.dumps({"status": disposition.disposition if accepted else record.record_type, "code": code}),
+                        observation_ref_json=None if reused is None else reused.model_dump_json())
+        return ref
 
     async def _write_judgment_failure(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int, failure: LLMResearchFailure | ControlResearchFailure) -> ArtifactRef:
         if isinstance(failure, LLMResearchFailure):

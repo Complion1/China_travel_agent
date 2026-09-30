@@ -9,7 +9,9 @@ from typing import Any
 
 import httpx
 import openai
-from langchain_deepseek import ChatDeepSeek
+from langchain_deepseek import ChatDeepSeek as _SDKChatDeepSeek
+from .diagnostics import record_invalid_json
+from .interaction_recording import _capture_request, _capture_response, _observer_failure, _register_secrets
 
 from app.llm_runtime.profiles import ModelProfile, REQUIREMENT_EXTRACTION_PROFILE
 from app.llm_runtime.protocols import (
@@ -143,7 +145,7 @@ def _normalized_usage(
     }
 
 
-def _normalize_tool_calls(tool_calls: object) -> tuple[tuple[str, str, dict[str, object]], ...] | None:
+def _normalize_tool_calls(tool_calls: object, *, finish_reason=None) -> tuple[tuple[str, str, dict[str, object]], ...] | None:
     if not isinstance(tool_calls, (list, tuple)):
         return None
     normalized: list[tuple[str, str, dict[str, object]]] = []
@@ -160,6 +162,7 @@ def _normalize_tool_calls(tool_calls: object) -> tuple[tuple[str, str, dict[str,
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
+                    record_invalid_json(arguments, finish_reason=finish_reason, ordinal=len(normalized))
                     return None
         else:
             name = item.get("name")
@@ -190,7 +193,7 @@ def _normalize_response(raw: Mapping[str, Any]) -> ProviderResponse | ProviderFa
     content = message.get("content")
     if content is not None and not isinstance(content, str):
         return _malformed()
-    tool_calls = _normalize_tool_calls(message.get("tool_calls", []))
+    tool_calls = _normalize_tool_calls(message.get("tool_calls", []), finish_reason=finish_reason)
     if tool_calls is None:
         return _malformed()
     reasoning = message.get("reasoning_content")
@@ -215,6 +218,23 @@ def _malformed() -> ProviderFailure:
     )
 
 
+class ChatDeepSeek(_SDKChatDeepSeek):
+    """Retain required assistant reasoning through the locked SDK serializer."""
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        reasoning = kwargs.pop("_interaction_reasoning", ())
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        for index, content in reasoning:
+            if index < len(payload["messages"]) and payload["messages"][index]["role"] == "assistant":
+                payload["messages"][index]["reasoning_content"] = content
+        return payload
+
+
+def _continuation_reasoning(messages):
+    return tuple((index, message["reasoning_content"]) for index, message in enumerate(messages)
+        if message.get("role") == "assistant" and isinstance(message.get("reasoning_content"), str))
+
+
 class LangChainDeepSeekAdapter:
     def __init__(self, settings: DeepSeekSettings):
         self._settings = settings
@@ -228,11 +248,29 @@ class LangChainDeepSeekAdapter:
             if self._closed:
                 raise RuntimeError("Provider closed")
             model = self._models.get(key)
+            secret = self._settings.api_key.get_secret_value()
+            secrets = (secret.encode("utf-8"), json.dumps(secret, ensure_ascii=True)[1:-1].encode("utf-8"))
+            _register_secrets(secrets)
             if model is None:
+
+                async def capture_request(request):
+                    raw = await request.aread()
+                    try:
+                        await _capture_request(raw, secrets)
+                    except Exception:
+                        _observer_failure()
+
+                async def capture_response(response):
+                    raw = await response.aread()
+                    try:
+                        await _capture_response(raw, response.status_code, secrets)
+                    except Exception:
+                        _observer_failure()
+
                 model = ChatDeepSeek(
                     model=profile.model_name,
                     api_key=self._settings.api_key,
-                    base_url=profile.base_url,
+                    base_url=("https://api.deepseek.com/beta" if profile.role.value == "itinerary_planning" else profile.base_url),
                     timeout=httpx.Timeout(
                         connect=float(profile.connect_timeout_seconds),
                         read=float(profile.read_timeout_seconds),
@@ -245,6 +283,13 @@ class LangChainDeepSeekAdapter:
                     reasoning_effort=profile.reasoning_effort,
                     extra_body={"thinking": {"type": profile.thinking_type}},
                 )
+                # Observe the SDK-owned client, retaining its transport defaults.
+                try:
+                    client = model.root_async_client._client
+                    client.event_hooks["request"].append(capture_request)
+                    client.event_hooks["response"].append(capture_response)
+                except Exception:
+                    _observer_failure()
                 self._models[key] = model
             return model
 
@@ -291,7 +336,8 @@ class LangChainDeepSeekAdapter:
         messages: list[dict[str, object]],
     ) -> ProviderResponse | ProviderFailure:
         try:
-            raw = self._build_model(profile).bind_tools(list(tools), strict=False).invoke(messages)
+            reasoning = _continuation_reasoning(messages)
+            raw = self._bound_tools(profile, tools).invoke(messages, **({"_interaction_reasoning": reasoning} if reasoning else {}))
             return self._unwrap_raw(raw)
         except Exception as exc:
             return _failure_from_exception(exc)
@@ -303,10 +349,18 @@ class LangChainDeepSeekAdapter:
         messages: list[dict[str, object]],
     ) -> ProviderResponse | ProviderFailure:
         try:
-            raw = await self._build_model(profile).bind_tools(list(tools), strict=False).ainvoke(messages)
+            reasoning = _continuation_reasoning(messages)
+            raw = await self._bound_tools(profile, tools).ainvoke(messages, **({"_interaction_reasoning": reasoning} if reasoning else {}))
             return self._unwrap_raw(raw)
         except Exception as exc:
             return _failure_from_exception(exc)
+
+    def _bound_tools(self, profile: ModelProfile, tools: tuple[dict[str, object], ...]):
+        from app.llm_runtime.strict_tools import strict_tool_definitions
+
+        strict = profile.role.value == "itinerary_planning"
+        definitions = strict_tool_definitions(tools) if strict else list(tools)
+        return self._build_model(profile).bind_tools(definitions, strict=strict)
 
     @staticmethod
     def _initial_messages(system: str, user: str) -> list[dict[str, object]]:
@@ -329,6 +383,13 @@ class LangChainDeepSeekAdapter:
     def _unwrap_ai_message(self, message: Any, parsed: Any = None) -> ProviderResponse | ProviderFailure:
         if message is None or not hasattr(message, "content"):
             return _malformed()
+        if getattr(message, "invalid_tool_calls", None):
+            metadata = getattr(message, "response_metadata", None) or {}
+            for ordinal, call in enumerate(message.invalid_tool_calls[:20]):
+                record_invalid_json(call.get("args"), ordinal=ordinal,
+                                    finish_reason=metadata.get("finish_reason") if isinstance(metadata, Mapping) else None)
+            # Never silently execute the valid subset of a malformed batch.
+            return _malformed()
         metadata = getattr(message, "response_metadata", None) or {}
         if not isinstance(metadata, Mapping):
             return _malformed()
@@ -340,7 +401,7 @@ class LangChainDeepSeekAdapter:
         if usage is None or finish_reason not in _KNOWN_FINISH_REASONS or not isinstance(model_name, str) or not model_name:
             return _malformed()
         model_name = _canonical_model_name(model_name)
-        tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", []))
+        tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", []), finish_reason=finish_reason)
         if tool_calls is None:
             return _malformed()
         content = getattr(message, "content", None)

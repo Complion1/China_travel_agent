@@ -44,6 +44,7 @@ from tests.unit.itinerary_planning.test_service_initial import (
     _seed_requirement_groups,
 )
 from tests.support.itinerary_planning_fakes import FakeRepository
+from tests.unit.itinerary_planning.test_phase_budget import hubs
 from app.itinerary_planning.service import _BusinessRejected, _confirmed_digest, _fresh, _handles
 
 
@@ -255,6 +256,8 @@ async def test_real_runtime_resume_selects_new_candidate_from_visible_context() 
                     handle for handle in visible_handles
                     if handle not in self.initial_handles
                 )
+                return self.response(tuple((call.call_id, call.tool_name, call.arguments.model_dump(mode="json")) for call in hubs().calls))
+            if self.call_count == 2:
                 return self.response((("new_matrix", "calculate_route_matrix", {"date": self.sightseeing_start_date, "mode": "walking", "location_handles": [self.hotel, self.new_handle]}),))
             assert latest["tool_call_id"] == "new_matrix"
             return self.response(())
@@ -266,12 +269,12 @@ async def test_real_runtime_resume_selects_new_candidate_from_visible_context() 
     assert awaiting.outcome_type == "candidate_supplement_requested"
     original = (await repository.get(request.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
     supplied = _seed_supplemented_candidate(repository, original, request.operation_plan.run_id, request.candidate_set_ref, awaiting)
-    plan = _plan(request.operation_plan.run_id, suffix="visible_resume")
+    plan = _plan(request.operation_plan.run_id, suffix="visible_resume", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17)))
     plan = plan.model_copy(update={"matrix_operation_ids": (OperationId(run_id=plan.run_id, phase=WorkflowPhase.ITINERARY_PLANNING, logical_step="visible_resume_matrix"),)})
     result = await service.plan_resume(ItineraryPlanningResumeRequest(predecessor_planning_ref=awaiting.planning_ref,
         supplemented_candidate_set_ref=supplied, operation_plan=plan, supplemental_operation_plan=_supplemental_plan(plan.run_id)))
     assert result.outcome_type == "incomplete", result
-    assert provider.call_count == 3 and provider.new_handle is not None
+    assert provider.call_count == 4 and provider.new_handle is not None
     assert len(service._map_adapter.matrix_calls) == 1
 
 
@@ -315,7 +318,7 @@ async def test_resume_rejects_successor_with_invalid_must_item_coverage_before_m
         run.requirement_group_states,
         run.pending_call_id,
         run.plan,
-        run.iterations,
+        run.invocation_count,
     )
     writes = len(repository.put_requests)
 
@@ -343,7 +346,7 @@ async def test_resume_rejects_successor_with_invalid_must_item_coverage_before_m
         run.requirement_group_states,
         run.pending_call_id,
         run.plan,
-        run.iterations,
+        run.invocation_count,
     ) == before
     assert len(repository.put_requests) == writes
     assert runtime.start_count == operation.call_count == 1
@@ -421,12 +424,12 @@ async def test_resume_rejects_foreign_supplement_without_mutating_pending_run(mi
     service._budget = budget
     writes = len(repository.put_requests)
     run = service._runs[request.operation_plan.run_id]
-    original_state = (run.candidate_ref, run.candidates, run.pending_call_id, run.plan, run.iterations)
+    original_state = (run.candidate_ref, run.candidates, run.pending_call_id, run.plan, run.invocation_count)
     result = await service.plan_resume(ItineraryPlanningResumeRequest(predecessor_planning_ref=awaiting.planning_ref,
         supplemented_candidate_set_ref=ref, operation_plan=_plan(run.run_id, suffix="reject_resume"), supplemental_operation_plan=_supplemental_plan(run.run_id)))
     assert result.failure.code.value == expected
     assert budget.calls == 0
-    assert (run.candidate_ref, run.candidates, run.pending_call_id, run.plan, run.iterations) == original_state
+    assert (run.candidate_ref, run.candidates, run.pending_call_id, run.plan, run.invocation_count) == original_state
     assert len(repository.put_requests) == writes
     assert runtime.start_count == operation.call_count == 1
     assert not service._map_adapter.matrix_calls and not service._map_adapter.directions_calls
@@ -482,14 +485,14 @@ async def test_supplement_outcome_converts_artifact_evidence_and_resume_uses_rem
         supplemental_operation_plan=_supplemental_plan(request.operation_plan.run_id),
         predecessor_planning_ref=awaiting.planning_ref,
         supplemented_candidate_set_ref=same_content_ref,
-        operation_plan=_plan(request.operation_plan.run_id, suffix="resume_same_content", slots=(1, 2, 3, 4, 5)),
+        operation_plan=_plan(request.operation_plan.run_id, suffix="resume_same_content", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17))),
     ))
     assert same_content.failure.code.value == "predecessor_invalid"
     resume = ItineraryPlanningResumeRequest(
         supplemental_operation_plan=_supplemental_plan(request.operation_plan.run_id),
         predecessor_planning_ref=awaiting.planning_ref,
         supplemented_candidate_set_ref=supplemented_ref,
-        operation_plan=_plan(request.operation_plan.run_id, suffix="resume", slots=(1, 2, 3, 4, 5)),
+        operation_plan=_plan(request.operation_plan.run_id, suffix="resume", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17))),
     )
 
     result = await service.plan_resume(resume)
@@ -503,13 +506,13 @@ async def test_supplement_outcome_converts_artifact_evidence_and_resume_uses_rem
     assert replay == result
     assert any(
         item.artifact_type == "itinerary_planning.model_action"
-        and item.operation_id.logical_step == "resume_action_1"
+        and item.operation_id.logical_step == "resume_action_2"
         for item in repository.put_requests
     )
 
 
 @pytest.mark.asyncio
-async def test_public_loop_accepts_supplement_with_one_business_cycle_remaining() -> None:
+async def test_public_loop_accepts_supplement_with_one_transport_call_remaining() -> None:
     matrix_calls = tuple(
         ValidatedToolCall(
             call_id=f"matrix_{index}",
@@ -523,7 +526,7 @@ async def test_public_loop_accepts_supplement_with_one_business_cycle_remaining(
                 location_handles=("candidate-handle-0000", "hotel-handle") if index % 2 else ("hotel-handle", "candidate-handle-0000"),
             ),
         )
-        for index in range(5)
+        for index in range(4)
     )
     responses = tuple(
         ToolCallsReady(calls=(call,), metadata=_metadata())
@@ -537,7 +540,7 @@ async def test_public_loop_accepts_supplement_with_one_business_cycle_remaining(
             phase=WorkflowPhase.ITINERARY_PLANNING,
             logical_step=f"no_legal_matrix_{index}",
         )
-        for index in range(5)
+        for index in range(4)
     )
     request = request.model_copy(update={
         "operation_plan": base.model_copy(update={"matrix_operation_ids": matrix_ids}),
@@ -546,13 +549,13 @@ async def test_public_loop_accepts_supplement_with_one_business_cycle_remaining(
     result = await service.plan_initial(request)
 
     assert isinstance(result, ItineraryPlanningCandidateSupplementRequested)
-    assert result.budgets.iterations_consumed == 5
+    assert result.budgets.model_invocations_consumed == 6
     assert operation.call_count == 6
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("finish_with_sixth_supplement", (False, True))
-async def test_five_supplements_preserve_six_cycles_and_one_terminal_chance(finish_with_sixth_supplement: bool) -> None:
+async def test_five_supplements_have_independent_allowance_and_remaining_phase_calls(finish_with_sixth_supplement: bool) -> None:
     from app.candidate_research import AreaCoverageMissingGap, CandidateAnchorRef
     from app.itinerary_planning.models import CalculateRouteMatrixArgs
     responses = []
@@ -564,9 +567,9 @@ async def test_five_supplements_preserve_six_cycles_and_one_terminal_chance(fini
         responses.append(ToolCallsReady(calls=(original_call.model_copy(update={"call_id": f"supply_{index}",
             "arguments": original_call.arguments.model_copy(update={"proposed_gaps": (gap,)})}),), metadata=_metadata()))
     if not finish_with_sixth_supplement:
-        responses[5:] = [*(ToolCallsReady(calls=(ValidatedToolCall(call_id=f"matrix_{index}", tool_name="calculate_route_matrix",
+        responses[5:] = [hubs(), *(ToolCallsReady(calls=(ValidatedToolCall(call_id=f"matrix_{index}", tool_name="calculate_route_matrix",
             arguments=CalculateRouteMatrixArgs(date=date(2026, 9, 3), mode=tuple(MatrixTravelMode)[index // 2],
-                location_handles=("hotel-handle", "candidate-handle-0000") if index % 2 else ("candidate-handle-0000", "hotel-handle"))),), metadata=_metadata()) for index in range(6)),
+                location_handles=("hotel-handle", "candidate-handle-0000") if index % 2 else ("candidate-handle-0000", "hotel-handle"))),), metadata=_metadata()) for index in range(5)),
             ToolTurnCompleted(final_text="结束", metadata=_metadata())]
     service, request, runtime, operation, repository = _fixture(*responses)
     run_id = request.operation_plan.run_id
@@ -575,7 +578,8 @@ async def test_five_supplements_preserve_six_cycles_and_one_terminal_chance(fini
     original_candidate = (await repository.get(previous_ref, expected_model=CandidateResearchArtifact)).content
     for index in range(5):
         assert awaiting.outcome_type == "candidate_supplement_requested", awaiting
-        assert awaiting.budgets.iterations_consumed == 0
+        assert awaiting.budgets.model_invocations_consumed == index + 1
+        assert awaiting.budgets.supplement_request_used == index + 1
         upstream_plan = _supplemental_plan(run_id).model_copy(update={"terminal_successor_operation_id": OperationId(run_id=run_id, phase=WorkflowPhase.CANDIDATE_RESEARCH, logical_step=f"five_research_{index}")})
         gap = awaiting.gaps[0]
         upstream_request = CandidateResearchSupplementalRequest(predecessor_candidate_set_ref=previous_ref,
@@ -588,19 +592,20 @@ async def test_five_supplements_preserve_six_cycles_and_one_terminal_chance(fini
         successor_ref = previous_ref.model_copy(update={"artifact_id": uuid4(), "operation_id": upstream_plan.terminal_successor_operation_id,
             "size_bytes": len(encoded), "content_hash": "sha256:" + hashlib.sha256(encoded).hexdigest()})
         repository.seed(successor_ref, supplied)
-        plan = _plan(run_id, suffix=f"five_resume_{index}")
+        plan = _plan(run_id, suffix=f"five_resume_{index}", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17)))
         if index == 4 and not finish_with_sixth_supplement:
-            plan = plan.model_copy(update={"matrix_operation_ids": tuple(OperationId(run_id=run_id, phase=WorkflowPhase.ITINERARY_PLANNING, logical_step=f"five_matrix_{i}") for i in range(6))})
+            plan = plan.model_copy(update={"matrix_operation_ids": tuple(OperationId(run_id=run_id, phase=WorkflowPhase.ITINERARY_PLANNING, logical_step=f"five_matrix_{i}") for i in range(5))})
         awaiting = await service.plan_resume(ItineraryPlanningResumeRequest(predecessor_planning_ref=awaiting.planning_ref,
             supplemented_candidate_set_ref=successor_ref, operation_plan=plan, supplemental_operation_plan=upstream_plan))
         previous_ref = successor_ref
-    assert awaiting.outcome_type == "incomplete", (getattr(getattr(awaiting, "failure", None), "code", None), operation.call_count)
+    assert awaiting.outcome_type == ("failed" if finish_with_sixth_supplement else "incomplete"), (getattr(getattr(awaiting, "failure", None), "code", None), operation.call_count)
     assert runtime.start_count == 1
     assert operation.call_count == (6 if finish_with_sixth_supplement else 12)
-    assert awaiting.budgets.iterations_consumed == (0 if finish_with_sixth_supplement else 6)
+    assert awaiting.budgets.model_invocations_consumed == (6 if finish_with_sixth_supplement else 12)
+    assert awaiting.budgets.supplement_request_used == 5
     if finish_with_sixth_supplement:
-        assert awaiting.stop_reasons == (PlanningStopReason.NO_LEGAL_ACTION,)
-        assert not plan.hub_geocode_operation_ids and not plan.matrix_operation_ids and not plan.direction_operation_ids
+        assert awaiting.failure.code is PlanningFailureCode.MODEL_CONTRACT_INVALID
+        assert "request_candidate_supplement" not in {tool.name for tool in operation.tool_contracts[-1]}
     assert len([item for item in repository.put_requests if item.artifact_type == "itinerary_planning.itinerary" and item.content["record"]["record_type"] == "awaiting_candidate_supplement"]) == 5
 
 
@@ -619,7 +624,7 @@ async def test_terminal_only_non_submit_is_recorded_as_rejected_and_does_not_dis
                 location_handles=("candidate-handle-0000", "hotel-handle") if index % 2 else ("hotel-handle", "candidate-handle-0000"),
             ),
         )
-        for index in range(6)
+        for index in range(5)
     )
     terminal_evidence = ValidatedToolCall(
         call_id="terminal_evidence",
@@ -641,7 +646,7 @@ async def test_terminal_only_non_submit_is_recorded_as_rejected_and_does_not_dis
             phase=WorkflowPhase.ITINERARY_PLANNING,
             logical_step=f"terminal_matrix_{index}",
         )
-        for index in range(6)
+        for index in range(5)
     )
     request = request.model_copy(update={
         "operation_plan": base.model_copy(update={"matrix_operation_ids": matrix_ids}),
@@ -649,14 +654,14 @@ async def test_terminal_only_non_submit_is_recorded_as_rejected_and_does_not_dis
 
     result = await service.plan_initial(request)
 
-    assert isinstance(result, ItineraryPlanningIncomplete)
-    assert result.stop_reasons == (PlanningStopReason.NO_TERMINAL_SUBMISSION,)
-    assert result.budgets.iterations_consumed == 6
+    assert isinstance(result, ItineraryPlanningFailed)
+    assert result.failure.code is PlanningFailureCode.MODEL_CONTRACT_INVALID
+    assert result.budgets.model_invocations_consumed == 7
     assert operation.call_count == 7
     terminal_actions = [
         item for item in repository.put_requests
         if item.artifact_type == "itinerary_planning.model_action"
-        and item.operation_id == request.operation_plan.terminal_action_operation_id
+        and item.operation_id == request.operation_plan.invocation_slots[6].action_operation_id
     ]
     assert len(terminal_actions) == 1
     assert terminal_actions[0].content["disposition"] == "controller_rejected"

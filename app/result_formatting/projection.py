@@ -29,7 +29,7 @@ from app.workflow_contracts import ArtifactReadResult, ArtifactRef
 from .artifacts import (
     ResultBackup, ResultCoordinate, ResultCore, ResultDayData, ResultEndpoint,
     ResultInterval, ResultPlace, ResultRequirement, ResultRoute, ResultSource,
-    ResultTransfer, ResultVisit, fresh_model,
+    ResultTransfer, ResultTransitRoute, ResultVisit, fresh_model,
 )
 from .errors import ResultFormattingUsageError
 from .models import ResultFormattingFailureCode as Code, ResultFormattingRequest
@@ -146,7 +146,7 @@ _READ_TYPES = {
     HotelPlaceSearchArtifact: ("hotel.place_search", "hotel_selection", "1.0"),
     CandidateResearchArtifact: ("candidate_research.candidate_set", "candidate_research", "1.0"),
     CandidateResearchPlaceObservationArtifact: ("candidate_research.place_observation", "candidate_research", "1.0"),
-    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", "4.0"),
+    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", "5.0"),
     ItineraryPlanningHubGeocodeObservationArtifact: ("itinerary_planning.hub_geocode_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningDirectionsObservationArtifact: ("itinerary_planning.directions_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningRouteMatrixObservationArtifact: ("itinerary_planning.route_matrix_observation", "itinerary_planning", "1.0"),
@@ -311,7 +311,9 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
         return dict(leg_id=route.leg_id, origin_place_id=location_id(route.origin), destination_place_id=location_id(route.destination),
                     interval=_interval(route.interval), transport_semantic=route.transport_semantic.value, route_mode=route.route_mode.value,
                     distance_m=route.distance_m, duration_s=route.duration_s, scheduled_minutes=route.scheduled_minutes,
-                    source_id=add_source(ref, observation), alternative_index=route.alternative_index)
+                    source_id=add_source(ref, observation), alternative_index=route.alternative_index,
+                    **({"transit_instructions": alternatives[0].transit_instructions}
+                       if hasattr(alternatives[0], "transit_instructions") else {}))
 
     arrival_route = yield from route_spec(draft.arrival_transfer.route_leg)
     day_specs = []
@@ -356,7 +358,8 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
         return {**spec, "business_source_ids": tuple(source_ids[key] for key in spec["business_source_ids"])}
 
     def route_dto(spec: dict[str, Any]) -> ResultRoute:
-        return ResultRoute(**{**spec, "source_id": source_ids[spec["source_id"]]})
+        model = ResultTransitRoute if "transit_instructions" in spec else ResultRoute
+        return model(**{**spec, "source_id": source_ids[spec["source_id"]]})
 
     days = tuple(ResultDayData(**{**spec,
         "visits": tuple(ResultVisit(**business_ids(item)) for item in spec["visits"]),

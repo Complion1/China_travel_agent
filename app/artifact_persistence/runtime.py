@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,11 @@ from app.artifact_persistence.errors import (
 )
 from app.artifact_persistence.repository import _PostgresArtifactRepository
 from app.artifact_persistence.settings import ArtifactPersistenceSettings
+from app.artifact_persistence.interaction_records import (
+    DEMO_INTERACTION_STORE_LIMITS, InteractionStoreLimits,
+    _PostgresInteractionRecorder, _diagnostic_schema_available,
+)
+from app.llm_runtime import InteractionRecorder
 from app.workflow_contracts.artifacts.in_memory import (
     DEMO_ARTIFACT_REPOSITORY_LIMITS,
 )
@@ -28,7 +34,7 @@ from app.workflow_contracts.errors import ArtifactRepositoryUsageError
 
 
 _ALEMBIC_CONFIG = Path(__file__).with_name("alembic.ini")
-_EXPECTED_HEAD = "m10_0001"
+_EXPECTED_HEAD = "m10_0002"
 _POOL_MIN_SIZE = 1
 _POOL_MAX_SIZE = 4
 _POOL_TIMEOUT = 10.0
@@ -222,7 +228,8 @@ async def _check_schema(pool: AsyncConnectionPool, head: str) -> None:
                         ORDER BY table_name
                         """
                     )
-                    if tuple(row[0] for row in await cursor.fetchall()) != _EXPECTED_TABLES:
+                    business_tables = tuple(row[0] for row in await cursor.fetchall() if row[0] != "interaction_records")
+                    if business_tables != _EXPECTED_TABLES:
                         _configuration_failure()
                     for table_name, expected in (
                         ("artifacts", _EXPECTED_ARTIFACT_COLUMNS),
@@ -353,7 +360,7 @@ async def _initialize_capacity(
 class ArtifactPersistenceRuntime:
     """Own one PostgreSQL pool and the repository bound to its event loop."""
 
-    __slots__ = ("_pool", "_repository", "_loop", "_closed")
+    __slots__ = ("_pool", "_repository", "_loop", "_closed", "_interaction_recorder")
 
     def __init__(
         self,
@@ -361,15 +368,21 @@ class ArtifactPersistenceRuntime:
         pool: AsyncConnectionPool,
         repository: _PostgresArtifactRepository,
         loop: asyncio.AbstractEventLoop,
+        interaction_recorder: InteractionRecorder | None = None,
     ) -> None:
         self._pool = pool
         self._repository = repository
         self._loop = loop
         self._closed = False
+        self._interaction_recorder = interaction_recorder or _PostgresInteractionRecorder(pool=pool, limits=DEMO_INTERACTION_STORE_LIMITS, fallback_dir=None, available=False)
 
     @property
     def repository(self) -> ArtifactRepository:
         return self._repository
+
+    @property
+    def interaction_recorder(self) -> InteractionRecorder:
+        return self._interaction_recorder
 
     def _ensure_lifecycle(self) -> None:
         try:
@@ -423,12 +436,20 @@ async def create_artifact_persistence_runtime(
     settings: ArtifactPersistenceSettings,
     registry: ArtifactSchemaRegistry,
     limits: ArtifactRepositoryLimits = DEMO_ARTIFACT_REPOSITORY_LIMITS,
+    interaction_limits: InteractionStoreLimits = DEMO_INTERACTION_STORE_LIMITS,
+    interaction_fallback_dir: Path | None = None,
 ) -> ArtifactPersistenceRuntime:
     """Create a fully checked runtime without changing database structure."""
 
     settings_copy = _copy_settings(settings)
     _validate_registry(registry)
     limits_copy = _copy_limits(limits)
+    try:
+        if type(interaction_limits) is not InteractionStoreLimits or (interaction_fallback_dir is not None and not isinstance(interaction_fallback_dir, Path)):
+            _usage_failure()
+        diagnostic_limits = InteractionStoreLimits.model_validate_json(interaction_limits.model_dump_json())
+    except Exception:
+        _usage_failure()
     pool: AsyncConnectionPool | None = None
     try:
         pool = AsyncConnectionPool(
@@ -452,7 +473,8 @@ async def create_artifact_persistence_runtime(
             limits=limits_copy,
             loop=loop,
         )
-        return ArtifactPersistenceRuntime(pool=pool, repository=repository, loop=loop)
+        recorder = _PostgresInteractionRecorder(pool=pool, limits=diagnostic_limits, fallback_dir=interaction_fallback_dir, available=await _diagnostic_schema_available(pool), secrets=(settings.password.get_secret_value().encode("utf8"), json.dumps(settings.password.get_secret_value(), ensure_ascii=True)[1:-1].encode("utf8")))
+        return ArtifactPersistenceRuntime(pool=pool, repository=repository, loop=loop, interaction_recorder=recorder)
     except BaseException as error:
         if pool is not None:
             await _close_pool_after_failure(pool)

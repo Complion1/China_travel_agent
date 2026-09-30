@@ -161,7 +161,11 @@ class PlanningModel:
     def close(self):
         self.closed = True
 
-    async def ainvoke_tools(self, prompt, contracts):
+    async def ainvoke_tools(self, prompt, contracts, *, admission_callback=None, request_stage=None):
+        if admission_callback is not None:
+            from app.llm_runtime import InteractionCallIdentity
+            from uuid import uuid4
+            await admission_callback(InteractionCallIdentity(call_id=uuid4(), logical_call_index=self.call_count))
         if self.stop_without_draft:
             from app.llm_runtime import ToolTurnCompleted
             from tests.unit.itinerary_planning.test_service_initial import _metadata
@@ -188,7 +192,11 @@ class PlanningModel:
         return ToolCallsReady(calls=tuple(ValidatedToolCall(call_id=f"demo_{self.call_count}_{i}", tool_name=name, arguments=args)
             for i, (name, args) in enumerate(values)), metadata=_metadata())
 
-    async def acontinue_tools(self, results):
+    async def acontinue_tools(self, results, *, tools=None, admission_callback=None, request_stage=None):
+        if admission_callback is not None:
+            from app.llm_runtime import InteractionCallIdentity
+            from uuid import uuid4
+            await admission_callback(InteractionCallIdentity(call_id=uuid4(), logical_call_index=self.call_count))
         import json
         from app.itinerary_planning.models import PlanDirectionsArgs, DirectionLegIntent, TransportSemantic
         from app.baidu_map import TravelMode

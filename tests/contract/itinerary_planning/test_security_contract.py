@@ -18,7 +18,7 @@ from app.itinerary_planning.tooling import (
 def test_prompt_and_map_projection_have_no_forbidden_payload_terms() -> None:
     prompt = load_planning_prompt().text.lower()
     assert "route step" not in prompt
-    source = Path(__file__).parents[3] / "app" / "itinerary_planning" / "map_execution.py"
+    source = Path(__file__).parents[3] / "app" / "itinerary_planning" / "tooling.py"
     text = source.read_text(encoding="utf-8").lower()
     assert "route step" not in text
     assert "instruction" not in text

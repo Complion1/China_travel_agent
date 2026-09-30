@@ -7,7 +7,7 @@ from tests.requirement_subgraph_fakes import make_initial_state, make_turn
 
 
 def control(**changes):
-    values = dict(schema_version="1.0", sequence=0, previous_ref=None, hotel_invalid_count=0,
+    values = dict(schema_version="2.0", sequence=0, previous_ref=None, hotel_invalid_count=0,
         map_requested=False, supplement_count=0, handled_gap_fingerprints=(), hotel_candidate_ref=None,
         hotel_selection_ref=None, candidate_set_ref=None, planning_ref=None, last_outcome="hotel_ready",
         terminal_code=None, supplemental_plan_call=None)
@@ -20,7 +20,7 @@ def test_control_uses_real_registry_and_required_fields():
     artifact = control()
     request = ArtifactWriteRequest(operation_id=OperationId(run_id=make_initial_state().run_id,
         phase=WorkflowPhase.HOTEL_SELECTION, logical_step="control_00"), artifact_type="demo.control",
-        schema_version="1.0", content=artifact.model_dump(mode="json"))
+        schema_version="2.0", content=artifact.model_dump(mode="json"))
     assert registry.prepare(request).canonical_bytes
     assert all(field.is_required() for field in DemoControlArtifact.model_fields.values())
 

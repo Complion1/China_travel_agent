@@ -2,9 +2,9 @@ import app.itinerary_planning as planning
 
 
 EXPECTED = (
-    "ITINERARY_PLANNING_SCHEMA_VERSION", "ITINERARY_PLANNING_ITERATION_BUDGET_KEY", "ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY", "ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS",
+    "ITINERARY_PLANNING_SCHEMA_VERSION", "ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY", "ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY", "ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS",
     "PlanningDayKind", "VisitKind", "BusinessHoursState", "PlanningTool", "PlanningStopReason", "TransportSemantic", "PlanningFailureCode",
-    "PlanningIterationOperationIds", "ItineraryPlanningOperationPlan", "ItineraryPlanningInitialRequest", "ItineraryPlanningResumeRequest",
+    "PlanningInvocationOperationIds", "ItineraryPlanningOperationPlan", "ItineraryPlanningInitialRequest", "ItineraryPlanningResumeRequest",
     "CandidateLocationRef", "HotelLocationRef", "HubLocationRef", "PlanningLocationRef", "TimeInterval", "RouteTimeInterval", "DailyTimeRule",
     "TimeSensitiveMustAnchor", "TransportPolicyRule", "EffectivePlanningPolicy", "ScheduledVisit", "RouteAlternativeSummary", "RouteLeg",
     "BoundaryTransfer", "BackupOption", "DayPlan", "ItineraryDraft", "PlanningGap", "PlanningGapSummary", "PlanningBudgetSummary", "PlanningSummary",
@@ -21,7 +21,7 @@ def test_facade_is_the_exact_final_module_09_projection() -> None:
     assert planning.ItineraryPlanningService.__name__ == "ItineraryPlanningService"
     assert not hasattr(planning, "models")
     assert not hasattr(planning, "artifacts")
-    assert planning.ITINERARY_PLANNING_SCHEMA_VERSION == "1.0"
+    assert planning.ITINERARY_PLANNING_SCHEMA_VERSION == "2.0"
 
 
 def test_facade_does_not_leak_artifact_locals_or_conversion_helpers() -> None:

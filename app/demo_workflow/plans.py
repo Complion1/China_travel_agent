@@ -8,8 +8,8 @@ from app.candidate_research import (
 )
 from app.hotel_selection import HOTEL_PLACE_CALL_BUDGET_KEY, HotelCandidateOperationIds
 from app.itinerary_planning import (
-    ITINERARY_PLANNING_ITERATION_BUDGET_KEY, ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
-    ItineraryPlanningOperationPlan, PlanningIterationOperationIds,
+    ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY, ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
+    ItineraryPlanningOperationPlan, PlanningInvocationOperationIds,
 )
 from app.requirement_subgraph import REQUIREMENTS_CLARIFICATION_ROUND_KEY
 from app.requirements import ConfirmedTravelRequirement
@@ -39,17 +39,17 @@ def planning_request_digest(request):
         return tree
     def model_hash(model):
         return digest(canonical(model.model_dump(mode="json")))
-    fields = dict(capability_scope="module09-optional-backups-v1", schema_version=request.schema_version,
+    fields = dict(capability_scope="module09-phase-budget-v1", schema_version=request.schema_version,
         run_id=str(request.operation_plan.run_id), operation_plan=model_hash(request.operation_plan))
     if hasattr(request, "confirmed"):
         fields.update(confirmed=model_hash(request.confirmed), hotel_selection_ref=reference(request.hotel_selection_ref),
             candidate_set_ref=reference(request.candidate_set_ref))
-        version, kind = "planning-fp-v4", "request_initial"
+        version, kind = "planning-fp-v5", "request_initial"
     else:
         fields.update(predecessor_planning_ref=reference(request.predecessor_planning_ref),
             supplemented_candidate_set_ref=reference(request.supplemented_candidate_set_ref),
             supplemental_operation_plan=model_hash(request.supplemental_operation_plan))
-        version, kind = "planning-resume-fp-v5", "request_resume"
+        version, kind = "planning-resume-fp-v6", "request_resume"
     return digest(canonical(dict(fingerprint_version=version, kind=kind, fields=fields)))
 
 
@@ -94,10 +94,10 @@ def research_plan(run_id, call=0, remaining_iterations=6, remaining_places=48):
     )
 
 
-def planning_plan(run_id, days, call=0, consumed_iterations=0, remaining_directions=None):
+def planning_plan(run_id, days, call=0, consumed_invocations=0, remaining_directions=None):
     bounded(days, 1, 60)
     bounded(call, 0, 5)
-    bounded(consumed_iterations, 0, 6)
+    bounded(consumed_invocations, 0, 17)
     if remaining_directions is None:
         remaining_directions = 8 * days + 2
     bounded(remaining_directions, 0, 8 * days + 2)
@@ -106,14 +106,14 @@ def planning_plan(run_id, days, call=0, consumed_iterations=0, remaining_directi
         return operation(run_id, phase, f"planning_{call}_{step}")
     return ItineraryPlanningOperationPlan(
         run_id=run_id,
-        iteration_slots=tuple(PlanningIterationOperationIds(
+        invocation_slots=tuple(PlanningInvocationOperationIds(
             invocation_slot_index=i, action_operation_id=op(f"action_{i}"),
             planning_state_operation_id=op(f"state_{i}"),
-        ) for i in range(consumed_iterations, 6)),
+        ) for i in range(consumed_invocations, 17)),
         hub_geocode_operation_ids=tuple(op(f"hub_{j}") for j in range(2)),
-        matrix_operation_ids=tuple(op(f"matrix_{j}") for j in range((6 - consumed_iterations) * days)),
+        matrix_operation_ids=tuple(op(f"matrix_{j}") for j in range((17 - consumed_invocations) * days)),
         direction_operation_ids=tuple(op(f"direction_{j}") for j in range(remaining_directions)),
-        terminal_action_operation_id=op("terminal_action"), terminal_successor_operation_id=op("terminal"),
+        terminal_successor_operation_id=op("terminal"),
     )
 
 
@@ -146,7 +146,7 @@ class DemoBudgetPlanProvider:
         elif phase is WorkflowPhase.CANDIDATE_RESEARCH:
             values = ((CANDIDATE_RESEARCH_ITERATION_BUDGET_KEY, 6), (CANDIDATE_RESEARCH_PLACE_CALL_BUDGET_KEY, 48))
         elif phase is WorkflowPhase.ITINERARY_PLANNING:
-            values = ((ITINERARY_PLANNING_ITERATION_BUDGET_KEY, 6), (ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY, 8 * days + 2))
+            values = ((ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY, 17), (ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY, 8 * days + 2))
         elif phase is WorkflowPhase.OUTPUT_FORMATTING:
             values = ((RESULT_WRITE_KEY, days + 1),)
         else:

@@ -50,7 +50,7 @@ def operation(step, phase=WorkflowPhase.OUTPUT_FORMATTING):
 
 def ref(number, artifact_type, phase=WorkflowPhase.ITINERARY_PLANNING):
     return ArtifactRef(
-        artifact_id=UUID(int=number), artifact_type=artifact_type, schema_version="1.0",
+        artifact_id=UUID(int=number), artifact_type=artifact_type, schema_version="2.0",
         content_hash=DIGEST, operation_id=operation(f"source_{number}", phase),
         created_at=UTC, size_bytes=1,
     )
@@ -58,7 +58,7 @@ def ref(number, artifact_type, phase=WorkflowPhase.ITINERARY_PLANNING):
 
 def make_day(markdown="合成的一日攻略"):
     return ResultDayArtifact(
-        schema_version="1.0", template_version="zh-guide-v1", run_id=RUN_ID,
+        schema_version='2.0', template_version="zh-guide-v1", run_id=RUN_ID,
         source_itinerary_ref=ref(100, "itinerary_planning.itinerary"),
         input_digest=DIGEST, bundle_digest=DIGEST,
         data=ResultDayData(
@@ -119,7 +119,7 @@ def make_core():
 
 def make_index(day_ref):
     return ResultIndexArtifact(
-        schema_version="1.0", template_version="zh-guide-v1", run_id=RUN_ID,
+        schema_version='2.0', template_version="zh-guide-v1", run_id=RUN_ID,
         source_itinerary_ref=ref(100, "itinerary_planning.itinerary"),
         input_digest=DIGEST, bundle_digest=DIGEST, core=make_core(),
         days=(ResultDayEntry(day_no=1, date=LOCAL_DATE, ref=day_ref),),
@@ -145,8 +145,8 @@ class SequenceUUIDFactory:
 async def test_both_artifacts_round_trip_through_real_registry_and_repository():
     registry = ArtifactSchemaRegistry(RESULT_FORMATTING_ARTIFACT_REGISTRATIONS)
     assert tuple((r.artifact_type, r.schema_version, r.model) for r in RESULT_FORMATTING_ARTIFACT_REGISTRATIONS) == (
-        ("result_formatting.day", "1.0", ResultDayArtifact),
-        ("result_formatting.index", "1.0", ResultIndexArtifact),
+        ("result_formatting.day", "2.0", ResultDayArtifact),
+        ("result_formatting.index", "2.0", ResultIndexArtifact),
     )
     repository = InMemoryArtifactRepository(registry=registry, utc_clock=FixedClock(),
         uuid_factory=SequenceUUIDFactory(), limits=DEMO_ARTIFACT_REPOSITORY_LIMITS)

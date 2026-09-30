@@ -29,7 +29,7 @@ from app.itinerary_planning.map_execution import (
 from app.itinerary_planning.models import (
     CandidateLocationRef,
     GetCandidateEvidenceArgs,
-    ITINERARY_PLANNING_ITERATION_BUDGET_KEY,
+    ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY,
     TransportSemantic,
 )
 from app.itinerary_planning.service import _fresh
@@ -108,7 +108,7 @@ async def test_unknown_tool_is_model_contract_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_action_write_failure_is_retryable_artifact_error() -> None:
+async def test_unknown_model_action_write_outcome_is_nonrecoverable() -> None:
     service, request, _, _, repository = _fixture(
         ToolTurnCompleted(final_text="需要澄清", metadata=_metadata()),
     )
@@ -116,9 +116,9 @@ async def test_model_action_write_failure_is_retryable_artifact_error() -> None:
 
     result = await service.plan_initial(request)
 
-    assert result.failure.code is PlanningFailureCode.ARTIFACT_ERROR
-    assert result.failure.retryable is True
-    assert result.failure.possible_duplicate is False
+    assert result.failure.code is PlanningFailureCode.OPERATION_RESULT_INDETERMINATE
+    assert result.failure.retryable is False
+    assert result.failure.possible_duplicate is True
 
 
 @pytest.mark.asyncio
@@ -211,16 +211,17 @@ async def test_terminal_replay_mismatch_lookup_failure_and_budget_outcomes_are_e
     proxy = _UnknownBudgetResult(delegate, object())
     service._budget = proxy
     with pytest.raises(__import__("app.itinerary_planning.service", fromlist=["_Indeterminate"])._Indeterminate):
-        await service._consume_iteration(run)
-    snapshot = await delegate.get_snapshot(key=ITINERARY_PLANNING_ITERATION_BUDGET_KEY)
+        await service._admit_invocation(run, __import__("app.llm_runtime", fromlist=["InteractionCallIdentity"]).InteractionCallIdentity(call_id=__import__("uuid").uuid4(), logical_call_index=run.invocation_count))
+    snapshot = await delegate.get_snapshot(key=ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY)
     proxy.result = BudgetExceeded(
         disposition="rejected",
-        operation_id=run.plan.iteration_slots[0].planning_state_operation_id,
-        key=ITINERARY_PLANNING_ITERATION_BUDGET_KEY,
+        operation_id=run.plan.invocation_slots[0].planning_state_operation_id,
+        key=ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY,
         amount=1,
         snapshot=snapshot,
     )
-    assert await service._consume_iteration(run) is False
+    with pytest.raises(__import__("app.itinerary_planning.service", fromlist=["_Indeterminate"])._Indeterminate):
+        await service._admit_invocation(run, __import__("app.llm_runtime", fromlist=["InteractionCallIdentity"]).InteractionCallIdentity(call_id=__import__("uuid").uuid4(), logical_call_index=run.invocation_count))
 
 
 @pytest.mark.asyncio

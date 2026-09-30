@@ -51,7 +51,7 @@ async def test_public_missing_terminal_audits_state_before_action_and_never_rese
     await service.plan_initial(request)
     terminal_ref = repository.refs.pop(request.operation_plan.terminal_successor_operation_id)
     repository.contents.pop(terminal_ref.artifact_id)
-    state_ref = repository.refs[request.operation_plan.iteration_slots[0].planning_state_operation_id]
+    state_ref = repository.refs[request.operation_plan.invocation_slots[0].planning_state_operation_id]
     if state_case == "corrupt":
         repository.contents[state_ref.artifact_id]["schema_version"] = "invalid"
     elif state_case == "foreign_digest":
@@ -70,5 +70,5 @@ async def test_public_missing_terminal_audits_state_before_action_and_never_rese
     assert len(repository.put_requests) == writes
     assert runtime.start_count == 1 and operation.call_count == 2
     if state_case == "intact":
-        assert repository.lookup_calls[1:7] == [slot.planning_state_operation_id for slot in request.operation_plan.iteration_slots]
-        assert repository.lookup_calls[7:13] == [slot.action_operation_id for slot in request.operation_plan.iteration_slots]
+        assert repository.lookup_calls[1:18] == [slot.planning_state_operation_id for slot in request.operation_plan.invocation_slots]
+        assert repository.lookup_calls[18:35] == [slot.action_operation_id for slot in request.operation_plan.invocation_slots]

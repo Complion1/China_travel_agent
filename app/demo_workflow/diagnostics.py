@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.requirement_extraction import ExtractionInvocationEvent
+from app.llm_runtime import interaction_run_context
 from app.workflow_contracts import (
     RunSummary, SafeCounterValue, SafeCounterDelta, SafeWorkflowEvent,
     SafeWorkflowEventRegistration, SafeWorkflowEventRegistry,
@@ -58,10 +59,25 @@ class _History:
 
 
 class DemoDiagnostics:
-    def __init__(self, *, sink, clock, monotonic_clock, uuid_provider):
+    def __init__(self, *, sink, clock, monotonic_clock, uuid_provider, interaction_secrets=()):
         self._sink, self._clock, self._monotonic, self._uuid = sink, clock, monotonic_clock, uuid_provider
         self._histories = {}
         self._operation = ContextVar("demo_operation", default=None)
+        self._interaction_recorder = None
+        self._interaction_secrets = tuple(interaction_secrets)
+        self._interaction_scopes = {}
+
+    def _bind_interactions(self, recorder):
+        self._interaction_recorder = recorder
+        if recorder is None:
+            import logging
+            logging.getLogger(__name__).warning("interaction_records_incomplete: recorder_not_configured")
+
+    def _interaction_scope(self, run_id, trace_id):
+        if run_id not in self._interaction_scopes:
+            self._interaction_scopes[run_id] = interaction_run_context(
+                run_id=run_id, trace_id=trace_id, recorder=self._interaction_recorder, secrets=self._interaction_secrets)
+        return self._interaction_scopes[run_id]
 
     def start_run(self, *, run_id, trace_id):
         if type(run_id) is not UUID or type(trace_id) is not UUID or run_id in self._histories:
@@ -78,7 +94,8 @@ class DemoDiagnostics:
             raise DemoWorkflowUsageError()
         token = self._operation.set((run_id, trace_id, turn_id, kind, set()))
         try:
-            yield
+            with self._interaction_scope(run_id, trace_id):
+                yield
         finally:
             self._operation.reset(token)
 
@@ -120,6 +137,8 @@ class DemoDiagnostics:
             raise DemoWorkflowUsageError()
         history = self._histories.get(state.run_id)
         if history is None:
+            await self._interaction_scope(state.run_id, state.trace_id).finish(
+                stop_code=state.terminal_code, complete_history=False)
             return DemoSummaryView(schema_version="1.0", summary=None, unavailable_reason="process_history_unavailable")
         if history.trace_id != state.trace_id or (history.terminal_state is not None and history.terminal_state != state):
             raise DemoWorkflowUsageError()
@@ -149,4 +168,6 @@ class DemoDiagnostics:
             counters=tuple(SafeCounterValue(name=name, value=history.counters[name]) for name in _NAMES),
             budget_snapshots=budget_snapshots)
         history.summary = DemoSummaryView(schema_version="1.0", summary=summary, unavailable_reason=None)
+        await self._interaction_scope(state.run_id, state.trace_id).finish(
+            stop_code=state.terminal_code, complete_history=True)
         return fresh(history.summary, DemoSummaryView)

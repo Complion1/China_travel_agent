@@ -22,7 +22,7 @@ from app.candidate_research import (
 )
 from app.itinerary_planning import (
     ItineraryPlanningArtifact, ItineraryPlanningInitialRequest, ItineraryPlanningResumeRequest,
-    ItineraryPlanningOutcome, ITINERARY_PLANNING_ITERATION_BUDGET_KEY, ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
+    ItineraryPlanningOutcome, ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY, ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
 )
 
 from .artifacts import DemoControlArtifact
@@ -112,7 +112,7 @@ class Nodes:
     async def receipt(self, state, cap, *, prior=None, prior_ref=None, **updates):
         if prior is None:
             command = cap.current_command()
-            values = dict(schema_version="1.0", sequence=0, previous_ref=None, hotel_invalid_count=0,
+            values = dict(schema_version="2.0", sequence=0, previous_ref=None, hotel_invalid_count=0,
                 map_requested=type(command) is DemoRequirementCommand and command.map_requested,
                 supplement_count=0, handled_gap_fingerprints=(), hotel_candidate_ref=None,
                 hotel_selection_ref=None, candidate_set_ref=None, planning_ref=None,
@@ -123,7 +123,7 @@ class Nodes:
         control = DemoControlArtifact.model_validate(values | updates, strict=True)
         ref = await cap.artifact_repository.put(ArtifactWriteRequest(
             operation_id=operation(state.run_id, state.phase, f"control_{control.sequence:02d}"),
-            artifact_type="demo.control", schema_version="1.0", content=control.model_dump(mode="json")))
+            artifact_type="demo.control", schema_version="2.0", content=control.model_dump(mode="json")))
         return with_refs(state, ref, control.hotel_candidate_ref, control.hotel_selection_ref, control.candidate_set_ref, control.planning_ref)
 
     async def after_requirements(self, state):
@@ -230,7 +230,7 @@ class Nodes:
         cap = self.cap("planning")
         await cap.ensure_phase_budget(state=state)
         control, ref = await self.control(state, cap)
-        iterations = await cap.execution_budget_manager.get_snapshot(key=ITINERARY_PLANNING_ITERATION_BUDGET_KEY)
+        iterations = await cap.execution_budget_manager.get_snapshot(key=ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY)
         directions = await cap.execution_budget_manager.get_snapshot(key=ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY)
         plan = planning_plan(state.run_id, days_for(state), control.supplement_count, iterations.consumed, directions.remaining)
         service = self.service("planning", state.run_id)
@@ -270,7 +270,7 @@ class Nodes:
             planning_ref = found.ref
             saved = (await cap.read_only_artifact_repository.get(planning_ref, expected_model=ItineraryPlanningArtifact)).content
             if (planning_ref.operation_id != plan.terminal_successor_operation_id
-                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "1.0"
+                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "2.0"
                 or saved.request_digest != planning_request_digest(request)
                 or saved.record.record_type != "incomplete" or saved.record.stop_reasons != value.stop_reasons
                 or restore_gaps(saved) != value.gaps or saved.directories.candidate_set_refs[-1] != control.candidate_set_ref

@@ -24,7 +24,7 @@ from app.workflow_contracts import (
 from .errors import ResultFormattingUsageError
 
 
-RESULT_FORMATTING_SCHEMA_VERSION = "1.0"
+RESULT_FORMATTING_SCHEMA_VERSION = "2.0"
 RESULT_FORMATTING_TEMPLATE_VERSION = "zh-guide-v1"
 MAX_RESULT_ARTIFACT_BYTES = 1_048_576
 _SAFE_INTEGER_MAX = 2**53 - 1
@@ -155,6 +155,11 @@ class ResultRoute(_ResultArtifactModel):
     alternative_index: Annotated[int, Field(ge=0, le=2)]
 
 
+class ResultTransitRoute(ResultRoute):
+    transport_semantic: Literal["public_transit"]
+    route_mode: Literal["transit"]
+    transit_instructions: Annotated[tuple[Annotated[str, StringConstraints(min_length=1, max_length=1024, pattern=r"\S")], ...], Field(min_length=1, max_length=128, repr=False)]
+
 class ResultBackup(_ResultArtifactModel):
     backup_kind: Literal["attraction", "lunch", "dinner"]
     core_visit_id: StableText
@@ -176,7 +181,7 @@ class ResultTransfer(_ResultArtifactModel):
     transfer_kind: Literal["arrival", "departure"]
     hub_place_id: PlaceId
     hotel_place_id: PlaceId
-    route: ResultRoute
+    route: ResultRoute | ResultTransitRoute
     processing_minutes: Annotated[int, Field(ge=30, le=_SAFE_INTEGER_MAX)]
     approximate_extra_minutes: Literal[0, 30]
 
@@ -262,7 +267,7 @@ class ResultDayData(_ResultArtifactModel):
     theme: Annotated[str, StringConstraints(min_length=1, max_length=40)] = Field(repr=False)
     open_intervals: Annotated[tuple[ResultInterval, ...], Field(min_length=0, max_length=16)]
     visits: Annotated[tuple[ResultVisit, ...], Field(min_length=0, max_length=6)]
-    route_legs: Annotated[tuple[ResultRoute, ...], Field(min_length=0, max_length=7)]
+    route_legs: Annotated[tuple[ResultRoute | ResultTransitRoute, ...], Field(min_length=0, max_length=7)]
     backups: Annotated[tuple[ResultBackup, ...], Field(min_length=0, max_length=3)]
 
 
@@ -274,7 +279,7 @@ class ResultDayEntry(_ResultArtifactModel):
 
 def _check_itinerary_ref(ref: ArtifactRef, run_id: UUID) -> None:
     if (ref.operation_id.run_id != run_id or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING
-            or ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version != "1.0"):
+            or ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version != "2.0"):
         raise ValueError("source itinerary reference mismatch")
 
 
@@ -284,7 +289,7 @@ def _check_markdown(value: str) -> None:
 
 
 class ResultDayArtifact(_ResultArtifactModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     template_version: Literal["zh-guide-v1"]
     run_id: UUID
     source_itinerary_ref: ArtifactRef
@@ -301,7 +306,7 @@ class ResultDayArtifact(_ResultArtifactModel):
 
 
 class ResultIndexArtifact(_ResultArtifactModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     template_version: Literal["zh-guide-v1"]
     run_id: UUID
     source_itinerary_ref: ArtifactRef
@@ -324,7 +329,7 @@ class ResultIndexArtifact(_ResultArtifactModel):
                 raise ValueError("index days must preserve consecutive dates")
             ref = day.ref
             if (ref.operation_id.run_id != self.run_id or ref.operation_id.phase is not WorkflowPhase.OUTPUT_FORMATTING
-                    or ref.artifact_type != "result_formatting.day" or ref.schema_version != "1.0"):
+                    or ref.artifact_type != "result_formatting.day" or ref.schema_version != "2.0"):
                 raise ValueError("index day reference mismatch")
         if len({day.ref.artifact_id for day in self.days}) != len(self.days) or len({day.ref.operation_id for day in self.days}) != len(self.days):
             raise ValueError("index day references must be unique")
@@ -334,8 +339,8 @@ class ResultIndexArtifact(_ResultArtifactModel):
 
 
 RESULT_FORMATTING_ARTIFACT_REGISTRATIONS = (
-    ArtifactSchemaRegistration(artifact_type="result_formatting.day", schema_version="1.0", model=ResultDayArtifact),
-    ArtifactSchemaRegistration(artifact_type="result_formatting.index", schema_version="1.0", model=ResultIndexArtifact),
+    ArtifactSchemaRegistration(artifact_type="result_formatting.day", schema_version="2.0", model=ResultDayArtifact),
+    ArtifactSchemaRegistration(artifact_type="result_formatting.index", schema_version="2.0", model=ResultIndexArtifact),
 )
 
 _TModel = TypeVar("_TModel", bound=BaseModel)
@@ -371,7 +376,7 @@ def fresh_model(value: object, expected_type: type[_TModel]) -> _TModel:
 
 def _prepare_request(operation_id: OperationId, artifact: ResultDayArtifact | ResultIndexArtifact) -> ArtifactWriteRequest:
     artifact_type = "result_formatting.day" if type(artifact) is ResultDayArtifact else "result_formatting.index"
-    request = ArtifactWriteRequest(operation_id=operation_id, artifact_type=artifact_type, schema_version="1.0", content=artifact.model_dump(mode="json", exclude_none=False, by_alias=False, exclude_computed_fields=True))
+    request = ArtifactWriteRequest(operation_id=operation_id, artifact_type=artifact_type, schema_version="2.0", content=artifact.model_dump(mode="json", exclude_none=False, by_alias=False, exclude_computed_fields=True))
     prepared = ArtifactSchemaRegistry(RESULT_FORMATTING_ARTIFACT_REGISTRATIONS).prepare(request)
     if prepared.size_bytes > MAX_RESULT_ARTIFACT_BYTES:
         raise ArtifactTooLargeError() from None

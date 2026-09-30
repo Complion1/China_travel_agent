@@ -18,32 +18,32 @@ class _ResultModel(BaseModel):
 
 
 class ResultFormattingRequest(_ResultModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     state: TravelSessionState = Field(repr=False)
     itinerary_ref: ArtifactRef = Field(repr=False)
 
 
 class ResultReadRequest(_ResultModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     state: TravelSessionState = Field(repr=False)
     index_ref: ArtifactRef = Field(repr=False)
 
 
 class ResultFormattingPrepared(_ResultModel):
     outcome_type: Literal["prepared"]
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     days: Annotated[tuple[ResultDayArtifact, ...], Field(min_length=1, max_length=60)] = Field(repr=False)
 
 
 class ResultIndexReady(_ResultModel):
     outcome_type: Literal["index_ready"]
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     index: ResultIndexArtifact = Field(repr=False)
 
 
 class ResultFormattingLoaded(_ResultModel):
     outcome_type: Literal["loaded"]
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     index_ref: ArtifactRef = Field(repr=False)
     index: ResultIndexArtifact = Field(repr=False)
     days: Annotated[tuple[ResultDayArtifact, ...], Field(min_length=1, max_length=60)] = Field(repr=False)
@@ -52,7 +52,7 @@ class ResultFormattingLoaded(_ResultModel):
 
 class ResultFormattingFailed(_ResultModel):
     outcome_type: Literal["failed"]
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     code: ResultFormattingFailureCode
 
 

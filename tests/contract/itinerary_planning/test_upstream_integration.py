@@ -15,7 +15,7 @@ from app.baidu_map import (
 from app.candidate_research import CandidateState, MealIntent, ResearchRole
 from app.itinerary_planning import (
     ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
-    ITINERARY_PLANNING_ITERATION_BUDGET_KEY,
+    ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY,
     CandidateLocationRef,
     BusinessHoursState,
     DayPlan,
@@ -45,7 +45,7 @@ from app.workflow_contracts import ArtifactRef, OperationId, WorkflowPhase
 
 
 @pytest.mark.asyncio
-async def test_real_runtime_delivers_sixth_matrix_result_before_terminal_chance() -> None:
+async def test_real_runtime_delivers_fifth_transport_result_to_submit_only_call() -> None:
     import json
     from app.llm_runtime import DeepSeekRuntime
     from app.llm_runtime.protocols import ProviderResponse
@@ -62,9 +62,9 @@ async def test_real_runtime_delivers_sixth_matrix_result_before_terminal_chance(
         def response(self):
             index = self.call_count
             self.call_count += 1
-            calls = () if index == 6 else ((f"matrix-{index}", "calculate_route_matrix", {
+            calls = tuple((call.call_id, call.tool_name, call.arguments.model_dump(mode="json")) for call in __import__("tests.unit.itinerary_planning.test_phase_budget", fromlist=["hubs"]).hubs().calls) if index == 0 else () if index == 6 else ((f"matrix-{index-1}", "calculate_route_matrix", {
                 "date": self.context["sightseeing_start_date"],
-                "mode": tuple(MatrixTravelMode)[index // 2].value,
+                "mode": tuple(MatrixTravelMode)[(index-1) // 2].value,
                 "location_handles": list(self.handles if index % 2 else self.handles[::-1]),
             }),)
             return ProviderResponse(content="结束" if not calls else None, tool_calls=calls,
@@ -87,6 +87,8 @@ async def test_real_runtime_delivers_sixth_matrix_result_before_terminal_chance(
             self.received_ids.append(latest["tool_call_id"])
             data = json.loads(latest["content"])
             assert data["tool_result"]["observation"]["issued_handles"]
+            if self.call_count == 6:
+                assert {tool["function"]["name"] for tool in request.tools} == {"submit_itinerary"}
             return self.response()
 
     service, request, _, _, repository = _fixture()
@@ -100,20 +102,20 @@ async def test_real_runtime_delivers_sixth_matrix_result_before_terminal_chance(
     })})
     result = await service.plan_initial(request)
     assert result.outcome_type == "incomplete", (provider.call_count, getattr(getattr(getattr(result, "failure", None), "error", None), "code", None))
-    assert result.budgets.iterations_consumed == 6
+    assert result.budgets.model_invocations_consumed == 7
     assert provider.call_count == 7
-    assert provider.received_ids == [f"matrix-{i}" for i in range(6)]
-    assert len(service._map_adapter.matrix_calls) == 6
-    assert sum(item.operation_id == request.operation_plan.terminal_action_operation_id for item in repository.put_requests) == 1
+    assert provider.received_ids == ["departure", *[f"matrix-{i}" for i in range(5)]]
+    assert len(service._map_adapter.matrix_calls) == 5
+    assert result.budgets.preparation_used == 1 and result.budgets.transport_used == 5 and result.budgets.submit_repair_used == 1
 
 
 def test_required_upstream_public_contracts_are_consumable() -> None:
     assert ModelRole.ITINERARY_PLANNING.value == "itinerary_planning"
-    assert ITINERARY_PLANNING_PROFILE.semantic_invocation_limit == 12
+    assert ITINERARY_PLANNING_PROFILE.semantic_invocation_limit == 17
     assert ITINERARY_PLANNING_PROFILE.max_request_utf8_bytes == 2097152
     assert ITINERARY_PLANNING_PROFILE.max_output_tokens == 49152
     assert ITINERARY_PLANNING_PROFILE.read_timeout_seconds == 120
-    assert ITINERARY_PLANNING_ITERATION_BUDGET_KEY.name == "planning.iteration"
+    assert ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY.name == "planning.model_invocation"
     assert ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY.name == "planning.direction_call"
     assert WorkflowPhase.ITINERARY_PLANNING.value == "itinerary_planning"
     assert TravelMode.TRANSIT.value == "transit"
@@ -203,7 +205,7 @@ async def test_real_candidate_research_incomplete_unchanged_uid_resumes_exact_re
         assert successor.predecessor_ref == researched.candidate_set_ref
     resume = ItineraryPlanningResumeRequest(predecessor_planning_ref=awaiting.planning_ref,
         supplemented_candidate_set_ref=supplemented.candidate_set_ref,
-        operation_plan=_plan(run_id, suffix="actual_resume"), supplemental_operation_plan=supplemental_plan)
+        operation_plan=_plan(run_id, suffix="actual_resume", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17))), supplemental_operation_plan=supplemental_plan)
     def changed_id(name):
         return OperationId(run_id=run_id, phase=WorkflowPhase.CANDIDATE_RESEARCH, logical_step=name)
     different_terminal = supplemental_plan.model_copy(update={"terminal_successor_operation_id": changed_id("different_research_terminal")})
@@ -252,7 +254,7 @@ async def test_real_runtime_uses_new_geocode_handle_for_directions() -> None:
             context = json.loads(request.user.split("BEGIN_TYPED_PLANNING_DATA\n")[1].split("\nEND_TYPED_PLANNING_DATA")[0])
             self.hotel = next(item["handle"] for item in context["handles"] if item["kind"] == "hotel")
             assert context["confirmed"]["arrival"]["hub_name"] == "杭州东站"
-            return self.response((("locate", "geocode_hub", {"endpoint_kind": "arrival"}),))
+            return self.response((("locate", "geocode_hub", {"endpoint_kind": "arrival"}), ("locate_departure", "geocode_hub", {"endpoint_kind": "departure"})))
 
         async def ainvoke_tool_continuation(self, request):
             latest = [item for item in request.messages if item["role"] == "tool"][-1]
@@ -260,12 +262,12 @@ async def test_real_runtime_uses_new_geocode_handle_for_directions() -> None:
             assert "planning_context" not in data
             state = data["planning_state"]
             if self.call_count == 1:
-                assert latest["tool_call_id"] == "locate" and state["iterations_consumed"] == 1
+                assert latest["tool_call_id"] == "locate_departure" and state["model_invocations_consumed"] == 1
                 assert state["candidates"] == []
-                self.hub = data["tool_result"]["observation"]["issued_handles"][0]
+                self.hub = json.loads([item for item in request.messages if item["role"] == "tool"][-2]["content"])["tool_result"]["observation"]["issued_handles"][0]
                 return self.response((("route", "plan_directions", {"legs": [{"leg_id": "arrival", "origin_handle": self.hub,
                     "destination_handle": self.hotel, "transport_semantic": "walking", "route_mode": "walking", "alternatives_limit": 1}]}),))
-            assert latest["tool_call_id"] == "route" and state["iterations_consumed"] == 2
+            assert latest["tool_call_id"] == "route" and state["model_invocations_consumed"] == 2
             assert data["tool_result"]["observation"]["observations"][0]["directions_handle"]
             return self.response(())
 
@@ -274,14 +276,14 @@ async def test_real_runtime_uses_new_geocode_handle_for_directions() -> None:
     request = request.model_copy(update={"confirmed": request.confirmed.model_copy(update={"requirement": request.confirmed.requirement.model_copy(update={"time_window": window})})})
     def op(step):
         return OperationId(run_id=request.operation_plan.run_id, phase=WorkflowPhase.ITINERARY_PLANNING, logical_step=step)
-    request = request.model_copy(update={"operation_plan": request.operation_plan.model_copy(update={"hub_geocode_operation_ids": (op("real_hub"),), "direction_operation_ids": (op("real_route"),)})})
+    request = request.model_copy(update={"operation_plan": request.operation_plan.model_copy(update={"hub_geocode_operation_ids": (op("real_hub"), op("real_hub_departure")), "direction_operation_ids": (op("real_route"),)})})
     service._map_adapter = FakeMapAdapter(geocode_factory=lambda _: GeocodeSuccess(result=GeocodeCandidate(formatted_address="杭州东站", coordinate=BaiduCoordinate(latitude=30.29, longitude=120.21), confidence=0.98), provenance=map_provenance(MapCapability.GEOCODING)))
     provider = Provider()
     service._runtime = DeepSeekRuntime(provider=provider, sleeper=RecordingSleeper())
     result = await service.plan_initial(request)
     assert result.outcome_type == "incomplete", result
     assert provider.call_count == 3
-    assert len(service._map_adapter.geocode_calls) == len(service._map_adapter.directions_calls) == 1
+    assert len(service._map_adapter.geocode_calls) == 2 and len(service._map_adapter.directions_calls) == 1
 
 
 def test_public_and_upstream_values_use_fresh_explicit_artifact_snapshots() -> None:

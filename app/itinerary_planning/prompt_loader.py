@@ -9,8 +9,8 @@ from importlib import resources
 from .errors import ItineraryPlanningConfigurationError
 
 
-PLANNING_PROMPT_VERSION = "planning-v4"
-_PROMPT_RESOURCE_NAME = "planning_v4.txt"
+PLANNING_PROMPT_VERSION = "planning-v5"
+_PROMPT_RESOURCE_NAME = "planning_v5.txt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +50,7 @@ def _validate_prompt_bytes(payload: bytes) -> PromptResource:
 
 # This value is intentionally filled from the immutable resource bytes after the
 # resource is created. It is a content contract, not a runtime-discovered hash.
-PLANNING_PROMPT_SHA256 = "sha256:5b17e4084da441232a44bea1e0bd881cd22fa2dc24280e0aa2f4769dbc326880"
+PLANNING_PROMPT_SHA256 = "sha256:e45c22aad9f0013964c158d91c4b9713c3e6f3c7890efdb9783f69bd1e0b39d9"
 PLANNING_PROMPT_HASH = PLANNING_PROMPT_SHA256
 
 

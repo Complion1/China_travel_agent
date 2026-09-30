@@ -17,11 +17,12 @@ def test_resume_v2_requires_actual_upstream_plan_and_preserves_other_versions():
         supplemental_operation_plan=_supplemental_plan(run_id))
     request = ItineraryPlanningResumeRequest(**fields)
     assert tuple(type(request).model_fields) == ("schema_version", "predecessor_planning_ref", "supplemented_candidate_set_ref", "operation_plan", "supplemental_operation_plan")
-    assert request.schema_version == "2.0"
-    assert request.operation_plan.schema_version == request.supplemental_operation_plan.schema_version == ITINERARY_PLANNING_SCHEMA_VERSION == "1.0"
+    assert request.schema_version == "3.0"
+    assert request.operation_plan.schema_version == ITINERARY_PLANNING_SCHEMA_VERSION == "2.0"
+    assert request.supplemental_operation_plan.schema_version == "1.0"
     assert ItineraryPlanningResumeRequest.model_validate_json(request.model_dump_json(), strict=True) == request
     with pytest.raises(ValidationError):
-        ItineraryPlanningResumeRequest(**fields, schema_version="1.0")
+        ItineraryPlanningResumeRequest(**fields, schema_version='2.0')
     with pytest.raises(ValidationError):
         ItineraryPlanningResumeRequest(**{key: value for key, value in fields.items() if key != "supplemental_operation_plan"})
 
@@ -35,7 +36,7 @@ from app.itinerary_planning import (
     DayPlan,
     HotelLocationRef,
     ItineraryPlanningOperationPlan,
-    PlanningIterationOperationIds,
+    PlanningInvocationOperationIds,
     PlanningDayKind,
     PlanningFailureCode,
     PlanningStopReason,
@@ -320,12 +321,12 @@ def test_resume_accepts_remaining_contiguous_slots_and_rejects_bad_sequences() -
             for index in indexes
         )
         return ItineraryPlanningOperationPlan(
-            run_id=run_id, iteration_slots=slots, hub_geocode_operation_ids=(), matrix_operation_ids=(),
-            direction_operation_ids=(), terminal_action_operation_id=_planning_operation(run_id, "terminal-action"),
+            run_id=run_id, invocation_slots=slots, hub_geocode_operation_ids=(), matrix_operation_ids=(),
+            direction_operation_ids=(),
             terminal_successor_operation_id=_planning_operation(run_id, "terminal-successor"),
         )
 
-    assert tuple(item.invocation_slot_index for item in plan((3, 4, 5)).iteration_slots) == (3, 4, 5)
+    assert tuple(item.invocation_slot_index for item in plan((3, 4, 5)).invocation_slots) == (3, 4, 5)
     assert plan(())
     with pytest.raises(ValueError):
         plan((3, 5))

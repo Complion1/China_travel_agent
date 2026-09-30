@@ -19,7 +19,7 @@ def test_previous_prompt_remains_immutable():
 
 def test_planning_prompt_is_packaged_utf8_and_hash_locked() -> None:
     resource = load_planning_prompt()
-    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v4"
+    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v5"
     assert resource.sha256 == PLANNING_PROMPT_SHA256
     assert "普通日开放区间固定为当日 07:30–22:00" in resource.text
     assert "backup_distance_exceeded" in resource.text
@@ -44,7 +44,7 @@ def test_prompt_exposes_the_controller_date_and_route_capacity_rules() -> None:
     text = load_planning_prompt().text
     assert "数量必须等于 sightseeing_days" in text
     assert "不得额外创建 transit_only day" in text
-    assert "duration_s=1..1800 时必须排 30 分钟" in text
+    assert "end_at 填 null" in text
     assert "3600/5400/7200 秒" in text
     assert "7200/10800/14400 秒" in text
     assert "抵达、离开接驳和日内各段路线均优先公共交通，网约车和步行其次" in text
@@ -53,8 +53,8 @@ def test_prompt_exposes_the_controller_date_and_route_capacity_rules() -> None:
     assert "先为尚未覆盖的主路线保留 Directions 槽位" in text
     assert "抵达和离开接驳统一使用 ride_hailing/driving" not in text
     assert "标准恰好 3 个" in text
-    assert "规划迭代最多只有 6 轮" in text
-    assert "随后立即单独 submit_itinerary" in text
+    assert "规划最多 17 次逻辑模型调用" in text
+    assert "立即构造最小主行程并提交" in text
     assert "同一业务迭代中每个日期最多调用一次 Matrix" in text
     assert "remaining_matrix_slots" in text
     assert "主行程全部硬约束成立即可提交" in text

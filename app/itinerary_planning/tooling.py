@@ -45,10 +45,11 @@ from .models import (
     SubmitItineraryArgs,
 )
 from .prompting import HandleDirectory, invoke_reader
+from .policy import route_scheduled_minutes
 
 
 _TOOL_DESCRIPTIONS = {
-    PlanningTool.GET_CANDIDATE_EVIDENCE.value: "读取当前候选 handle 的已存在安全证据切片。",
+    PlanningTool.GET_CANDIDATE_EVIDENCE.value: "读取当前候选 handle 的已存在安全证据切片。每次最多16个候选；更多候选须拆分为多个调用，可在同一轮提交。",
     PlanningTool.GEOCODE_HUB.value: "解析已确认抵达或离开枢纽的 typed 地址。",
     PlanningTool.CALCULATE_ROUTE_MATRIX.value: "对已知地点按原序取得一个日期的完整 N×N 路线矩阵。",
     PlanningTool.PLAN_DIRECTIONS.value: "为相邻地点腿按模型顺序取得静态路线摘要、原始 leg_id 和 directions_handle。",
@@ -696,6 +697,7 @@ def _project_directions_observation(payload: DirectionsObservation) -> dict[str,
                 "alternative_index": item.alternative_index,
                 "distance_m": item.distance_m,
                 "duration_s": item.duration_s,
+                "scheduled_minutes": route_scheduled_minutes(item.duration_s),
                 "step_count": item.step_count,
             }
             for item in payload.alternatives

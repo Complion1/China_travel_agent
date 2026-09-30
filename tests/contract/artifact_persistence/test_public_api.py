@@ -17,6 +17,9 @@ def test_package_root_exports_exactly_the_frozen_seven_symbols() -> None:
         "ArtifactPersistenceDependencyError",
         "create_artifact_persistence_runtime",
         "load_artifact_persistence_settings",
+        "InteractionStoreLimits",
+        "DEMO_INTERACTION_STORE_LIMITS",
+        "InteractionStoreReadError",
     ]
     assert artifact_persistence.__all__ == expected
     assert not hasattr(artifact_persistence, "_PostgresArtifactRepository")
@@ -25,7 +28,7 @@ def test_package_root_exports_exactly_the_frozen_seven_symbols() -> None:
 
 def test_factory_signature_is_exact_and_default_limits_are_module04_defaults() -> None:
     signature = inspect.signature(create_artifact_persistence_runtime)
-    assert list(signature.parameters) == ["settings", "registry", "limits"]
+    assert list(signature.parameters) == ["settings", "registry", "limits", "interaction_limits", "interaction_fallback_dir"]
     assert all(
         parameter.kind is inspect.Parameter.KEYWORD_ONLY
         for parameter in signature.parameters.values()

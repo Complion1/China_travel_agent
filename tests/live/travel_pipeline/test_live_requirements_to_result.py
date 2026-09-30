@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 import re
 import sys
 import traceback
@@ -23,7 +24,7 @@ from unittest.mock import patch
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_deepseek import ChatDeepSeek
+from app.llm_runtime.provider import ChatDeepSeek
 
 from app.artifact_persistence import create_artifact_persistence_runtime, load_artifact_persistence_settings
 from app.baidu_map import create_baidu_map_runtime, load_baidu_map_settings
@@ -40,12 +41,12 @@ from app.hotel_selection import (
 )
 from app.itinerary_planning import (
     ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS, ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
-    ITINERARY_PLANNING_ITERATION_BUDGET_KEY, ItineraryPlanningCompleted,
+    ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY, ItineraryPlanningCompleted,
     ItineraryPlanningInitialRequest, ItineraryPlanningModelActionArtifact,
     ItineraryPlanningOperationPlan, ItineraryPlanningService, ItineraryPlanningArtifact,
-    PlanningIterationOperationIds, MapPlanningFailure,
+    PlanningInvocationOperationIds, MapPlanningFailure,
 )
-from app.llm_runtime import DeepSeekRuntime, LLMErrorCode, LLMRuntimeError, ModelRole
+from app.llm_runtime import DeepSeekRuntime, LLMErrorCode, LLMRuntimeError, ModelRole, interaction_run_context
 from app.llm_runtime.provider import LangChainDeepSeekAdapter
 from app.llm_runtime.protocols import ProviderFailure, ProviderResponse
 from app.llm_runtime.settings import load_settings
@@ -121,6 +122,7 @@ def registry():
     return ArtifactSchemaRegistry((
         *HOTEL_ARTIFACT_REGISTRATIONS, *CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS,
         *ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS, *RESULT_FORMATTING_ARTIFACT_REGISTRATIONS,
+        *__import__("app.demo_workflow", fromlist=["DEMO_ARTIFACT_REGISTRATIONS"]).DEMO_ARTIFACT_REGISTRATIONS,
         ArtifactSchemaRegistration(artifact_type="live_test.context", schema_version="1.0", model=LiveContext),
     ))
 
@@ -147,15 +149,14 @@ def plans():
     )
     planning = ItineraryPlanningOperationPlan(
         run_id=RUN_ID,
-        iteration_slots=tuple(PlanningIterationOperationIds(
+        invocation_slots=tuple(PlanningInvocationOperationIds(
             invocation_slot_index=i,
             action_operation_id=op(WorkflowPhase.ITINERARY_PLANNING, f"plan_action_{i}"),
             planning_state_operation_id=op(WorkflowPhase.ITINERARY_PLANNING, f"plan_state_{i}"),
-        ) for i in range(6)),
+        ) for i in range(17)),
         hub_geocode_operation_ids=tuple(op(WorkflowPhase.ITINERARY_PLANNING, f"plan_hub_{i}") for i in range(2)),
-        matrix_operation_ids=tuple(op(WorkflowPhase.ITINERARY_PLANNING, f"plan_matrix_{i}") for i in range(18)),
+        matrix_operation_ids=tuple(op(WorkflowPhase.ITINERARY_PLANNING, f"plan_matrix_{i}") for i in range(51)),
         direction_operation_ids=tuple(op(WorkflowPhase.ITINERARY_PLANNING, f"plan_direction_{i}") for i in range(26)),
-        terminal_action_operation_id=op(WorkflowPhase.ITINERARY_PLANNING, "plan_terminal_action"),
         terminal_successor_operation_id=op(WorkflowPhase.ITINERARY_PLANNING, "plan_terminal"),
     )
     return hotel, research, planning
@@ -164,7 +165,7 @@ def plans():
 def budget():
     limits = ((HOTEL_PLACE_CALL_BUDGET_KEY, 3), (CANDIDATE_RESEARCH_ITERATION_BUDGET_KEY, 6),
               (CANDIDATE_RESEARCH_PLACE_CALL_BUDGET_KEY, 48),
-              (ITINERARY_PLANNING_ITERATION_BUDGET_KEY, 6), (ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY, 26))
+              (ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY, 17), (ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY, 26))
     return InMemoryExecutionBudgetManager(
         plan=ExecutionBudgetPlan(schema_version="1.0", run_id=RUN_ID,
                                  limits=tuple(ExecutionBudgetLimit(key=k, limit=v) for k, v in limits)),
@@ -255,9 +256,38 @@ def safe_error_code(error):
     return "UNEXPECTED_EXCEPTION"
 
 
+def enable_error_locations(directory=None):
+    """Keep only the redacted channel visible despite live-test log suppression."""
+    from app.llm_runtime.diagnostics import LOGGER
+    logging.disable(logging.NOTSET)
+    logging.getLogger().setLevel(logging.CRITICAL)
+    for handler in logging.getLogger().handlers:
+        handler.setLevel(logging.CRITICAL)
+    LOGGER.disabled = False
+    LOGGER.setLevel(logging.WARNING)
+    LOGGER.propagate = False
+    for handler in list(LOGGER.handlers):
+        if getattr(handler, "live_error_locations", False):
+            LOGGER.removeHandler(handler)
+            handler.close()
+    class SafeHandler(logging.Handler):
+        live_error_locations = True
+        def emit(self, record):
+            value = json.loads(record.getMessage())
+            value["run_id"] = value.get("run_id") or str(RUN_ID)
+            value["stage"] = STAGE
+            emit("error_location", diagnostic=value)
+            if target.is_dir():
+                with (target / "error-locations.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+    target = Path(directory or os.environ.get("LIVE_DIAGNOSTIC_DIR", "/evidence"))
+    LOGGER.addHandler(SafeHandler())
+
+
 class ObservedProvider:
     """Counts public provider attempts without recording prompts or responses."""
     def __init__(self, delegate):
+        enable_error_locations()
         self.delegate = delegate
 
     def __getattr__(self, name):
@@ -508,14 +538,14 @@ def outcome_summary(outcome):
 async def planning_diagnostics(repository, plan):
     dispositions = Counter()
     tool_counts = Counter()
-    for operation_id in (*[s.action_operation_id for s in plan.iteration_slots], plan.terminal_action_operation_id):
+    for operation_id in tuple(s.action_operation_id for s in plan.invocation_slots):
         found = await repository.lookup(operation_id=operation_id)
         if isinstance(found, ArtifactFound):
             artifact = (await repository.get(found.ref, expected_model=ItineraryPlanningModelActionArtifact)).content
             dispositions[artifact.disposition] += 1
             tool_counts.update(call.tool.value for call in artifact.call_summaries)
     emit("planning_saved_actions", dispositions=dict(dispositions), tools=dict(tool_counts))
-    for index, operation_id in enumerate((*[s.planning_state_operation_id for s in plan.iteration_slots], plan.terminal_successor_operation_id)):
+    for index, operation_id in enumerate((*[s.planning_state_operation_id for s in plan.invocation_slots], plan.terminal_successor_operation_id)):
         found = await repository.lookup(operation_id=operation_id)
         if isinstance(found, ArtifactFound):
             artifact = (await repository.get(found.ref, expected_model=ItineraryPlanningArtifact)).content
@@ -627,7 +657,7 @@ async def format_result(repository):
     require(isinstance(await repository.lookup(operation_id=op(WorkflowPhase.OUTPUT_FORMATTING, "result_index")), ArtifactAbsent),
             "STAGE_ALREADY_EXISTS")
     stage("formatting")
-    request = ResultFormattingRequest(schema_version="1.0", state=new_state(state,
+    request = ResultFormattingRequest(schema_version="2.0", state=new_state(state,
         phase=WorkflowPhase.ITINERARY_PLANNING, refs=(source.ref,)), itinerary_ref=source.ref)
     formatter = ResultFormattingService(artifact_repository=repository)
     prepared = await formatter.prepare(request)
@@ -638,7 +668,7 @@ async def format_result(repository):
     require(isinstance(ready, ResultIndexReady), "INDEX_BUILD_FAILED")
     index_ref = await repository.put(build_result_artifact_write_request(
         operation_id=op(WorkflowPhase.OUTPUT_FORMATTING, "result_index"), artifact=ready.index))
-    loaded = await formatter.load(ResultReadRequest(schema_version="1.0", state=new_state(state,
+    loaded = await formatter.load(ResultReadRequest(schema_version="2.0", state=new_state(state,
         phase=WorkflowPhase.OUTPUT_FORMATTING, refs=(source.ref, index_ref)), index_ref=index_ref))
     require(isinstance(loaded, ResultFormattingLoaded), "RESULT_LOAD_FAILED")
     require(not COUNTS, "FORMATTING_UNEXPECTED_EXTERNAL_CALLS")
@@ -750,7 +780,7 @@ async def verify(repository):
         require(isinstance(found, ArtifactFound) and found.ref == entry.ref, "RESTART_DAY_LOOKUP_MISMATCH")
         await repository.get(entry.ref, expected_model=ResultDayArtifact)
     loaded = await ResultFormattingService(artifact_repository=repository).load(ResultReadRequest(
-        schema_version="1.0", state=new_state(state, phase=WorkflowPhase.OUTPUT_FORMATTING,
+        schema_version="2.0", state=new_state(state, phase=WorkflowPhase.OUTPUT_FORMATTING,
         refs=(index.source_itinerary_ref, index_found.ref)), index_ref=index_found.ref))
     require(isinstance(loaded, ResultFormattingLoaded), "RESTART_LOAD_FAILED")
     require(not COUNTS, "RESTART_UNEXPECTED_EXTERNAL_CALLS")
@@ -792,9 +822,137 @@ def selfcheck():
     emit("selfcheck_pass", input_sha256=hashlib.sha256(RAW_INPUT.encode("utf-8")).hexdigest())
 
 
-async def run(mode):
-    persistence = await create_artifact_persistence_runtime(settings=settings(), registry=registry())
+
+async def production_root(persistence, *, verify_only=False):
+    """Use the production root; same approved three-day case, no extra retries."""
+    from app.demo_workflow import (DemoWorkflowDependencies, DemoDiagnostics, create_demo_workflow_definition,
+        DemoStartCommand, DemoRequirementCommand, DemoHotelCommand)
+    from app.demo_workflow.artifacts import DemoControlArtifact
+    from app.durable_execution import (create_durable_execution_runtime, load_durable_execution_settings,
+        DEMO_DURABLE_EXECUTION_LIMITS, DurableExecutionPaused, DurableExecutionTerminal)
+    from app.workflow_contracts import (DEMO_ARTIFACT_REPOSITORY_LIMITS, NoOpSafeWorkflowEventSink,
+        SystemMonotonicClock, RandomUUIDFactory)
+    from app.hotel_selection import HotelDiscoveryArtifact
+    from app.artifact_persistence import InteractionStoreReadError
+    from scripts.export_interactions import write_export, summarize, merge_records, fallback_records
+    output = Path(os.environ.get("LIVE_DIAGNOSTIC_DIR", "/evidence"))
+    output.mkdir(parents=True, exist_ok=True)
+    runtime = definition = llm = None
+    result = None
+    def forbidden(*args, **kwargs):
+        raise HarnessFailure("VERIFY_UNEXPECTED_EXTERNAL_CALL")
+    class Sink:
+        async def store(self, **kwargs):
+            pass
+    async def execute(maps=None):
+        nonlocal runtime, definition, result
+        map_settings = None if verify_only else load_baidu_map_settings(environ={"BAIDU_MAPS_API_KEY": os.environ["BAIDU_MAPS_API_KEY"]})
+        configured = () if verify_only else tuple(value.encode("utf8") for value in (
+            os.environ["DEEPSEEK_API_KEY"], map_settings.api_key.get_secret_value(), os.environ["POSTGRES_PASSWORD"]))
+        configured = (*configured, *(json.dumps(value.decode("utf8"), ensure_ascii=True)[1:-1].encode("utf8") for value in configured))
+        diagnostic = DemoDiagnostics(sink=NoOpSafeWorkflowEventSink(), clock=SystemUtcClock(),
+            monotonic_clock=SystemMonotonicClock(), uuid_provider=RandomUUIDFactory(), interaction_secrets=configured)
+        domain = RequirementDomainService(extractor=object() if verify_only else ObservedExtractor(
+            DeepSeekRequirementExtractor(runtime=llm, invocation_sink=diagnostic)), evidence_sink=EvidenceSink(), clock=Clock())
+        adapter = None if maps is None else ObservedMap(maps.adapter)
+        deps = DemoWorkflowDependencies(domain_service=domain, diagnostics=diagnostic,
+            hotel_factory=forbidden if verify_only else lambda cap: HotelCandidateSelectionService(adapter, cap.artifact_repository, cap.execution_budget_manager, SystemUtcClock()),
+            research_factory=forbidden if verify_only else lambda cap: CandidateResearchService(runtime=llm, map_adapter=adapter,
+                artifact_repository=cap.artifact_repository, budget_manager=cap.execution_budget_manager),
+            planning_factory=forbidden if verify_only else lambda cap: ItineraryPlanningService(runtime=llm, map_adapter=adapter,
+                artifact_repository=cap.artifact_repository, budget_manager=cap.execution_budget_manager),
+            durable_limits=DEMO_DURABLE_EXECUTION_LIMITS, artifact_limits=DEMO_ARTIFACT_REPOSITORY_LIMITS,
+            interaction_recorder=persistence.interaction_recorder)
+        definition = create_demo_workflow_definition(dependencies=deps)
+        runtime = await create_durable_execution_runtime(settings=load_durable_execution_settings(), artifact_repository=persistence.repository,
+            contract=definition.contract, command_codec=definition.command_codec, budget_plan_provider=definition.budget_plan_provider,
+            graph_factory=definition.graph_factory, pause_credential_sink=Sink(), cancellation_state_factory=definition.cancellation_state_factory)
+        if verify_only:
+            state = await runtime.get_state(run_id=RUN_ID)
+            index = next(ref for ref in state.artifact_refs if ref.artifact_type == "result_formatting.index")
+            loaded = await ResultFormattingService(artifact_repository=persistence.repository).load(ResultReadRequest(schema_version="2.0", state=state, index_ref=index))
+            require(isinstance(loaded, ResultFormattingLoaded) and not COUNTS, "ROOT_RESTART_READ_FAILED")
+            return manifest(loaded)
+        diagnostic.start_run(run_id=RUN_ID, trace_id=TRACE_ID)
+        stage("root_requirements")
+        with diagnostic.operation(run_id=RUN_ID, trace_id=TRACE_ID, turn_id=TURN_ID, kind="initial"):
+            result = await runtime.start(run_id=RUN_ID, trace_id=TRACE_ID, command=DemoStartCommand(schema_version="1.0", kind="start",
+                turn=RequirementTurnInput(turn_id=TURN_ID, user_message=RAW_INPUT, session_date=Clock().today(),
+                    timezone="Asia/Shanghai", intent=RequirementIntent.INITIAL, current=RequirementDomainState())))
+        require(isinstance(result, DurableExecutionPaused) and isinstance(result.state.requirement_outcome, NeedConfirmation), "ROOT_REQUIREMENTS_NOT_READY")
+        scenario_matches(result.state.requirement_outcome.requirement)
+        stage("root_hotel")
+        with diagnostic.operation(run_id=RUN_ID, trace_id=TRACE_ID, turn_id=None, kind="resume"):
+            result = await runtime.resume(run_id=RUN_ID, pause_token=result.pause.pause_token, command=DemoRequirementCommand(schema_version="1.0",
+                kind="requirement", map_requested=False, resume=RequirementConfirmationResume(action=RequirementConfirmation(decision="accept", revision_text=None))))
+        require(isinstance(result, DurableExecutionPaused) and result.state.phase is WorkflowPhase.HOTEL_SELECTION, "ROOT_HOTEL_NOT_READY")
+        control_ref = next(ref for ref in result.state.artifact_refs if ref.artifact_type == "demo.control")
+        control = (await persistence.repository.get(control_ref, expected_model=DemoControlArtifact)).content
+        hotels = (await persistence.repository.get(control.hotel_candidate_ref, expected_model=HotelDiscoveryArtifact)).content
+        stage("root_research_planning")
+        with diagnostic.operation(run_id=RUN_ID, trace_id=TRACE_ID, turn_id=None, kind="resume"):
+            result = await runtime.resume(run_id=RUN_ID, pause_token=result.pause.pause_token, command=DemoHotelCommand(schema_version="1.0",
+                kind="hotel", candidate_set_ref=control.hotel_candidate_ref, action=HotelSelectCommand(selected_uid=hotels.result.candidates[0].uid)))
+        require(isinstance(result, DurableExecutionTerminal), "ROOT_NOT_TERMINAL")
+        await diagnostic.finish(state=result.state, budget_snapshots=await runtime.get_terminal_budget_snapshots(run_id=RUN_ID))
+        emit("root_terminal", delivery=result.state.delivery_status.value, code=result.state.terminal_code)
+        with (output / "state.json").open("x", encoding="utf8") as stream:
+            stream.write(result.state.model_dump_json())
+        require(result.state.delivery_status in {DeliveryStatus.DEMO_READY, DeliveryStatus.DEGRADED}, "ROOT_ITINERARY_NOT_COMPLETED")
+        index = next(ref for ref in result.state.artifact_refs if ref.artifact_type == "result_formatting.index")
+        loaded = await ResultFormattingService(artifact_repository=persistence.repository).load(ResultReadRequest(schema_version="2.0", state=result.state, index_ref=index))
+        require(isinstance(loaded, ResultFormattingLoaded), "ROOT_RESULT_LOAD_FAILED")
+        with (output / "itinerary.md").open("x", encoding="utf8") as stream:
+            stream.write(loaded.markdown)
+        return manifest(loaded)
     try:
+        if verify_only:
+            return await execute()
+        llm = DeepSeekRuntime(provider=ObservedProvider(LangChainDeepSeekAdapter(load_settings(
+            environ={"DEEPSEEK_API_KEY": os.environ["DEEPSEEK_API_KEY"]}))), sleeper=RealSleeper())
+        map_settings = load_baidu_map_settings(environ={"BAIDU_MAPS_API_KEY": os.environ["BAIDU_MAPS_API_KEY"]})
+        async with create_baidu_map_runtime(settings=map_settings, clock=SystemUtcClock()) as maps:
+            return await execute(maps)
+    finally:
+        primary_error = sys.exc_info()[1]
+        diagnostic_error = None
+        try:
+            if not verify_only:
+                read_failed = False
+                try:
+                    records = await persistence.interaction_recorder.read_run(RUN_ID)
+                except InteractionStoreReadError:
+                    records, read_failed = (), True
+                records = merge_records(RUN_ID, records, fallback_records(output / "fallback", RUN_ID))
+                write_export(RUN_ID, output, records, database_available=not read_failed)
+                data = summarize(records)
+                emit("interaction_export", run_id=str(RUN_ID), records=len(records), complete=data["records_complete"] and not read_failed, known_usage=data["known_usage"])
+                require(not read_failed and data["records_complete"], "ROOT_DIAGNOSTICS_INCOMPLETE")
+        except BaseException as error:
+            diagnostic_error = error
+            if isinstance(error, Exception):
+                emit("interaction_export", run_id=str(RUN_ID), complete=False, code="ROOT_DIAGNOSTICS_INCOMPLETE")
+        closers = ([] if runtime is None else [runtime.close()]) + ([] if definition is None else [definition.aclose()]) + ([] if llm is None else [llm.aclose()])
+        closed = await asyncio.gather(*closers, return_exceptions=True)
+        if isinstance(diagnostic_error, asyncio.CancelledError):
+            raise diagnostic_error
+        if primary_error is None:
+            failures = [error for error in (diagnostic_error, *closed) if isinstance(error, BaseException)]
+            cancellation = next((error for error in failures if not isinstance(error, Exception)), None)
+            if cancellation is not None:
+                raise cancellation
+            require(not failures, "ROOT_DIAGNOSTICS_INCOMPLETE" if diagnostic_error is not None else "ROOT_RESOURCE_CLOSE_FAILED")
+
+
+async def run(mode):
+    fallback = Path(os.environ.get("LIVE_DIAGNOSTIC_DIR", "/evidence")) / "fallback" if mode == "root" else None
+    if fallback is not None:
+        fallback.mkdir(parents=True, exist_ok=True)
+    persistence = await create_artifact_persistence_runtime(settings=settings(), registry=registry(), interaction_fallback_dir=fallback)
+    try:
+        if mode in {"root", "root_verify"}:
+            with patch("app.llm_runtime.provider.ChatDeepSeek", side_effect=observed_sdk_factory):
+                return await asyncio.wait_for(production_root(persistence, verify_only=mode == "root_verify"), timeout=1800)
         if mode in (*STAGES, "formatting"):
             with patch("app.llm_runtime.provider.ChatDeepSeek", side_effect=observed_sdk_factory):
                 return await asyncio.wait_for(live_stage(persistence.repository, mode), timeout=1800)
@@ -853,7 +1011,7 @@ def main():
     mode = sys.argv[1] if len(sys.argv) == 2 else "invalid"
     try:
         require(mode in {"selfcheck", "verify", "qualify", "checkpoint_validate", "checkpoint_probe",
-                         "checkpoint_probe_verify", *STAGES, "formatting"}, "INVALID_MODE")
+                         "checkpoint_probe_verify", "root", "root_verify", *STAGES, "formatting"}, "INVALID_MODE")
         if mode == "selfcheck":
             selfcheck()
         elif mode == "qualify":
