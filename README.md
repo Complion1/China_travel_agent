@@ -1,14 +1,14 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–12 的当前批准范围实现及真实联调修复已进入本地 `main`；最新修复提交为 `b9b55d2`（2026-09-28）。当前 `feature/module-13-demo-workflow` 工作区新增未提交的 M11 网页控制扩展及 M13 生产主图，实现与提交前验证记录见实施状态 §14，尚未提交。Module 11 保留演示范围验收及既有延期边界。生产 LLM Profile 使用 DeepSeek V4 Flash；Module 10/11 提供 PostgreSQL 产物和执行状态持久化；网页/API 装配属于 M14，真实浏览器验收属于 M15。未执行 push、PR 或部署。旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent。模块 01–13 的当前批准范围实现已进入本地 `main`，包括 M11 网页控制扩展、M13 生产主图、公交换乘展示、M09 分阶段规划及完整交互诊断；最新实现提交为 `2ee962e`，本地合并记录已由说明文档提交 `71767d3` 固化（2026-09-30）。验证与本地合并记录见 [规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。Module 11 保留演示范围验收及既有延期边界。生产 LLM Profile 使用 DeepSeek V4 Flash；Module 10/11 提供 PostgreSQL 产物和执行状态持久化；M14 网页/API 装配尚未实现，M15 真实浏览器验收尚未执行。未执行 push、PR 或部署。旧原型接口不构成兼容要求。
 
-模块 01–12 修复收尾时的全量 Docker unit/contract 回归为 **2317 passed、8 warnings**（历史快照）。第 **18/20** 轮复用第 15 轮已通过的真实需求、酒店及 M08 候选检查点，从 M09 开始真实调用，获得 Completed；M12 三个日块、汇总索引及 PostgreSQL 重启后的读取/哈希一致性均通过。成功后停止，剩余两轮未使用。这是复用真实上游的集成链验证，不是第 18 轮重新调用全部上游，也不代表 M13/14、完整 M11 恢复闭环或行程质量最优已验收。最新证据见 [统一问题台账](./docs/12_live_pipeline_fixes.md)，模块历史验收见 [实施状态快照](./docs/IMPLEMENTATION_STATUS.md)；[首次真实联调报告](./docs/12_live_pipeline_acceptance.md) 保留当时的失败记录。
+模块 01–12 修复收尾时的全量 Docker unit/contract 回归为 **2317 passed、8 warnings**（历史快照）。第 **18/20** 轮复用第 15 轮已通过的真实需求、酒店及 M08 候选检查点，从 M09 开始真实调用，获得 Completed；M12 三个日块、汇总索引及 PostgreSQL 重启后的读取/哈希一致性均通过。成功后停止，剩余两轮未使用。这是复用真实上游的集成链验证，不是第 18 轮重新调用全部上游；这份历史结果不能替代后续 M13/14 或完整 M11 恢复闭环验收，也不证明行程质量最优。历史问题见 [联调修复记录](./docs/12_live_pipeline_fixes.md)，模块历史验收见 [实施状态快照](./docs/IMPLEMENTATION_STATUS.md)；[首次真实联调报告](./docs/12_live_pipeline_acceptance.md) 保留当时的失败记录。
 
-当前规则：旅行预算金额功能延期，费用仍标未核验；抽取输出上限为 32,768 tokens，规划输入上限为 2 MiB。Module 09 使用 planning-v4 / ModelAction 4.0；备用点可选，缺项不阻止主行程完成、不触发备用点专用补研，已提供的备用点仍需通过资格、距离和证据校验。
+当前规则：旅行预算金额功能延期，费用仍标未核验；抽取输出上限为 32,768 tokens，规划输入上限为 2 MiB。Module 09 使用 planning-v5 / ModelAction 5.0，规划与格式化结果为 2.0；备用点可选，缺项不阻止主行程完成、不触发备用点专用补研，已提供的备用点仍需通过资格、距离和证据校验。
 
 ## Module 11 显式迁移与导入自检
 
-当前未提交的网页控制扩展新增持久取消、run 查询/分页、暂停凭证交接端口、原生酒店恢复、节点只读证据视图及终态预算读取；迁移为 `m11_0002_web_controls`，仍需显式运行。它复用现有 PostgreSQL runs 和预算记录，不另建任务索引库。扩展审查及收尾证据见 [实施状态](docs/IMPLEMENTATION_STATUS.md)；应用端凭证加密、网页调度与浏览器交互留给 M14/M15。
+已进入本地 `main` 的网页控制扩展提供持久取消、run 查询/分页、暂停凭证交接端口、原生酒店恢复、节点只读证据视图及终态预算读取；新环境须显式应用既有迁移 `m11_0002_web_controls`。它复用现有 PostgreSQL runs 和预算记录，不另建任务索引库。扩展审查及收尾证据见 [实施状态](docs/IMPLEMENTATION_STATUS.md)；应用端凭证加密、网页调度与浏览器交互留给 M14/M15。
 
 Module 11 提供持久执行库。当前默认 runtime 只导入 Module 01–13，不连接数据库、不自动迁移，也不启动网页服务器。
 
@@ -38,7 +38,7 @@ Module 11 已按用户授权提交并合并到本地 main（实现提交 `985dcd
 
 酒店必须人工选择；研究合法 Incomplete 且仍有合格候选时继续尝试规划；补研最多五次且共享原预算。只有完整行程及完整结果索引才可交付：主行程营业未知或请求了本期未提供的地图时标为 `degraded`，其余适用门槛通过标为 `demo_ready`（完整达标）。备选缺省、天气及研究曾 Incomplete 不单独降级。
 
-设计与执行合同分别见 [M13 设计](docs/13_demo_workflow.md)、[M13 执行规范](docs/13_demo_workflow_vibe_coding.md)。当前测试与提交资格见 [实施状态 §14](docs/IMPLEMENTATION_STATUS.md#14-m13-生产主图与提交前收尾2026-09-28)。以下命令仅创建本次唯一前缀的隔离资源，所有 Python 均在 Docker 中执行；用新的前缀替换示例值：
+设计与执行合同分别见 [M13 设计](docs/13_demo_workflow.md)、[M13 执行规范](docs/13_demo_workflow_vibe_coding.md)。最新验证与已提交状态见 [规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。以下命令仅创建本次唯一前缀的隔离资源，所有 Python 均在 Docker 中执行；用新的前缀替换示例值：
 
 ```powershell
 ./scripts/verify_module13.ps1 -Set UnitContract -ProjectPrefix cta-m13-local-0928a
@@ -47,12 +47,13 @@ Module 11 已按用户授权提交并合并到本地 main（实现提交 `985dcd
 
 M14 仍负责 HTTP/浏览器交互、原暂停凭证保护、单执行名额及断线后的后台任务管理。M13 的离线模型/地图替身测试不等同于 M15 真实网页发布验收。
 
-本轮 C 批已验证真实 PostgreSQL integration `3 passed`、同一专属卷重建 PostgreSQL 后新进程读取 `3` 个日块且摘要一致，以及完整 unit/contract `2218 passed, 7 warnings`；既有 M10/M11 测试库迁移与本次资源清理通过。这些是收尾同步前的阶段证据，最终源码的独立 Closeout 结果另见实施状态快照。
+早期 C 批验证了真实 PostgreSQL integration `3 passed`、同一专属卷重建 PostgreSQL 后新进程读取 `3` 个日块且摘要一致，以及完整 unit/contract `2218 passed, 7 warnings`；当时的 M10/M11 测试库迁移与资源清理通过。这些是历史阶段证据，最新资格见上述规划改进报告。
 
 ## 架构基线
 
 ```text
-CLI Demo
+前端网页（M14 待实现）
+        → 应用 API
         → Application Service
         → LangGraph workflow
         → Runtime Agent Skill / deterministic domain service
@@ -65,7 +66,7 @@ CLI Demo
 - LangGraph：主工作流、状态转换、受控循环、interrupt/resume 和 checkpoint。
 - Runtime Agent Skill：单一业务能力、Prompt、工具白名单、调用预算、停止条件与失败策略。
 - MCP：外部 Agent 工具协议。首版百度地图能力由模块 06 的 typed adapter 和 MCP Gateway 接入。
-- PostgreSQL：Module 10 已提供显式创建的 Artifact Repository、Runtime 和 Alembic 迁移；Module 11 工作区实现负责 checkpoint、执行账本和跨进程恢复，采用独立的显式迁移入口。数据库不通过 MCP；M13 生产主图由 M14 注入 M10 公开仓储，PostgreSQL 故障时不自动回退或双写。进程内 Repository 仅用于独立能力测试。
+- PostgreSQL：Module 10 已提供显式创建的 Artifact Repository、Runtime 和 Alembic 迁移；Module 11 负责 checkpoint、执行账本和跨进程恢复，采用独立的显式迁移入口。数据库不通过 MCP；M13 生产主图由 M14 注入 M10 公开仓储，PostgreSQL 故障时不自动回退或双写。进程内 Repository 仅用于独立能力测试。
 
 外部工具型 Skill 在项目已指定 MCP Server 时必须走 MCP；纯领域计算和确定性校验不使用 MCP。Skill 不得直连供应商 HTTP、直接管理 MCP session 或把 MCP 原始 payload 写入 Graph state。DeepSeek 由模块 02 通过 LangChain 专用集成调用，不经过 MCP。
 
@@ -102,7 +103,7 @@ CLI Demo
 
 ## 模块边界与历史资格
 
-模块 01–05 已完成当前实现与离线验收：模块 05 unit `232 passed`、contract `65 passed`，line `97.7777777778%`、branch `95.0000000000%`、combined `97.0491803279%`；完整 Docker 离线 unit/contract 回归为 `935 passed`。模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`；模块 01、03、04 的本轮受影响回归分别为 `182`、`78`、`235 passed`。模块 02 的 DeepSeek V4 Flash capability live 已通过，模块 03 的 Flash live 资格为 `16/16`。这些数字是各模块早期验收快照，最新全量回归见本文开头，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
+模块 01–05 已完成当前实现与离线验收：模块 05 unit `232 passed`、contract `65 passed`，line `97.7777777778%`、branch `95.0000000000%`、combined `97.0491803279%`；完整 Docker 离线 unit/contract 回归为 `935 passed`。模块 01 coverage 为 line `98.43%`、branch `96.83%`、combined `98.03%`，模块 04 coverage 为 line `97.50%`、branch `95.39%`、combined `96.98%`；模块 01、03、04 的本轮受影响回归分别为 `182`、`78`、`235 passed`。模块 02 的 DeepSeek V4 Flash capability live 已通过，模块 03 的 Flash live 资格为 `16/16`。这些数字是各模块早期验收快照，最新全量回归见 [规划改进报告 §7](docs/m09_phase_budget_and_interaction_records_review.md#7-批准后的实际实施快照2026-09-30)，不应复制到长期设计合同；模型、Prompt、依赖或能力边界变化后需重新进行 live 资格。
 
 模块 06 提供百度地图 typed adapter、七项核心 MCP Gateway 能力、技术限流、生命周期和安全边界。本次 closeout 最终离线快照为：Module 06 + M2 offline `222 passed`；coverage `221 passed`，line `1945/2002`（`97.15%`）、branch `544/570`（`95.44%`）、combined `2489/2572`（`96.77%`）；Module 04 回归 `235 passed`；完整 unit/contract `1156 passed`。当前源码七项核心 live 和 M2 live 已通过，地图调起当前为 `NOT_AVAILABLE/NOT_IN_MANIFEST`；不在此记录地址、坐标、UID、天气、路线、指令或 Secret。
 
@@ -112,7 +113,7 @@ CLI Demo
 
 模块 10 提供符合 Module 04 三方法公共接口的 PostgreSQL Artifact Repository、显式生命周期 Runtime、固定 `artifact_store` schema、Alembic `m10_0001` 迁移、幂等写入、容量与并发控制、断线单次重试和真实重启持久性。AP-T06 最终资格为 Module 10 unit `64 passed`、contract `7 passed`、迁移 `15 passed`、普通 PostgreSQL integration `31 passed`、Module 04 映射／并发／故障 `20 passed`、全量 unit/contract `2041 passed`；coverage line／branch／combined 为 `87.7127% / 74.6479% / 84.9478%`。用户追加的真实 API 验收已证明 Module 10 可保存并在重连后读取真实行程产物；两次上游 Module 09 规划未得到 Completed 终态，但用户已明确决定该问题不阻断 Module 10。Module 10 实现提交 `cc1e6ef545db52f07cc15af64ea12ed589d24dda` 已 fast-forward 合并到本地 `main`，当前保持冻结。Module 10 不实现删除、TTL、checkpoint、自动迁移、生产 Registry 组合或生产部署。
 
-模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。模块 05 实现需求子图、同进程 interrupt/resume 和严格 checkpoint；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前开发没有客户端、FastAPI 或 Web；模块 14 只规划薄 CLI 和 Application Service。
+模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。模块 05 实现需求子图、同进程 interrupt/resume 和严格 checkpoint；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。模块 14 负责 Application Service、应用 API 和前端网页，具体框架在 M14 设计时确认；当前网页尚未实现，CLI 仅可作为诊断辅助。
 
 安装、环境变量、运行命令和 live probe 命令必须以对应模块文档为准，不允许从旧原型 README 推断。
 
