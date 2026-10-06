@@ -19,6 +19,7 @@ from app.artifact_persistence.errors import (
 )
 from app.artifact_persistence.repository import _PostgresArtifactRepository
 from app.artifact_persistence.settings import ArtifactPersistenceSettings
+from app.artifact_persistence.capacity import ArtifactCapacitySnapshot
 from app.artifact_persistence.interaction_records import (
     DEMO_INTERACTION_STORE_LIMITS, InteractionStoreLimits,
     _PostgresInteractionRecorder, _diagnostic_schema_available,
@@ -408,6 +409,30 @@ class ArtifactPersistenceRuntime:
     async def __aenter__(self) -> "ArtifactPersistenceRuntime":
         self._ensure_lifecycle()
         return self
+
+    async def get_capacity_snapshot(self) -> ArtifactCapacitySnapshot:
+        """Read the authoritative singleton without initializing or changing it."""
+        self._ensure_lifecycle()
+        try:
+            async with self._pool.connection(timeout=_POOL_TIMEOUT) as connection:
+                async with connection.cursor() as cursor:
+                    await cursor.execute("SELECT max_artifact_bytes, max_artifacts, max_total_content_bytes, artifact_count, total_content_bytes FROM artifact_store.capacity_state WHERE singleton_id = 1")
+                    row = await cursor.fetchone()
+            if row is None:
+                _configuration_failure()
+            snapshot = ArtifactCapacitySnapshot(schema_version="1.0", **dict(zip(
+                ("max_artifact_bytes", "max_artifacts", "max_total_content_bytes", "artifact_count", "total_content_bytes"), row, strict=True)))
+            limits = self._repository._limits
+            if (snapshot.max_artifact_bytes, snapshot.max_artifacts, snapshot.max_total_content_bytes) != (
+                    limits.max_artifact_bytes, limits.max_artifacts, limits.max_total_content_bytes):
+                _configuration_failure()
+            return snapshot
+        except (ArtifactPersistenceConfigurationError, ArtifactPersistenceDependencyError):
+            raise
+        except (ValueError, TypeError):
+            _configuration_failure()
+        except Exception:
+            _dependency_failure()
 
     async def __aexit__(
         self,

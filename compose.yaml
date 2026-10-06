@@ -20,6 +20,97 @@ x-agent-build: &agent-build
     PYTHON_IMAGE: ${PYTHON_IMAGE:-docker.m.daocloud.io/library/python:3.12-slim}
 
 services:
+  m14-web:
+    <<: *agent-security
+    profiles: ["m14-local"]
+    image: ${M14_RUNTIME_IMAGE:-china-travel-agent:m14-local}
+    build:
+      <<: *agent-build
+      target: runtime
+    restart: unless-stopped
+    stop_grace_period: 65s
+    command: ["python", "-m", "app.web_application"]
+    environment:
+      TZ: Asia/Shanghai
+      WEB_PUBLIC_ORIGIN: ${WEB_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
+      WEB_PORT: "8080"
+      WEB_PAUSE_KEY_FILE: /run/cta/pause-key.json
+      WEB_DATA_VOLUME_PATH: /pg-data
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      BAIDU_MAPS_API_KEY: ${BAIDU_MAPS_API_KEY:-}
+      POSTGRES_HOST: m14-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: m14_demo
+      POSTGRES_USER: m14_demo
+      POSTGRES_PASSWORD: ${M14_LOCAL_PG_PASSWORD:-}
+    ports: ["127.0.0.1:8080:8080"]
+    networks: [m14-demo]
+    volumes:
+      - type: bind
+        source: ${M14_KEY_PATH:-./.m14-local/keys/pause-key.json}
+        target: /run/cta/pause-key.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: volume
+        source: m14_demo_pg_data
+        target: /pg-data
+        read_only: true
+    depends_on:
+      m14-postgres: {condition: service_healthy}
+    mem_limit: 1g
+    cap_drop: [ALL]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  m14-postgres:
+    profiles: ["m14-local"]
+    image: ${POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:16-alpine}
+    environment:
+      POSTGRES_DB: m14_demo
+      POSTGRES_USER: m14_demo
+      POSTGRES_PASSWORD: ${M14_LOCAL_PG_PASSWORD:-}
+      TZ: UTC
+    networks: [m14-demo]
+    volumes: ["m14_demo_pg_data:/var/lib/postgresql/data"]
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "work_mem=2MB", "-c", "max_connections=20", "-c", "max_parallel_workers_per_gather=0"]
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  m14-test-postgres:
+    profiles: ["m14-test"]
+    image: ${POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:16-alpine}
+    environment:
+      POSTGRES_DB: ${MODULE14_TEST_DB:-not-authorized}
+      POSTGRES_USER: ${MODULE14_TEST_USER:-not-authorized}
+      POSTGRES_PASSWORD: ${MODULE14_TEST_PASSWORD:-}
+      TZ: UTC
+    volumes:
+      - m14_test_pg_data:/var/lib/postgresql/data
+    networks:
+      m14-test-internal:
+        aliases: [postgres]
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "work_mem=2MB", "-c", "max_connections=20", "-c", "max_parallel_workers_per_gather=0"]
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
   runtime:
     <<: *agent-security
     image: china-travel-agent:local
@@ -196,3 +287,10 @@ services:
 
 volumes:
   postgres_data:
+  m14_test_pg_data:
+  m14_demo_pg_data:
+
+networks:
+  m14-demo:
+  m14-test-internal:
+    internal: true

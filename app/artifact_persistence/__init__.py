@@ -5,6 +5,7 @@ from app.artifact_persistence.errors import (
     ArtifactPersistenceDependencyError,
     ArtifactPersistenceError,
 )
+from app.artifact_persistence.capacity import ArtifactCapacitySnapshot
 from app.artifact_persistence.interaction_records import (
     InteractionStoreLimits, DEMO_INTERACTION_STORE_LIMITS, InteractionStoreReadError,
 )
@@ -28,4 +29,5 @@ __all__ = [
     "InteractionStoreLimits",
     "DEMO_INTERACTION_STORE_LIMITS",
     "InteractionStoreReadError",
+    "ArtifactCapacitySnapshot",
 ]

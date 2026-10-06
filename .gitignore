@@ -3,4 +3,8 @@ __pycache__/
 .pytest_cache/
 .venv/
 .env
+.env.*
 !.env.example
+.m14-local/
+.m14-cloud/
+**/pause-key.json

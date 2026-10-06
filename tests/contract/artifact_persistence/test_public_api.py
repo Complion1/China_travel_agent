@@ -20,6 +20,7 @@ def test_package_root_exports_exactly_the_frozen_seven_symbols() -> None:
         "InteractionStoreLimits",
         "DEMO_INTERACTION_STORE_LIMITS",
         "InteractionStoreReadError",
+        "ArtifactCapacitySnapshot",
     ]
     assert artifact_persistence.__all__ == expected
     assert not hasattr(artifact_persistence, "_PostgresArtifactRepository")

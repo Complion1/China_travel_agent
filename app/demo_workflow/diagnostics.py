@@ -66,6 +66,7 @@ class DemoDiagnostics:
         self._interaction_recorder = None
         self._interaction_secrets = tuple(interaction_secrets)
         self._interaction_scopes = {}
+        self._active_operations = {}
 
     def _bind_interactions(self, recorder):
         self._interaction_recorder = recorder
@@ -93,11 +94,24 @@ class DemoDiagnostics:
         if history is not None and history.trace_id != trace_id:
             raise DemoWorkflowUsageError()
         token = self._operation.set((run_id, trace_id, turn_id, kind, set()))
+        self._active_operations[run_id] = self._active_operations.get(run_id, 0) + 1
         try:
             with self._interaction_scope(run_id, trace_id):
                 yield
         finally:
             self._operation.reset(token)
+            remaining = self._active_operations[run_id] - 1
+            if remaining:
+                self._active_operations[run_id] = remaining
+            else:
+                self._active_operations.pop(run_id)
+
+    def release_run(self, *, run_id: UUID) -> None:
+        """Release completed observations; the caller owns terminal eligibility."""
+        if type(run_id) is not UUID or self._active_operations.get(run_id, 0):
+            raise DemoWorkflowUsageError()
+        self._histories.pop(run_id, None)
+        self._interaction_scopes.pop(run_id, None)
 
     def accept(self, event):
         event = fresh(event, ExtractionInvocationEvent)

@@ -1,6 +1,57 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent。模块 01–13 的当前批准范围实现已进入本地 `main`，包括 M11 网页控制扩展、M13 生产主图、公交换乘展示、M09 分阶段规划及完整交互诊断；最新实现提交为 `2ee962e`，本地合并记录已由说明文档提交 `71767d3` 固化（2026-09-30）。验证与本地合并记录见 [规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。Module 11 保留演示范围验收及既有延期边界。生产 LLM Profile 使用 DeepSeek V4 Flash；Module 10/11 提供 PostgreSQL 产物和执行状态持久化；M14 网页/API 装配尚未实现，M15 真实浏览器验收尚未执行。未执行 push、PR 或部署。旧原型接口不构成兼容要求。
+中国境内旅游攻略 Agent，当前功能分支已提供 FastAPI 和原生网页入口：需求澄清、确认、人工选择酒店、完整攻略、我的任务及运行统计。本机浏览器离线资格使用真实业务主图与 PostgreSQL，模型和地图为明确标注的受控替身；真实供应商网页验收留 M15。
+
+“补充旅行需求”按本轮缺失信息显示表单：兴趣多选、节奏单选、日期时间与数量控件，房型及限制提供选项，特殊情况可填写其他说明。选项不预选；儿童人数确定后显示对应年龄；自动读取任务进度时保留未提交选择。提交后仍经过原需求校验和完整需求确认。最新澄清交互维护资格与双审状态见[实施状态](docs/IMPLEMENTATION_STATUS.md)。
+
+本次真实网页测试发现，抽取保留“行动限制：无”整行时，派生规则误显示需要行动辅助；已作最小修复，保留原约束文本及证据，只准确识别明确否定。修复后的离线资格及三个真实 API 场景结果以[实施状态](docs/IMPLEMENTATION_STATUS.md)为准，真实网页测试与完整 M15、云端及公网资格分别记录。
+
+**快速体验链接：待发布。** 先阅读[完整公开模拟样例](app/web_application/samples/demo_trip.md)，或按[本机启动步骤](#m14-本机启动)复现。简历只需提供本 GitHub 仓库链接；取得单独部署授权并通过公网验收后，在这里填写实际体验链接。
+
+匿名身份可查看当前浏览器的历史任务，Cookie 固定有效 30 天。全站 200 新任务/日、每访客 20/日、每 IP 5/小时，同时执行 1 个任务且无队列；最终运行摘要同库保存后释放完整事件内存。设计已于 2026-10-05 批准，当前分支为 `feature/module-14-web-application`，尚未提交或合并 M14。逐阶段双审和本次验证见[实施状态](docs/IMPLEMENTATION_STATUS.md)，规范见[M14设计](docs/14_web_application.md)与[执行规范](docs/14_web_application_vibe_coding.md)。
+
+模块 01–13 的当前批准范围实现已进入本地 `main`，包括 M11 网页控制扩展、M13 生产主图、公交换乘展示、M09 分阶段规划及完整交互诊断；实现提交为 `2ee962e`，本地合并记录由说明文档提交 `71767d3` 固化（2026-09-30）。记录见[规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。Module 11 保留演示范围验收及既有延期边界。生产 LLM Profile 使用 DeepSeek V4 Flash；Module 10/11 提供 PostgreSQL 产物和执行状态持久化，当前 M14 复用同库。完整 M15、腾讯云 2GB 实机及公网资格尚未取得；本次本机真实网页测试范围及结果以实施状态为准。push、PR、部署均未执行。
+
+## M14 本机启动
+
+在项目根目录使用 PowerShell 7、Docker 和 Docker Compose。以下是应用实际入口的初始化顺序，供取得真实 API 验收授权后使用；离线 Closeout 不读取真实密钥或调用供应商。默认只绑定 `127.0.0.1:8080`，本机 Demo、隔离测试及未来云项目使用独立卷。
+
+首次创建私有配置并自行填写 `DEEPSEEK_API_KEY`、`BAIDU_MAPS_API_KEY`、`M14_LOCAL_PG_PASSWORD`（数据库密码至少 16 字符），保留精确的 `WEB_PUBLIC_ORIGIN=http://127.0.0.1:8080`。配置和密钥目录已被 Git 与构建上下文排除。已有配置时直接复用，不覆盖：
+
+```powershell
+New-Item -ItemType Directory -Path .m14-local/keys -Force | Out-Null
+if (Test-Path -LiteralPath .m14-local/config.env) { throw '配置已存在，请复用并自行编辑' }
+Copy-Item -LiteralPath .env.example -Destination .m14-local/config.env
+```
+
+从当前源码构建 runtime，并仅在首次初始化时生成暂停密钥。生成命令断网、只输出创建结果，目标文件已存在会拒绝覆盖；以后启动复用同一密钥，不重新生成：
+
+```powershell
+$M14DockerContext = docker context show
+docker --context $M14DockerContext buildx build --builder $M14DockerContext --load --target runtime --tag china-travel-agent:m14-local .
+$M14KeysDir = (Resolve-Path -LiteralPath .m14-local/keys).Path
+docker run --rm --network none --mount "type=bind,source=$M14KeysDir,target=/keys" china-travel-agent:m14-local python -m app.web_application.keygen --output /keys/pause-key.json
+```
+
+显式启动独立 PostgreSQL，再依次执行 M10、M11、M14 迁移。Web 启动只验证 head，不自动迁移。命令明确选择服务，项目名固定为本机 Demo 的 `cta-m14-local`：
+
+```powershell
+docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local up --detach --wait m14-postgres
+docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local run --rm --no-deps m14-web python -m alembic -c app/artifact_persistence/alembic.ini upgrade head
+docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local run --rm --no-deps m14-web python -m app.durable_execution.migrate
+docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local run --rm --no-deps m14-web python -m app.web_application.migrate
+docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local up --detach --wait m14-web
+```
+
+启动后浏览器访问 `http://127.0.0.1:8080`，按页面完成澄清、确认和酒店选择。任务页显示完整攻略并支持复制/下载 Markdown；运行统计默认折叠，读取数据库中保存的最终摘要。`/history` 查看本人任务，`/samples` 查看独立合成样例。刷新或关闭页面不会取消执行；清除 Cookie、换设备或身份到期后无法找回匿名任务。
+
+停止时保留数据卷和原密钥：
+
+```powershell
+docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local stop m14-web m14-postgres
+```
+
+再次启动沿用同一配置、密钥、项目名和卷。已保存结果和摘要可重读；进程重启不自动恢复业务。`compose.cloud.yaml` 已准备腾讯云上海 2 核 2GB 的同代码配置（Web 1GiB、PG 512MiB、最多 20 连接），云项目另建卷并配置精确公网 IP Origin；部署、真实容量及公网访问需后续独立授权与 M15 资格。
 
 模块 01–12 修复收尾时的全量 Docker unit/contract 回归为 **2317 passed、8 warnings**（历史快照）。第 **18/20** 轮复用第 15 轮已通过的真实需求、酒店及 M08 候选检查点，从 M09 开始真实调用，获得 Completed；M12 三个日块、汇总索引及 PostgreSQL 重启后的读取/哈希一致性均通过。成功后停止，剩余两轮未使用。这是复用真实上游的集成链验证，不是第 18 轮重新调用全部上游；这份历史结果不能替代后续 M13/14 或完整 M11 恢复闭环验收，也不证明行程质量最优。历史问题见 [联调修复记录](./docs/12_live_pipeline_fixes.md)，模块历史验收见 [实施状态快照](./docs/IMPLEMENTATION_STATUS.md)；[首次真实联调报告](./docs/12_live_pipeline_acceptance.md) 保留当时的失败记录。
 
@@ -10,17 +61,15 @@
 
 已进入本地 `main` 的网页控制扩展提供持久取消、run 查询/分页、暂停凭证交接端口、原生酒店恢复、节点只读证据视图及终态预算读取；新环境须显式应用既有迁移 `m11_0002_web_controls`。它复用现有 PostgreSQL runs 和预算记录，不另建任务索引库。扩展审查及收尾证据见 [实施状态](docs/IMPLEMENTATION_STATUS.md)；应用端凭证加密、网页调度与浏览器交互留给 M14/M15。
 
-Module 11 提供持久执行库。当前默认 runtime 只导入 Module 01–13，不连接数据库、不自动迁移，也不启动网页服务器。
+Module 11 提供持久执行库。当前默认 runtime 启动 M14 Web，采用上面的独立本机 profile；旧模块的导入诊断需显式指定命令。
 
-配置本地 `.env` 的 PostgreSQL 变量后，显式执行：
+仅需断网核验 Module 11 包导入时执行：
 
-```bash
-docker compose --profile production build runtime
-docker compose --profile production run --rm durable-migrate
-docker compose run --rm --no-deps runtime
+```powershell
+docker run --rm --network none china-travel-agent:m14-local python -c "import app.durable_execution"
 ```
 
-`durable-migrate` 等待 PostgreSQL 健康和 `artifact-migrate` 成功，再执行 `python -m app.durable_execution.migrate`；可显式重复执行。`production` profile 包含数据库和迁移服务，因此启用该 profile 后无目标地执行 `up` 也会启动这些服务，应使用上述明确目标命令。不要把测试迁移指向正式数据库；不要删除含有需保留数据的卷。
+旧 `production` profile 的 `durable-migrate` 仍等待 PostgreSQL 健康与 `artifact-migrate` 成功，然后执行 `python -m app.durable_execution.migrate`。M14 使用自己的 Demo 库和显式三迁移顺序；其隔离测试清理只针对本次唯一前缀，保留日常库与 Demo 卷。
 
 Module 11 已按用户授权提交并合并到本地 main（实现提交 `985dcde`）；演示范围验收和原覆盖率/延期条件的区别见 [T07 验收记录](docs/11_t07_demo_acceptance.md)。现有通用 test target 的 M11 contract 需要隔离 PostgreSQL，不能将无数据库环境的全套运行当成有效验收。当前 M13 主图使用其能力完成业务编排。
 
@@ -38,12 +87,7 @@ Module 11 已按用户授权提交并合并到本地 main（实现提交 `985dcd
 
 酒店必须人工选择；研究合法 Incomplete 且仍有合格候选时继续尝试规划；补研最多五次且共享原预算。只有完整行程及完整结果索引才可交付：主行程营业未知或请求了本期未提供的地图时标为 `degraded`，其余适用门槛通过标为 `demo_ready`（完整达标）。备选缺省、天气及研究曾 Incomplete 不单独降级。
 
-设计与执行合同分别见 [M13 设计](docs/13_demo_workflow.md)、[M13 执行规范](docs/13_demo_workflow_vibe_coding.md)。最新验证与已提交状态见 [规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。以下命令仅创建本次唯一前缀的隔离资源，所有 Python 均在 Docker 中执行；用新的前缀替换示例值：
-
-```powershell
-./scripts/verify_module13.ps1 -Set UnitContract -ProjectPrefix cta-m13-local-0928a
-./scripts/verify_module13.ps1 -Set Closeout -ProjectPrefix cta-m13-local-0928b
-```
+设计与执行合同分别见 [M13 设计](docs/13_demo_workflow.md)、[M13 执行规范](docs/13_demo_workflow_vibe_coding.md)。已提交状态见 [规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。当前 M14 分支的统一离线入口见下方 Docker 开发与测试；它包括 M13 原覆盖率 Gate，原 M13 独立脚本保留其历史分支/CMD 前置。
 
 M14 仍负责 HTTP/浏览器交互、原暂停凭证保护、单执行名额及断线后的后台任务管理。M13 的离线模型/地图替身测试不等同于 M15 真实网页发布验收。
 
@@ -52,7 +96,7 @@ M14 仍负责 HTTP/浏览器交互、原暂停凭证保护、单执行名额及�
 ## 架构基线
 
 ```text
-前端网页（M14 待实现）
+前端网页（M14：FastAPI + 原生 HTML/CSS/JS）
         → 应用 API
         → Application Service
         → LangGraph workflow
@@ -113,7 +157,7 @@ M14 仍负责 HTTP/浏览器交互、原暂停凭证保护、单执行名额及�
 
 模块 10 提供符合 Module 04 三方法公共接口的 PostgreSQL Artifact Repository、显式生命周期 Runtime、固定 `artifact_store` schema、Alembic `m10_0001` 迁移、幂等写入、容量与并发控制、断线单次重试和真实重启持久性。AP-T06 最终资格为 Module 10 unit `64 passed`、contract `7 passed`、迁移 `15 passed`、普通 PostgreSQL integration `31 passed`、Module 04 映射／并发／故障 `20 passed`、全量 unit/contract `2041 passed`；coverage line／branch／combined 为 `87.7127% / 74.6479% / 84.9478%`。用户追加的真实 API 验收已证明 Module 10 可保存并在重连后读取真实行程产物；两次上游 Module 09 规划未得到 Completed 终态，但用户已明确决定该问题不阻断 Module 10。Module 10 实现提交 `cc1e6ef545db52f07cc15af64ea12ed589d24dda` 已 fast-forward 合并到本地 `main`，当前保持冻结。Module 10 不实现删除、TTL、checkpoint、自动迁移、生产 Registry 组合或生产部署。
 
-模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。模块 05 实现需求子图、同进程 interrupt/resume 和严格 checkpoint；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。模块 14 负责 Application Service、应用 API 和前端网页，具体框架在 M14 设计时确认；当前网页尚未实现，CLI 仅可作为诊断辅助。
+模块 02 不拥有 LangGraph 或 MCP：它只返回结构化结果或已验证 tool call。模块 05 实现需求子图、同进程 interrupt/resume 和严格 checkpoint；百度地图 MCP Gateway 归模块 06；候选研究、规划和局部重排分别归模块 08、09、16；模块 13 负责 Demo 主链装配。当前模块 14 实现 Application Service、FastAPI 与原生网页，并通过公开端口复用这些能力；显式 CLI 启动同一生产组合根。
 
 安装、环境变量、运行命令和 live probe 命令必须以对应模块文档为准，不允许从旧原型 README 推断。
 
@@ -123,30 +167,17 @@ M14 仍负责 HTTP/浏览器交互、原暂停凭证保护、单执行名额及�
 
 ## Docker 开发与测试
 
-当前容器包含模块 01–13 的生产库，网页应用尚未实现。runtime 默认 CMD 配置为导入模块 01–13，并输出 `modules 01-13 import successfully`；该检查只验证包可加载，不会自动连接或迁移数据库。`COPY app` 与 test target 的 `COPY tests` 已覆盖 Module 13。pytest 通过 `pyproject.toml` 的 `addopts = "--import-mode=importlib"` 消除全仓同名测试模块冲突，并继续使用 `no:cacheprovider`。M11 的数据库合同测试需要隔离 PostgreSQL；默认 test 服务不替代该编排。Docker 构建使用 Python 3.12；`.env`、本机 `.venv` 和 IDE/测试缓存不会进入镜像。
+runtime 包含模块 01–14，默认 CMD 为 `python -m app.web_application`；缺少配置时安全退出 2。`COPY app` 同时打包六份静态资源和两份合成样例，生产镜像不含 tests/Playwright；test target 增加测试，browser-test 使用锁定的官方 Playwright 1.63.0 镜像。pytest 继续使用 importlib 与 no:cacheprovider。M11 数据库 contract 连接专属隔离 PG，所有 Python 均在 Docker 中执行。
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
-复制本地配置并填写需要的密钥：
+当前分支从源码构建新镜像，执行完整离线关闭验收。每次使用未用过的前缀和不存在的绝对证据目录：
 
 ```powershell
-Copy-Item .env.example .env
+./scripts/verify_module14.ps1 -Set Closeout -ProjectPrefix cta-m14-z-local-001 -EvidenceDir D:/m14-evidence/z-local-001
 ```
 
-构建并验证当前运行时包：
-
-```powershell
-docker compose build runtime
-docker compose run --rm runtime
-```
-
-在项目根目录使用 PowerShell 7 执行 Module 12 完整验证与全项目 unit/contract 回归：
-
-```powershell
-pwsh -NoProfile -File ./scripts/verify_module12.ps1 -Mode Closeout -RunTag local-m12-001
-```
-
-每次执行须将示例 `RunTag` 改为本次未使用的小写标签。脚本从当前源码构建专属 runtime/test 镜像，不读取 `.env`，仅使用合成测试凭据；模块测试断网，数据库测试使用新建的 internal 网络和专属 PostgreSQL 卷。Closeout 依次覆盖 Module 12 unit/contract、coverage 诊断、compileall、既有 M10/M11 迁移、Module 12 integration、同卷重启后的新进程读取、全部 `tests/unit` 与 `tests/contract`，最后断网验证 runtime 默认 CMD。脚本退出时核验资源身份并清理本次容器、网络和卷，保留并报告镜像；不调用真实供应商 API。参数、停止条件和其他模式见 Module 12 执行契约 §6.3。
+Closeout 核验 runtime 实际默认 CMD、依赖与静态资源，覆盖全仓 unit/contract、M14 真 PG、三个新解释器读回、全部生产 Python 的三项 70% coverage、实际 Chromium、非终态 SSE 关闭及资源容量；同时执行 M10/M13 原覆盖率 Gate、M11 完整功能回归、M12 诊断覆盖率/PG/同卷真重启读回。脚本不读取真实 `.env`，不调用供应商，仅清理本次精确归属资源，保留报告和镜像。M11 历史 coverage 欠账及原接受边界保持；M12 未新增覆盖率数字门槛。其他 Set 与停止条件见 M14 执行规范 §11；旧 M12 脚本保留其历史关闭前置。
 
 模块 06 百度地图 live、地图调起和 M2 live 资格命令及独立授权要求只以 [`docs/06_baidu_map_adapter_and_mcp_gateway.md`](./docs/06_baidu_map_adapter_and_mcp_gateway.md) 和配套执行契约为准；README 不提供读取或输出 Secret 的命令。
 

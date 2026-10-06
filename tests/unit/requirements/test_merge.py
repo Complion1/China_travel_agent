@@ -109,7 +109,10 @@ def test_total_people_and_scenarios_are_recomputed():
 
 
 @pytest.mark.parametrize("text", (
+    "无", "没有", "none", "None",
     "没有行动限制", "无行动限制", "没有行动限制和饮食禁忌", "无行动限制和饮食禁忌",
+    "行动限制：无", "行动限制: 无", "行动限制 ： 没有行动限制",
+    "行动限制：没有行动限制和饮食禁忌", " 行动限制 ： 无 ",
 ))
 def test_explicit_no_mobility_constraint_removes_only_mobility_scenario(text):
     current = TravelRequirement(
@@ -122,9 +125,31 @@ def test_explicit_no_mobility_constraint_removes_only_mobility_scenario(text):
     assert result.requirement.constraints.mobility_constraints == text
     assert result.requirement.inferred_scenarios == ["family_with_children", "travel_with_seniors"]
     assert "mobility_assistance_needed" in current.inferred_scenarios
+    assert current.constraints.mobility_constraints == "需要轮椅"
 
 
-@pytest.mark.parametrize("text", ("行动不便", "没有轮椅，不能久走", "没有行动限制，但同行者需要轮椅"))
+@pytest.mark.parametrize("text", ("行动限制：无", "行动限制: 无"))
+def test_no_mobility_supplement_requires_explicit_correction(text):
+    current = TravelRequirement(
+        constraints=TravelConstraints(mobility_constraints="需要轮椅"),
+        inferred_scenarios=["mobility_assistance_needed"],
+    )
+    before = current.model_copy(deep=True)
+    result = RequirementMerger().merge(current, RequirementPatch(
+        constraints=TravelConstraints(mobility_constraints=text)))
+    assert result.requirement == before
+    assert [(issue.code, issue.field_path) for issue in result.issues] == [
+        ("requirement_conflict", RequirementFieldPath.MOBILITY_CONSTRAINTS)]
+    assert result.changed_fields == ()
+    assert current == before
+
+
+@pytest.mark.parametrize("text", (
+    "行动不便", "没有轮椅，不能久走", "没有行动限制，但同行者需要轮椅",
+    "行动限制：无，但不能久走", "行动限制: 没有行动限制，但同行者需要轮椅",
+    "行动限制：", "饮食禁忌：无",
+    "行动限制：行动限制：无", "行动限制::无",
+))
 def test_negation_does_not_erase_a_positive_mobility_constraint(text):
     result = RequirementMerger().merge(TravelRequirement(), RequirementPatch(
         constraints=TravelConstraints(mobility_constraints=text)))

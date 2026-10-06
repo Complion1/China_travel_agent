@@ -1,0 +1,20 @@
+# Same code/runtime; a separately named project creates a new cloud data volume.
+# Do not run this file against the local Demo project or an existing business DB.
+services:
+  m14-web:
+    ports: !override ["8080:8080"]
+    environment:
+      WEB_PUBLIC_ORIGIN: ${WEB_PUBLIC_ORIGIN:-}
+    mem_limit: 1g
+    volumes:
+      - type: bind
+        source: ${M14_KEY_PATH:-./.m14-cloud/keys/pause-key.json}
+        target: /run/cta/pause-key.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: volume
+        source: m14_demo_pg_data
+        target: /pg-data
+        read_only: true
+  m14-postgres:
+    mem_limit: 512m

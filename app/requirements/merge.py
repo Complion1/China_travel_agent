@@ -224,7 +224,13 @@ class RequirementMerger:
             if (req.party.seniors_count or 0) > 0:
                 scenarios.append("travel_with_seniors")
             mobility = (req.constraints.mobility_constraints or "").strip()
-            if mobility and mobility not in {
+            # A form label may be part of the exact extracted evidence. Compare
+            # its answer without changing the persisted constraint wording.
+            mobility_answer = mobility
+            label, separator, answer = mobility.replace("：", ":", 1).partition(":")
+            if separator and label.strip() == "行动限制":
+                mobility_answer = answer.strip()
+            if mobility and mobility_answer not in {
                 "无", "没有", "none", "None", "无行动限制", "没有行动限制",
                 "无行动限制和饮食禁忌", "没有行动限制和饮食禁忌",
             }:

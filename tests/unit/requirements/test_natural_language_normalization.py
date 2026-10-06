@@ -55,6 +55,8 @@ def test_datetime_conflicts_and_missing_date_require_clarification(raw):
 @pytest.mark.parametrize(("mobility", "diet"), (
     ("没有行动限制", "没有饮食禁忌"),
     ("没有行动限制和饮食禁忌", "没有行动限制和饮食禁忌"),
+    ("行动限制：无", "饮食禁忌：无"),
+    ("行动限制: 无", "饮食禁忌: 无"),
 ))
 async def test_explicit_three_day_request_can_reach_confirmation_without_model_normalizing(mobility, diet):
     # Only extraction is scripted. Real evidence verification, normalization,
@@ -84,6 +86,17 @@ async def test_explicit_three_day_request_can_reach_confirmation_without_model_n
     assert requirement.time_window.hotel_nights == 2
     assert requirement.party.total_people == 2
     assert requirement.inferred_scenarios == []
+    assert requirement.constraints.mobility_constraints == mobility
+    assert requirement.constraints.dietary_restrictions == diet
+    accepted_evidence = {item.field_path: item.text for item in sink.received[0][1]}
+    for field_path, raw_value in (
+        (RequirementFieldPath.MOBILITY_CONSTRAINTS, mobility),
+        (RequirementFieldPath.DIETARY_RESTRICTIONS, diet),
+    ):
+        assert accepted_evidence[field_path] == raw_value
+        field_metadata = transition.state.metadata.metadata[field_path]
+        assert field_metadata.evidence_ref is not None
+        assert field_metadata.evidence_digest == raw_value[:16]
     assert sink.received[0][1][0].text in "；".join(evidence.values())
     meta = transition.state.metadata.metadata[RequirementFieldPath.ARRIVAL_LOCAL_DATETIME]
     assert meta.normalization.raw_value == values["arrival_datetime"]
