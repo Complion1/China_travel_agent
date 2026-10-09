@@ -10,7 +10,7 @@ BASE_EXPORTS = [
     "WebStartRequest", "WebClarifyRequest", "WebConfirmRequest", "WebHotelRequest", "WebControlRequest",
     "WebVisitorContext", "WebSessionView", "WebAdmissionView", "WebCommandReceipt", "WebFact",
     "WebHotelChoice", "WebClarificationOption", "WebClarificationQuestion", "WebInteractionCard", "WebRunView", "WebHistoryPage", "WebResultDay", "WebResultView",
-    "WebSummaryView", "WebSampleView", "WebSamplesView", "WebApiError",
+    "WebSummaryView", "WebSampleView", "WebSamplesView", "WebApiError", "WebInputIssue",
     "WebMetadataStore", "WebApplicationService", "WebApplicationDependencies", "RunBoundExtractionInvocationSink",
     "create_web_application",
 ]

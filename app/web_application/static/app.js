@@ -24,7 +24,16 @@
   async function session(){const data=await api("/api/session");csrf=data.csrf_token;}
   const phases={requirements:"确认需求",hotel_selection:"选择酒店",candidate_research:"查找候选",itinerary_planning:"规划行程",validation:"核验行程",budget_evaluation:"检查行程预算",output_formatting:"整理攻略"};
   const activities={idle:"准备中",executing:"正在执行",awaiting_user:"等待你的选择",recovery_required:"需要明确恢复",blocked:"当前任务无法安全继续",incompatible:"任务版本不兼容",terminal:"已结束"};
-  const terminal={workflow_completed:"攻略已完成",workflow_degraded:"攻略已完成，部分信息不足",cancelled_by_user:"已取消",hotel_declined:"已放弃酒店选择",workflow_provider_failed:"规划失败，供应商暂不可用"};
+  const terminal={workflow_completed:"攻略已完成",workflow_degraded:"攻略已完成，部分信息不足",cancelled_by_user:"已取消",hotel_declined:"已放弃酒店选择",workflow_provider_failed:"规划失败，模型调用或输出校验未通过",requirement_failed:"旅行需求未通过校验"};
+  function inputIssues(view){
+    const parent=$("input-issues");if(!parent)return;
+    parent.replaceChildren();const issues=view.input_issues||[];parent.hidden=!issues.length;
+    if(!issues.length)return;
+    make("h2","需要核对的旅行信息",parent);
+    const list=make("ul",undefined,parent);
+    for(const issue of issues)make("li",issue.message,list);
+    make("p","本次任务已结束。新建任务时，请填写目的城市的具体机场或车站及类型。",parent);
+  }
   function status(view){const r=view.run;if(["blocked","incompatible"].includes(r.activity))return activities[r.activity];if(r.cancel_requested&&r.activity!=="terminal")return "正在取消，等待任务安全收束";if(r.activity==="terminal"&&r.delivery_status==="failed")return terminal[r.terminal_code]||"规划失败，未生成完整攻略";return terminal[r.terminal_code]||`${phases[r.phase]||"处理任务"} · ${activities[r.activity]||"处理中"}`;}
   function facts(items,parent){const dl=make("dl",undefined,parent);for(const f of items){make("dt",f.label,dl);make("dd",f.value,dl);}}
   function safeMarkdown(text,parent){
@@ -219,7 +228,7 @@
         const closed=stream;stream=null;if(closed)closed.close();
         if(messageSource==="sse")message("");
       }
-      $("task-status").textContent=status(view);interaction(view);const controls=$("controls");controls.replaceChildren();
+      $("task-status").textContent=(view.input_issues||[]).length?"旅行需求未通过校验":status(view);inputIssues(view);interaction(view);const controls=$("controls");controls.replaceChildren();
       for(const kind of ["cancel","recover"]){if(!view.actions.includes(kind))continue;const button=make("button",kind==="cancel"?"取消任务":"明确恢复任务",controls);button.addEventListener("click",()=>send(kind,{},id));}
       await readResult(view);if($("statistics").open)await readSummary();
     }catch(e){message(e.message,"read");}finally{refreshing=false;}

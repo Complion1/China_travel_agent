@@ -29,7 +29,7 @@ class DemoCommandCodec:
                 "codec_id": "demo_workflow.command", "codec_version": "1.0",
                 "type_ids": ["demo_workflow.start", "demo_workflow.requirement", "demo_workflow.hotel"],
                 "state_schema": "2.0", "native_pause": "__root__:hotel",
-                "requirement_pause": "requirements", "command_schema_revision": "m13_commands_1",
+                "requirement_pause": "requirements", "command_schema_revision": "m13_commands_2",
             })),
         )
 

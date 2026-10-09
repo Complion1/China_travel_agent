@@ -30,7 +30,7 @@ def repair_json_shape_example() -> str:
 
 
 def test_prompt_version_is_frozen():
-    assert PROMPT_VERSION == "requirement-extraction-v3-explicit-negatives"
+    assert PROMPT_VERSION == "requirement-extraction-v4-hub-roles"
 
 
 @pytest.mark.parametrize("loader", [load_extract_prompt, load_repair_prompt])
@@ -45,6 +45,28 @@ def test_legacy_prompt_bytes_remain_readable_and_unchanged():
     _load_prompt("repair_v1.txt", "7ad7e547fbb34f01b662fa74f1cb616447027a7920bed2a7d156a148508f695d")
     _load_prompt("extract_v2_budget_deferred.txt", "82c50823cca0cf9dacc3d954527bc4fa11d02e8a69bc3ebe0d21d707b66175ad")
     _load_prompt("repair_v2_budget_deferred.txt", "6911a585ea0c24f71d0c6b04d3a564e1b73230016a165742a1c415962b10bb0f")
+    _load_prompt("extract_v3_explicit_negatives.txt", "1398108807fe64cd6c49d65c0a95e88a500c09842c1c43a09b904706e3ee2e0b")
+    _load_prompt("repair_v3_explicit_negatives.txt", "ea2f9faa8c9e513b42fd10cd5b593d766ddae83dd4261c7baa3abf5ccc3ff496")
+
+
+@pytest.mark.parametrize("loader", [load_extract_prompt, load_repair_prompt])
+def test_destination_hub_roles_and_supplement_labels_are_explicit(loader):
+    text = loader()
+    assert "An origin city is not a hub" in text
+    assert "从上海虹桥站出发去合肥" in text
+    assert "do not emit destination or destination evidence" in text
+    assert "Each selected type needs its own exact evidence" in text
+    assert "Hub names alone do not express separate types" in text
+
+
+@pytest.mark.parametrize("version", ["requirement-extraction-v1", "requirement-extraction-v2-budget-deferred",
+    "requirement-extraction-v3-explicit-negatives", "requirement-extraction-v4-hub-roles"])
+def test_event_metadata_accepts_active_and_historical_prompt_versions(version):
+    from uuid import uuid4
+    from app.requirement_extraction import ExtractionInvocationEvent
+    event = ExtractionInvocationEvent(turn_id=uuid4(), prompt_version=version, attempt_kind="extract",
+        outcome_kind="repair_required", semantic_call_number=1, invocation_metadata=None, runtime_error=None)
+    assert ExtractionInvocationEvent.model_validate_json(event.model_dump_json(), strict=True).prompt_version == version
 
 
 @pytest.mark.parametrize("loader", [load_extract_prompt, load_repair_prompt])

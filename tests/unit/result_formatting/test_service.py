@@ -50,6 +50,38 @@ async def saved_bundle(scenario):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("planning_version", ["2.0", "3.0"])
+async def test_both_planning_versions_are_read_without_rewriting_source(planning_version):
+    scenario = await make_scenario(days=3, planning_version=planning_version)
+    source_ref = scenario.request.itinerary_ref
+    source_before = tree(scenario.itinerary)
+    prepared, _, index, index_ref = await saved_bundle(scenario)
+    loaded = await ResultFormattingService(artifact_repository=scenario.repository).load(
+        make_read_request(scenario, index_ref))
+    assert type(loaded) is ResultFormattingLoaded
+    assert len(loaded.days) == 3 and loaded.days == prepared.days
+    assert index.source_itinerary_ref == source_ref
+    source_after = await scenario.repository.get(source_ref, expected_model=type(scenario.itinerary))
+    assert source_after.ref == source_ref and tree(source_after.content) == source_before
+    assert ("format_repair_used" in source_before["record"]["budgets"]) == (planning_version == "3.0")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("planning_version", ["2.0", "3.0"])
+async def test_source_ref_version_cannot_disagree_with_valid_content(planning_version):
+    scenario = await make_scenario(planning_version=planning_version)
+    ref = parsed(ArtifactRef, {**tree(scenario.request.itinerary_ref),
+        "schema_version": "3.0" if planning_version == "2.0" else "2.0"})
+    state = TravelSessionState.model_validate({**scenario.request.state.model_dump(mode="python"),
+        "artifact_refs": (ref,)}, strict=True)
+    request = ResultFormattingRequest(schema_version="2.0", state=state, itinerary_ref=ref)
+    repository = RecordingReadRepository(scenario.repository, fail_ref=ref,
+        replacement=lambda actual_ref, expected_model: ArtifactReadResult(ref=actual_ref, content=scenario.itinerary))
+    assert_failed(await ResultFormattingService(artifact_repository=repository).prepare(request), "artifact_integrity_error")
+    assert len(repository.get_calls) == 1 and not repository.forbidden_calls
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("backup_count", [0, 1])
 async def test_three_day_optional_backups_roundtrip_without_fabrication(backup_count):
     scenario = await make_scenario(days=3)
@@ -226,7 +258,7 @@ async def test_input_business_preconditions_fail_before_io(scenario, invalid):
             "delivery_status": DeliveryStatus.AWAITING_USER}, strict=True)
         expected = "input_not_ready"
     else:
-        ref = parsed(ArtifactRef, {**tree(ref), "schema_version": "3.0"})
+        ref = parsed(ArtifactRef, {**tree(ref), "schema_version": "4.0"})
         state = TravelSessionState.model_validate({**state.model_dump(mode="python"), "artifact_refs": (ref,)}, strict=True)
         expected = "artifact_contract_error"
     request = ResultFormattingRequest(schema_version='2.0', state=state, itinerary_ref=ref)

@@ -21,7 +21,7 @@ UInt = Annotated[int, Field(ge=0)]
 Code = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_.-]+$")]
 SafeField = Annotated[str, StringConstraints(min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_.\[\]-]+$")]
 Stage = Literal["preparation", "transport", "submit_repair"]
-Category = Literal["preparation", "transport", "submit_repair", "supplement_request"]
+Category = Literal["preparation", "transport", "submit_repair", "supplement_request", "format_repair"]
 Purpose = Literal["extract", "repair", "research_action", "research_judgment", "planning", "run"]
 Kind = Literal["request", "response", "transport_failure", "validation", "tool_result", "call_summary", "run_summary"]
 

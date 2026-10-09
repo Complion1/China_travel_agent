@@ -1,5 +1,6 @@
 """RF-PERSIST: real PostgreSQL boundaries, without claiming M11 recovery."""
 
+import hashlib
 from uuid import UUID
 
 import pytest
@@ -9,22 +10,39 @@ from app.result_formatting import (
     ResultFormattingPrepared, ResultFormattingService, ResultIndexReady,
     ResultReadRequest, build_result_artifact_write_request,
 )
-from app.workflow_contracts import ArtifactAbsent, ArtifactConflictError, ArtifactFound
+from app.workflow_contracts import ArtifactAbsent, ArtifactConflictError, ArtifactFound, ArtifactWriteRequest
 from tests.integration.result_formatting.restart_worker import (
     checked_canonical, operation, result_manifest,
 )
 from tests.unit.result_formatting.fakes import (
-    make_read_request, make_scenario, parsed, save_result_days, save_result_index, tree,
+    make_read_request, make_registry, make_scenario, parsed, save_result_days, save_result_index, tree,
 )
+
+
+def checked_itinerary_canonical(artifact, ref):
+    """Check either registered source version without using a result writer."""
+    assert ref.artifact_type == "itinerary_planning.itinerary"
+    assert artifact.schema_version == ref.schema_version
+    prepared = make_registry().prepare(ArtifactWriteRequest(
+        operation_id=ref.operation_id, artifact_type=ref.artifact_type,
+        schema_version=ref.schema_version, content=tree(artifact),
+    ))
+    assert prepared.content_hash == ref.content_hash
+    assert prepared.size_bytes == ref.size_bytes
+    assert "sha256:" + hashlib.sha256(prepared.canonical_bytes).hexdigest() == ref.content_hash
+    return prepared.canonical_bytes
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_transit_steps", [False, True])
-async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory, database_snapshot, with_transit_steps):
-    run_id = UUID("12000000-0000-4000-8000-00000000c111" if with_transit_steps else "12000000-0000-4000-8000-00000000c101")
+@pytest.mark.parametrize("planning_version", ["2.0", "3.0"])
+async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory, database_snapshot, with_transit_steps, planning_version):
+    run_id = UUID(int=UUID("12000000-0000-4000-8000-00000000c201").int
+                  + (16 if with_transit_steps else 0) + (1 if planning_version == "3.0" else 0))
     runtime = await runtime_factory()
     instructions = ("步行到合成甲站", "乘坐合成1号线至乙站", "换乘合成20路至丙站") if with_transit_steps else None
-    scenario = await make_scenario(repository=runtime.repository, days=3, run_id=run_id, transit_instructions=instructions)
+    scenario = await make_scenario(repository=runtime.repository, days=3, run_id=run_id,
+                                   transit_instructions=instructions, planning_version=planning_version)
     service = ResultFormattingService(artifact_repository=runtime.repository)
     prepared = await service.prepare(scenario.request)
     assert type(prepared) is ResultFormattingPrepared
@@ -44,6 +62,8 @@ async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory
     ))
     before_database = await database_snapshot(run_id)
     expected_refs = (*scenario.refs.values(), *refs, index_ref)
+    source_ref = scenario.request.itinerary_ref
+    source_before = checked_itinerary_canonical(scenario.itinerary, source_ref)
     assert len(before_database["records"]) == len({ref.artifact_id for ref in expected_refs})
     for ref in expected_refs:
         stored = before_database["records"][str(ref.artifact_id)]
@@ -66,6 +86,10 @@ async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory
     ))
     if reopened_bytes != original_bytes:
         pytest.fail("M12_REOPEN_CANONICAL_BYTES_CHANGED", pytrace=False)
+    source_after = await restarted.repository.get(source_ref, expected_model=type(scenario.itinerary))
+    assert source_after.ref == source_ref
+    assert checked_itinerary_canonical(source_after.content, source_ref) == source_before
+    assert source_after.content.schema_version == planning_version
     assert await database_snapshot(run_id) == before_database
 
 

@@ -86,6 +86,7 @@ class _Reads:
         except ResultFormattingUsageError:
             raise ArtifactIntegrityError() from None
         _require(saved_ref == ref)
+        _require(content.schema_version == ref.schema_version, Code.ARTIFACT_INTEGRITY_ERROR)
         result = ArtifactReadResult(ref=saved_ref, content=content)
         self.cache[ref.artifact_id] = (saved_ref, model, result)
         return result
@@ -108,7 +109,7 @@ def _result_ref(ref: ArtifactRef, *, kind: str, run_id: UUID) -> None:
 async def _reconstruct(request: ResultFormattingRequest, reads: _Reads) -> _Bundle:
     require_ready(request)
     ref = request.itinerary_ref
-    _require(ref.artifact_type == "itinerary_planning.itinerary" and ref.schema_version == "2.0", Code.ARTIFACT_CONTRACT_ERROR)
+    _require(ref.artifact_type == "itinerary_planning.itinerary" and ref.schema_version in {"2.0", "3.0"}, Code.ARTIFACT_CONTRACT_ERROR)
     _require(ref.operation_id.phase.value == "itinerary_planning")
     itinerary = (await reads.get(ref, ItineraryPlanningArtifact)).content
     steps = projection_steps(request, itinerary)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+import re
+from functools import wraps
 from collections.abc import Awaitable, Callable
 from typing import Any, cast, Literal
 from app.llm_runtime.interaction_recording import (
@@ -27,6 +29,9 @@ from app.llm_runtime.models import (
     ToolContract,
     ToolResult,
     ToolTurnCompleted,
+    ToolTurnRejected,
+    ToolArgumentIssue,
+    RejectedToolCall,
     ToolTurnOutcome,
     ValidatedToolCall,
 )
@@ -50,6 +55,65 @@ from app.llm_runtime.sizing import (
 )
 
 ProviderResult = ProviderResponse | ProviderFailure
+
+
+def _tool_turn(kind: str):
+    """Reject overlapping transitions without blocking the event loop."""
+    def decorate(method):
+        def claim(self):
+            if not self._turn_lock.acquire(blocking=False):
+                raise RuntimeError("tool_turn_in_progress")
+            try:
+                self._check_closed()
+                if self._rejected_turn is not None and kind != "repair":
+                    raise RuntimeError("tool_argument_repair_pending")
+                if kind == "invoke" and self._tool_prompt is not None:
+                    raise RuntimeError("tool_operation_already_started")
+            except BaseException:
+                self._turn_lock.release()
+                raise
+        if inspect.iscoroutinefunction(method):
+            @wraps(method)
+            async def asynchronous(self, *args, **kwargs):
+                claim(self)
+                try:
+                    return await method(self, *args, **kwargs)
+                except BaseException:
+                    self.close()
+                    raise
+                finally:
+                    self._turn_lock.release()
+            return asynchronous
+        @wraps(method)
+        def synchronous(self, *args, **kwargs):
+            claim(self)
+            try:
+                return method(self, *args, **kwargs)
+            except BaseException:
+                self.close()
+                raise
+            finally:
+                self._turn_lock.release()
+        return synchronous
+    return decorate
+
+
+def _argument_issues(error: ValidationError, schema: type[BaseModel]) -> tuple[ToolArgumentIssue, ...]:
+    issues = []
+    for item in validation_details(error, schema):
+        code = item["type"]
+        rule = ("invalid_json" if code == "json_invalid" else "missing" if code == "missing"
+            else "extra" if code == "extra_forbidden" else "enum" if code in {"enum", "literal_error"}
+            else "type" if code.endswith("_type") else "constraint" if code in {
+                "too_short", "too_long", "greater_than", "greater_than_equal", "less_than", "less_than_equal",
+                "string_too_short", "string_too_long", "string_pattern_mismatch", "multiple_of", "finite_number"}
+            else "validation")
+        parts = [str(p) if type(p) is int else p if re.fullmatch(r"[a-zA-Z0-9_-]+", p) else "unknown_field" for p in item["path"]]
+        path = ".".join(parts) or None
+        if path is not None and len(path) > 256:
+            path = "field_path_too_long"
+        issues.append(ToolArgumentIssue(rule=rule, field=path))
+    return tuple(issues) or (ToolArgumentIssue(rule="validation", field=None),)
 
 
 def _clamp_retry_after(seconds: float | None) -> float:
@@ -138,6 +202,9 @@ class ModelOperation:
         self._sync_lock = threading.Lock()
         self._counter_lock = threading.Lock()
         self._async_lock = asyncio.Lock()
+        self._turn_lock = threading.Lock()
+        self._allow_argument_repair = False
+        self._rejected_turn: ToolTurnRejected | None = None
 
     @property
     def role(self) -> ModelRole:
@@ -314,6 +381,7 @@ class ModelOperation:
             return _failure(LLMErrorCode.STRUCTURED_OUTPUT_INVALID, self.role)
         return StructuredInvocationSuccess(value=validated, metadata=metadata)
 
+    @_tool_turn("structured")
     def invoke_structured(
         self,
         prompt: PromptEnvelope,
@@ -353,6 +421,7 @@ class ModelOperation:
         return self._decode_structured(response, schema, attempts, duplicate)
 
     @_recorded_call
+    @_tool_turn("structured")
     async def ainvoke_structured(
         self,
         prompt: PromptEnvelope,
@@ -414,12 +483,17 @@ class ModelOperation:
             )
         return tuple(definitions), None
 
+    @_tool_turn("invoke")
     def invoke_tools(
         self,
         prompt: PromptEnvelope,
         tools: tuple[ToolContract[Any], ...],
+        *, allow_argument_repair: bool = False,
     ) -> ToolTurnOutcome:
         self._set_mode("sync")
+        if type(allow_argument_repair) is not bool:
+            return self._tool_failure(LLMErrorCode.INVALID_REQUEST)
+        self._allow_argument_repair = allow_argument_repair
         definitions, preflight_error = self._prepare_tools(tools)
         if preflight_error is not None or definitions is None:
             return self._tool_failure(preflight_error or LLMErrorCode.INVALID_REQUEST)
@@ -476,18 +550,25 @@ class ModelOperation:
             identity = _call_identity(self._semantic_invocations_used)
             if admission_callback is not None:
                 await admission_callback(identity)
-            self._semantic_invocations_used += 1
-            _mark_admitted(self._semantic_invocations_used - 1)
-            self._tool_prompt, self._tool_contracts, self._tool_definitions = prompt, tools, definitions
+            with self._sync_lock:
+                self._check_closed()
+                self._semantic_invocations_used += 1
+                _mark_admitted(self._semantic_invocations_used - 1)
+                self._tool_prompt, self._tool_contracts, self._tool_definitions = prompt, tools, definitions
         return None
 
     @_recorded_call
+    @_tool_turn("invoke")
     async def ainvoke_tools(
         self, prompt: PromptEnvelope, tools: tuple[ToolContract[Any], ...], *,
         admission_callback: Callable[[InteractionCallIdentity], Awaitable[None]] | None = None,
         request_stage: Literal["preparation", "transport", "submit_repair"] | None = None,
+        allow_argument_repair: bool = False,
     ) -> ToolTurnOutcome:
         self._set_mode("async")
+        if type(allow_argument_repair) is not bool:
+            return self._tool_failure(LLMErrorCode.INVALID_REQUEST)
+        self._allow_argument_repair = allow_argument_repair
         definitions, preflight_error = self._prepare_tools(tools)
         if preflight_error is not None or definitions is None:
             return self._tool_failure(preflight_error or LLMErrorCode.INVALID_REQUEST)
@@ -522,6 +603,7 @@ class ModelOperation:
         attempts: int,
         possible_duplicate: bool,
     ) -> ToolTurnOutcome:
+        self._check_closed()
         if response.model_name and response.model_name != self._profile.model_name:
             return self._tool_failure(LLMErrorCode.UNEXPECTED_MODEL)
         metadata = self._metadata(response, attempts, possible_duplicate)
@@ -532,27 +614,44 @@ class ModelOperation:
         if response.finish_reason == "content_filter":
             return self._tool_failure(LLMErrorCode.CONTENT_FILTERED)
         if response.finish_reason == "stop":
-            if response.tool_calls:
+            if response.tool_calls or response.raw_tool_calls:
                 return self._tool_failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE)
             outcome = ToolTurnCompleted(final_text=response.content or "", metadata=metadata)
             self.close()
             return outcome
-        if response.finish_reason != "tool_calls" or not response.tool_calls:
+        if response.finish_reason != "tool_calls" or not (response.tool_calls or response.raw_tool_calls):
             return self._tool_failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE)
 
         contracts = {tool.name: tool for tool in self._tool_contracts}
+        raw_calls = response.raw_tool_calls
+        if raw_calls is None:
+            if self._allow_argument_repair:
+                return self._tool_failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE)
+            try:
+                raw_calls = tuple((call_id, name, canonical_json(args)) for call_id, name, args in response.tool_calls)
+            except (TypeError, ValueError):
+                return self._tool_failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE)
+        if not self._allow_argument_repair and response.raw_tool_calls is not None and len(response.tool_calls) != len(raw_calls):
+            return self._tool_failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE)
+        if type(raw_calls) is not tuple or any(type(call) is not tuple or len(call) != 3 for call in raw_calls):
+            return self._tool_failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE)
         seen_ids: set[str] = set()
         validated_calls: list[ValidatedToolCall] = []
-        for call_id, tool_name, arguments in response.tool_calls:
-            if not call_id or call_id in seen_ids:
+        # Entire batch protocol validation precedes ANY consumer schema checks.
+        for call_id, tool_name, arguments in raw_calls:
+            if type(call_id) is not str or not call_id.strip() or len(call_id) > 256 or call_id in seen_ids or type(tool_name) is not str or type(arguments) is not str:
                 return self._tool_failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE)
             seen_ids.add(call_id)
             contract = contracts.get(tool_name)
             if contract is None:
                 return self._tool_failure(LLMErrorCode.UNKNOWN_TOOL)
+        rejected_calls = []
+        for call_id, tool_name, arguments in raw_calls:
+            contract = contracts[tool_name]
+            issues = ()
             try:
                 validated_arguments = contract.args_schema.model_validate_json(
-                    canonical_json(arguments),
+                    arguments,
                     strict=True,
                 )
             except (ValidationError, TypeError, ValueError) as error:
@@ -561,21 +660,37 @@ class ModelOperation:
                              tool=contract.name,
                              errors=validation_details(error, contract.args_schema) if isinstance(error, ValidationError) else [],
                              location=locations(error))
-                return self._tool_failure(LLMErrorCode.TOOL_ARGUMENTS_INVALID)
-            validated_calls.append(
-                ValidatedToolCall(
-                    call_id=call_id,
-                    tool_name=tool_name,
-                    arguments=validated_arguments,
+                if not isinstance(error, ValidationError):
+                    return self._tool_failure(LLMErrorCode.TOOL_ARGUMENTS_INVALID)
+                issues = _argument_issues(error, contract.args_schema)
+            else:
+                validated_calls.append(
+                    ValidatedToolCall(call_id=call_id, tool_name=tool_name, arguments=validated_arguments)
                 )
-            )
+            rejected_calls.append(RejectedToolCall(call_id=call_id, tool_name=tool_name, issues=issues))
 
-        self._private_tool_history.append(self._assistant_history_message(response))
-        self._pending_call_ids = tuple(call.call_id for call in validated_calls)
+        if any(call.issues for call in rejected_calls):
+            if not self._allow_argument_repair:
+                return self._tool_failure(LLMErrorCode.TOOL_ARGUMENTS_INVALID)
+            if len(rejected_calls) > 128:
+                return self._tool_failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE)
+            outcome = ToolTurnRejected(error=_runtime_error(LLMErrorCode.TOOL_ARGUMENTS_INVALID, self.role),
+                metadata=metadata, calls=tuple(rejected_calls))
+            with self._sync_lock:
+                self._check_closed()
+                self._private_tool_history.append(self._assistant_history_message(response, raw_calls))
+                self._rejected_turn = outcome
+                self._pending_call_ids = ()
+            return outcome
+        with self._sync_lock:
+            self._check_closed()
+            self._private_tool_history.append(self._assistant_history_message(response, raw_calls))
+            self._pending_call_ids = tuple(call.call_id for call in validated_calls)
+            self._rejected_turn = None
         return ToolCallsReady(calls=tuple(validated_calls), metadata=metadata)
 
     @staticmethod
-    def _assistant_history_message(response: ProviderResponse) -> dict[str, object]:
+    def _assistant_history_message(response: ProviderResponse, raw_calls: tuple[tuple[str, str, str], ...]) -> dict[str, object]:
         message: dict[str, object] = {
             "role": "assistant",
             "content": response.content,
@@ -585,10 +700,10 @@ class ModelOperation:
                     "type": "function",
                     "function": {
                         "name": tool_name,
-                        "arguments": canonical_json(arguments),
+                        "arguments": arguments,
                     },
                 }
-                for call_id, tool_name, arguments in response.tool_calls
+                for call_id, tool_name, arguments in raw_calls
             ],
         }
         if response.reasoning_content is not None:
@@ -614,6 +729,7 @@ class ModelOperation:
             for call_id in self._pending_call_ids
         )
 
+    @_tool_turn("continue")
     def continue_tools(self, results: tuple[ToolResult, ...]) -> ToolTurnOutcome:
         self._set_mode("sync")
         result_messages = self._validated_result_messages(results)
@@ -656,12 +772,15 @@ class ModelOperation:
         if error is not None:
             self.close()
             return LLMInvocationFailure(error=error)
-        self._private_tool_history = list(candidate_history)
-        self._pending_call_ids = ()
+        with self._sync_lock:
+            self._check_closed()
+            self._private_tool_history = list(candidate_history)
+            self._pending_call_ids = ()
         assert response is not None
         return self._decode_tool_response(response, attempts, duplicate)
 
     @_recorded_call
+    @_tool_turn("continue")
     async def acontinue_tools(
         self, results: tuple[ToolResult, ...], *, tools: tuple[ToolContract[Any], ...] | None = None,
         admission_callback: Callable[[InteractionCallIdentity], Awaitable[None]] | None = None,
@@ -698,9 +817,76 @@ class ModelOperation:
         if error is not None:
             self.close()
             return LLMInvocationFailure(error=error)
-        self._private_tool_history = list(candidate_history)
-        self._pending_call_ids = ()
+        with self._sync_lock:
+            self._check_closed()
+            self._private_tool_history = list(candidate_history)
+            self._pending_call_ids = ()
         assert response is not None
+        return self._decode_tool_response(response, attempts, duplicate)
+
+    def _repair_history(self, tools):
+        if self._rejected_turn is None or self._tool_prompt is None:
+            return None
+        effective = self._tool_contracts if tools is None else tools
+        definitions, error = self._prepare_tools(effective)
+        if error is not None or definitions != self._tool_definitions:
+            return None
+        feedback = tuple({"role": "tool", "tool_call_id": result.call_id, "content": result.content}
+            for result in self._rejected_turn.tool_results())
+        return effective, definitions, tuple(self._private_tool_history) + feedback
+
+    @_tool_turn("repair")
+    def repair_tools(self, *, tools: tuple[ToolContract[Any], ...] | None = None) -> ToolTurnOutcome:
+        self._set_mode("sync")
+        prepared = self._repair_history(tools)
+        if prepared is None:
+            return self._tool_failure(LLMErrorCode.INVALID_REQUEST)
+        effective, definitions, history = prepared
+        gate = check_byte_gate(len(canonical_request_bytes(profile=self._profile, prompt=self._tool_prompt,
+            json_schema=None, tools=definitions, internal_tool_history=history)), self._profile.max_request_utf8_bytes, self.role)
+        if gate is not None:
+            self.close()
+            return LLMInvocationFailure(error=gate)
+        quota = self._claim_semantic_sync()
+        if quota is not None:
+            return self._tool_failure(quota)
+        response, attempts, duplicate, error = self._invoke_sync(lambda: self._provider.invoke_tool_continuation(
+            ProviderToolContinuation(messages=self._continuation_messages(history), tools=definitions,
+                max_output_tokens=self._profile.max_output_tokens, thinking_type=self._profile.thinking_type,
+                reasoning_effort=self._profile.reasoning_effort, model=self._profile.model_name, profile=self._profile)))
+        if error is not None:
+            self.close()
+            return LLMInvocationFailure(error=error)
+        with self._sync_lock:
+            self._check_closed()
+            self._private_tool_history = list(history)
+        return self._decode_tool_response(response, attempts, duplicate)
+
+    @_recorded_call
+    @_tool_turn("repair")
+    async def arepair_tools(self, *, tools: tuple[ToolContract[Any], ...] | None = None,
+        admission_callback: Callable[[InteractionCallIdentity], Awaitable[None]] | None = None,
+        request_stage: Literal["preparation", "transport", "submit_repair"] | None = None) -> ToolTurnOutcome:
+        self._set_mode("async")
+        prepared = self._repair_history(tools)
+        if prepared is None:
+            return self._tool_failure(LLMErrorCode.INVALID_REQUEST)
+        effective, definitions, history = prepared
+        gate = await self._admit_tools_async(prompt=self._tool_prompt, tools=effective, definitions=definitions,
+            history=history, admission_callback=admission_callback)
+        if gate is not None:
+            self.close()
+            return LLMInvocationFailure(error=gate)
+        response, attempts, duplicate, error = await self._invoke_async(lambda: self._provider.ainvoke_tool_continuation(
+            ProviderToolContinuation(messages=self._continuation_messages(history), tools=definitions,
+                max_output_tokens=self._profile.max_output_tokens, thinking_type=self._profile.thinking_type,
+                reasoning_effort=self._profile.reasoning_effort, model=self._profile.model_name, profile=self._profile)))
+        if error is not None:
+            self.close()
+            return LLMInvocationFailure(error=error)
+        with self._sync_lock:
+            self._check_closed()
+            self._private_tool_history = list(history)
         return self._decode_tool_response(response, attempts, duplicate)
 
     def _continuation_messages(
@@ -726,6 +912,7 @@ class ModelOperation:
             self._tool_prompt = None
             self._tool_contracts = ()
             self._tool_definitions = ()
+            self._rejected_turn = None
 
     def __enter__(self) -> "ModelOperation":
         self._check_closed()

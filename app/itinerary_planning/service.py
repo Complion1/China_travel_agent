@@ -52,6 +52,7 @@ from app.llm_runtime import (
     ToolCallsReady,
     ToolResult,
     ToolTurnCompleted,
+    ToolTurnRejected,
     ValidatedToolCall,
 )
 from app.requirements import ConfirmedTravelRequirement, HubType, TravelPace
@@ -516,6 +517,10 @@ class _Run:
     transport_used: int = 0
     submit_repair_used: int = 0
     supplement_request_used: int = 0
+    format_repair_used: int = 0
+    pending_argument_rejection: ToolTurnRejected | None = None
+    pending_argument_stage: str | None = None
+    pending_argument_tools: tuple = ()
     last_rejection: PlanningRejectionSnapshot | None = None
     budget_complete: bool = True
     provider_attempts_complete: bool = True
@@ -698,7 +703,7 @@ class ItineraryPlanningService:
         if (
             lookup.ref.operation_id != plan.terminal_successor_operation_id
             or lookup.ref.artifact_type != "itinerary_planning.itinerary"
-            or lookup.ref.schema_version != "2.0"
+            or lookup.ref.schema_version != "3.0"
         ):
             return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
         try:
@@ -708,7 +713,7 @@ class ItineraryPlanningService:
             raise
         except Exception:
             return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
-        if read.ref != lookup.ref or lookup.ref.content_hash != _artifact_content_hash(artifact):
+        if read.ref != lookup.ref or artifact.schema_version != lookup.ref.schema_version or lookup.ref.content_hash != _artifact_content_hash(artifact):
             return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
         if artifact.request_digest != digest or artifact.directories.hotel_selection_refs[0].operation_id.run_id != plan.run_id:
             return self._failed(None, None, PlanningFailureCode.REQUEST_MISMATCH)
@@ -734,12 +739,12 @@ class ItineraryPlanningService:
             for operation_id, artifact_type, expected in operation_ids:
                 lookup = await self._repository.lookup(operation_id=operation_id)
                 if isinstance(lookup, ArtifactFound):
-                    expected_schema_version = "5.0" if artifact_type == "itinerary_planning.model_action" else "2.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
+                    expected_schema_version = "6.0" if artifact_type == "itinerary_planning.model_action" else "3.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
                     if lookup.ref.operation_id != operation_id or lookup.ref.schema_version != expected_schema_version or lookup.ref.artifact_type != artifact_type:
                         return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
                     read = await self._repository.get(lookup.ref, expected_model=expected)
                     content = _fresh(read.content, expected)
-                    if read.ref != lookup.ref or _artifact_content_hash(content) != lookup.ref.content_hash:
+                    if read.ref != lookup.ref or content.schema_version != lookup.ref.schema_version or _artifact_content_hash(content) != lookup.ref.content_hash:
                         return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
                     if request_digest is not None and content.request_digest != request_digest:
                         return self._failed(None, None, PlanningFailureCode.REQUEST_MISMATCH)
@@ -755,7 +760,7 @@ class ItineraryPlanningService:
             resume_offset = (
                 plan.invocation_slots[0].invocation_slot_index
                 if plan.invocation_slots
-                else 17
+                else 19
             )
             iteration_consumed = getattr(iteration, "consumed", 0) or 0
             # A resume plan intentionally inherits the already consumed
@@ -870,7 +875,7 @@ class ItineraryPlanningService:
             ):
                 return self._failed(run.last_planning_ref, saved_budgets, PlanningFailureCode.REQUEST_MISMATCH)
             changed_old_candidate = any(old != new for old, new in zip(old_candidates, candidates, strict=False))
-            expected = tuple(range(run.invocation_count, 17))
+            expected = tuple(range(run.invocation_count, 19))
             supplied = tuple(item.invocation_slot_index for item in request.operation_plan.invocation_slots)
             if supplied != expected:
                 return self._failed(run.last_planning_ref, saved_budgets, PlanningFailureCode.OPERATION_PLAN_INVALID)
@@ -1054,7 +1059,7 @@ class ItineraryPlanningService:
         return candidates, refs, requirement_group_states
 
     async def _read_upstream(self, ref: ArtifactRef, expected: type[BaseModel], artifact_type: str) -> BaseModel:
-        if type(ref) is not ArtifactRef or ref.artifact_type != artifact_type or ref.schema_version != ("2.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"):
+        if type(ref) is not ArtifactRef or ref.artifact_type != artifact_type or ref.schema_version not in ({"2.0", "3.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0"}):
             raise ValueError("upstream reference mismatch")
         lookup = await self._repository.lookup(operation_id=ref.operation_id)
         if not isinstance(lookup, ArtifactFound) or lookup.ref != ref:
@@ -1062,7 +1067,7 @@ class ItineraryPlanningService:
         result = await self._repository.get(ref, expected_model=expected)
         fresh = _fresh(result.content, expected)
         encoded = json.dumps(fresh.model_dump(mode="json", exclude_none=False, by_alias=False, exclude_computed_fields=True), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
-        if result.ref != ref or ref.content_hash != "sha256:" + hashlib.sha256(encoded).hexdigest() or ref.size_bytes != len(encoded):
+        if result.ref != ref or fresh.schema_version != ref.schema_version or ref.content_hash != "sha256:" + hashlib.sha256(encoded).hexdigest() or ref.size_bytes != len(encoded):
             raise _Indeterminate()
         content_run_id = getattr(fresh, "run_id", None)
         if content_run_id is not None and content_run_id != ref.operation_id.run_id:
@@ -1071,7 +1076,7 @@ class ItineraryPlanningService:
 
     def _directory_model(self, run: _Run) -> ArtifactRefDirectories:
         return ArtifactRefDirectories(
-            schema_version="1.0",
+            schema_version="2.0",
             hotel_selection_refs=(run.hotel_ref,), candidate_set_refs=tuple(run.candidate_set_refs),
             model_action_refs=tuple(run.action_refs), hub_geocode_refs=tuple(run.hub_refs),
             matrix_refs=tuple(run.matrix_refs), directions_refs=tuple(run.directions_refs),
@@ -1083,7 +1088,9 @@ class ItineraryPlanningService:
             raise ValueError("artifact operation phase mismatch")
         if type(content) is not expected:
             raise ValueError("artifact model mismatch")
-        artifact_schema_version = "5.0" if artifact_type == "itinerary_planning.model_action" else "2.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
+        artifact_schema_version = "6.0" if artifact_type == "itinerary_planning.model_action" else "3.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
+        if content.schema_version != artifact_schema_version:
+            raise ValueError("artifact envelope version mismatch")
         request = ArtifactWriteRequest(
             operation_id=operation_id, artifact_type=artifact_type, schema_version=artifact_schema_version,
             content=content.model_dump(mode="json", exclude_none=False, by_alias=False, exclude_computed_fields=True),
@@ -1094,7 +1101,7 @@ class ItineraryPlanningService:
                 raise _Indeterminate()
             read = await self._repository.get(lookup.ref, expected_model=expected)
             existing = _fresh(read.content, expected)
-            if lookup.ref.content_hash != _artifact_content_hash(existing):
+            if existing.schema_version != lookup.ref.schema_version or lookup.ref.content_hash != _artifact_content_hash(existing):
                 raise _Indeterminate()
             if _canonical_hash(existing.model_dump(mode="python", exclude_none=False)) != _canonical_hash(content.model_dump(mode="python", exclude_none=False)):
                 raise _Indeterminate()
@@ -1127,7 +1134,7 @@ class ItineraryPlanningService:
         if read.ref != ref:
             raise _Indeterminate()
         fresh = _fresh(read.content, expected)
-        if ref.content_hash != _artifact_content_hash(fresh):
+        if fresh.schema_version != ref.schema_version or ref.content_hash != _artifact_content_hash(fresh):
             raise _Indeterminate()
         return ref, fresh
 
@@ -1146,7 +1153,7 @@ class ItineraryPlanningService:
     async def _persist_action(self, run: _Run, calls: tuple[ValidatedToolCall, ...], metadata: InvocationMetadata | None, kind: str, disposition: str, request_stage: str, budget_category: str) -> ArtifactRef:
         operation_id = self._invocation_slot(run, run.invocation_count - 1).action_operation_id
         action = ItineraryPlanningModelActionArtifact(
-            schema_version="5.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
+            schema_version="6.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
             request_stage=request_stage, budget_category=budget_category,
             prompt_version=PLANNING_PROMPT_VERSION, prompt_hash=load_planning_prompt().sha256, action_kind=kind,
             call_summaries=tuple(self._action_summary(call, i) for i, call in enumerate(calls)),
@@ -1247,6 +1254,8 @@ class ItineraryPlanningService:
         return all(f"hub-location-{endpoint}" in run.directory for endpoint in ("arrival", "departure"))
 
     def _advance_stage(self, run: _Run) -> PlanningStopReason | None:
+        if run.pending_argument_rejection is not None:
+            return None
         if run.current_stage == "preparation":
             if self._hubs_ready(run):
                 run.current_stage, run.no_progress = "transport", 0
@@ -1254,11 +1263,13 @@ class ItineraryPlanningService:
                 return PlanningStopReason.ITERATION_LIMIT_REACHED if run.preparation_used >= 2 else PlanningStopReason.NO_LEGAL_ACTION
         if run.current_stage == "transport" and run.transport_used >= 5:
             run.current_stage, run.no_progress = "submit_repair", 0
-        if run.submit_repair_used >= 5 or run.invocation_count >= 17:
+        if run.submit_repair_used >= 5 or self._normal_invocations_used(run) >= 17:
             return PlanningStopReason.ITERATION_LIMIT_REACHED
         return None
 
     def _effective_tools(self, run: _Run):
+        if run.pending_argument_rejection is not None:
+            return run.pending_argument_tools
         if run.current_stage == "preparation":
             names = {"get_candidate_evidence", "geocode_hub"}
         elif run.current_stage == "transport":
@@ -1267,11 +1278,13 @@ class ItineraryPlanningService:
             names = {"submit_itinerary"}
         else:
             names = {"get_candidate_evidence", "calculate_route_matrix", "plan_directions", "submit_itinerary"}
-        if run.supplement_request_used < 5 and run.invocation_count < 16 and run.research_remaining > 0 and run.place_remaining > 0 and not (run.current_stage == "submit_repair" and (run.last_rejection is None or run.submit_repair_used >= 4)):
+        if run.supplement_request_used < 5 and self._normal_invocations_used(run) < 16 and run.research_remaining > 0 and run.place_remaining > 0 and not (run.current_stage == "submit_repair" and (run.last_rejection is None or run.submit_repair_used >= 4)):
             names.add("request_candidate_supplement")
         return tuple(tool for tool in PLANNING_TOOL_CONTRACTS if tool.name in names)
 
     async def _admit_invocation(self, run: _Run, identity: InteractionCallIdentity) -> None:
+        if run.closed or (run.pending_argument_rejection is not None and run.format_repair_used >= 2) or (run.pending_argument_rejection is None and self._normal_invocations_used(run) >= 17):
+            raise _Indeterminate()
         if identity.logical_call_index != run.invocation_count:
             raise _Indeterminate()
         slot = self._invocation_slot(run, run.invocation_count)
@@ -1286,12 +1299,16 @@ class ItineraryPlanningService:
             raise _Indeterminate()
         if (result.operation_id != slot.action_operation_id or result.key != ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY
             or result.amount != 1 or result.disposition != "applied" or result.snapshot.run_id != run.run_id
-            or result.snapshot.limit != 17 or result.snapshot.consumed != run.invocation_count + 1):
+            or result.snapshot.limit != 19 or result.snapshot.consumed != run.invocation_count + 1):
             run.budget_complete = False
             raise _Indeterminate()
         run.invocation_count += 1
 
-    def _classify_invocation(self, run: _Run, request_stage: str, calls=(), *, legal=False) -> str:
+    @staticmethod
+    def _normal_invocations_used(run: _Run) -> int:
+        return run.preparation_used + run.transport_used + run.submit_repair_used + run.supplement_request_used
+
+    def _classify_invocation(self, run: _Run, request_stage: str, calls=(), *, legal=False, format_repair=False) -> str:
         category = request_stage
         if legal and len(calls) == 1:
             if calls[0].tool_name == "submit_itinerary":
@@ -1299,6 +1316,8 @@ class ItineraryPlanningService:
                 run.current_stage, run.no_progress = "submit_repair", 0
             elif calls[0].tool_name == "request_candidate_supplement":
                 category = "supplement_request"
+        if format_repair:
+            category = "format_repair"
         field_name = category + "_used"
         setattr(run, field_name, getattr(run, field_name) + 1)
         return category
@@ -1344,6 +1363,13 @@ class ItineraryPlanningService:
         while True:
             if run.closed:
                 return self._failed(run.last_planning_ref, await self._budget_summary(run), PlanningFailureCode.RUN_CONTEXT_CLOSED)
+            repairing = run.pending_argument_rejection is not None
+            if repairing and (run.format_repair_used >= 2 or run.invocation_count >= 19):
+                failure = LLMPlanningFailure(schema_version="2.0", failure_type="llm", error=run.pending_argument_rejection.error,
+                    invocation_index=run.invocation_count - 1, retryable=False, possible_duplicate=False)
+                return await self._finish_failed(run, failure)
+            if repairing and run.pending_argument_stage != run.current_stage:
+                return await self._finish_control_failed(run, PlanningFailureCode.MODEL_CONTRACT_INVALID)
             stop = self._advance_stage(run)
             if stop is not None:
                 return await self._finish_incomplete(run, stop)
@@ -1359,8 +1385,11 @@ class ItineraryPlanningService:
                     self._issued_requests[run.plan.terminal_successor_operation_id] = run.request_digest
                     if first:
                         response = await run.operation.ainvoke_tools(prompt, effective_tools,
-                            admission_callback=lambda call: self._admit_invocation(run, call), request_stage=request_stage)
+                            admission_callback=lambda call: self._admit_invocation(run, call), request_stage=request_stage, allow_argument_repair=True)
                         first = False
+                    elif repairing:
+                        response = await run.operation.arepair_tools(tools=effective_tools,
+                            admission_callback=lambda call: self._admit_invocation(run, call), request_stage=request_stage)
                     else:
                         pending_results = tuple(ToolResult(call_id=item.call_id, content=json.dumps({
                             "tool_result": json.loads(item.content),
@@ -1375,7 +1404,7 @@ class ItineraryPlanningService:
                     raise
                 except Exception:
                     if run.invocation_count > admitted_before:
-                        self._classify_invocation(run, request_stage)
+                        self._classify_invocation(run, request_stage, format_repair=repairing)
                     run.provider_attempts_complete = run.usage_complete = False
                     return self._failed(run.last_planning_ref, await self._budget_summary(run), PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
                 admitted = run.invocation_count == admitted_before + 1
@@ -1383,31 +1412,46 @@ class ItineraryPlanningService:
                     response = self._fresh_tool_outcome(response)
                 except (TypeError, ValueError):
                     if admitted:
-                        category = self._classify_invocation(run, request_stage)
+                        category = self._classify_invocation(run, request_stage, format_repair=repairing)
                         await identity.record_validation(stage="tool_schema", passed=False, code="model_contract_invalid", budget_category=category)
                         await self._persist_action(run, (), None, "llm_failure", "failed", request_stage, category)
                     return await self._finish_control_failed(run, PlanningFailureCode.MODEL_CONTRACT_INVALID)
                 if isinstance(response, LLMInvocationFailure):
                     run.provider_attempts_complete = run.usage_complete = False
                     if admitted:
-                        category = self._classify_invocation(run, request_stage)
+                        category = self._classify_invocation(run, request_stage, format_repair=repairing)
                         await identity.record_validation(stage="controller", passed=False, code=response.error.code.value, budget_category=category)
                         await self._persist_action(run, (), None, "llm_failure", "failed", request_stage, category)
-                    failure = LLMPlanningFailure(schema_version="1.0", failure_type="llm", error=response.error,
+                    failure = LLMPlanningFailure(schema_version="2.0", failure_type="llm", error=response.error,
                         invocation_index=max(0, run.invocation_count - 1), retryable=response.error.retryable, possible_duplicate=response.error.possible_duplicate)
                     return await self._finish_failed(run, failure)
                 if not admitted:
                     return await self._finish_control_failed(run, PlanningFailureCode.MODEL_CONTRACT_INVALID)
-                if isinstance(response, (ToolCallsReady, ToolTurnCompleted)):
+                if isinstance(response, (ToolCallsReady, ToolTurnCompleted, ToolTurnRejected)):
                     run.provider_attempts += response.metadata.provider_attempts
                     run.usage = _add_usage(run.usage, response.metadata.usage)
+                if isinstance(response, ToolTurnRejected):
+                    category = self._classify_invocation(run, request_stage, format_repair=repairing)
+                    await identity.record_validation(stage="tool_schema", passed=False, code="tool_arguments_invalid", budget_category=category)
+                    for ordinal, (call, feedback) in enumerate(zip(response.calls, response.tool_results(), strict=True)):
+                        await identity.record_tool_result(tool_name=call.tool_name, provider_tool_call_id=call.call_id, ordinal=ordinal,
+                            outcome="not_issued", feedback=feedback.content)
+                    await self._persist_action(run, (), None, "llm_failure", "controller_rejected", request_stage, category)
+                    run.pending_argument_rejection = response
+                    run.pending_argument_stage = request_stage
+                    run.pending_argument_tools = effective_tools
+                    await self._persist_state(run)
+                    continue
+                run.pending_argument_rejection = None
+                run.pending_argument_stage = None
+                run.pending_argument_tools = ()
                 if isinstance(response, ToolTurnCompleted):
-                    category = self._classify_invocation(run, request_stage)
+                    category = self._classify_invocation(run, request_stage, format_repair=repairing)
                     await identity.record_validation(stage="controller", passed=False, code="no_terminal_submission", budget_category=category)
                     await self._persist_action(run, (), response.metadata, "final_text", "failed", request_stage, category)
                     return await self._finish_incomplete(run, PlanningStopReason.NO_TERMINAL_SUBMISSION)
                 if not isinstance(response, ToolCallsReady) or not response.calls:
-                    category = self._classify_invocation(run, request_stage)
+                    category = self._classify_invocation(run, request_stage, format_repair=repairing)
                     await identity.record_validation(stage="controller", passed=False, code="model_contract_invalid", budget_category=category)
                     await self._persist_action(run, (), None, "llm_failure", "failed", request_stage, category)
                     return await self._finish_control_failed(run, PlanningFailureCode.MODEL_CONTRACT_INVALID)
@@ -1415,7 +1459,7 @@ class ItineraryPlanningService:
                 try:
                     self._validate_batch(run, calls, effective_tools=effective_tools)
                 except ToolBatchError as error:
-                    category = self._classify_invocation(run, request_stage)
+                    category = self._classify_invocation(run, request_stage, format_repair=repairing)
                     await identity.record_validation(stage="batch", passed=False, code=error.code, budget_category=category)
                     try:
                         await self._persist_action(run, calls, response.metadata, "tool_calls", "controller_rejected", request_stage, category)
@@ -1426,7 +1470,7 @@ class ItineraryPlanningService:
                         call_count=len(calls), tools=[call.tool_name if call.tool_name in _ARGS_BY_TOOL else "unknown_tool" for call in calls])
                     return await self._finish_control_failed(run,
                         PlanningFailureCode.MODEL_CONTRACT_INVALID if error.code == "unknown_tool" else PlanningFailureCode.ACTION_BATCH_INVALID)
-                category = self._classify_invocation(run, request_stage, calls, legal=True)
+                category = self._classify_invocation(run, request_stage, calls, legal=True, format_repair=repairing)
                 await identity.record_validation(stage="batch", passed=True, budget_category=category)
                 try:
                     action_ref = await self._persist_action(run, calls, response.metadata, "tool_calls", "accepted", request_stage, category)
@@ -1558,6 +1602,8 @@ class ItineraryPlanningService:
             return ToolTurnCompleted.model_validate_json(value.model_dump_json(exclude_none=False), strict=True)
         if isinstance(value, LLMInvocationFailure):
             return LLMInvocationFailure.model_validate_json(value.model_dump_json(exclude_none=False), strict=True)
+        if isinstance(value, ToolTurnRejected):
+            return ToolTurnRejected.model_validate_json(value.model_dump_json(exclude_none=False), strict=True)
         return value
 
     def _validate_batch(self, run: _Run, calls: tuple[ValidatedToolCall, ...], *, effective_tools) -> None:
@@ -1672,6 +1718,8 @@ class ItineraryPlanningService:
         return {
             "current_stage": run.current_stage,
             "model_invocations_consumed": run.invocation_count,
+            "normal_invocations_remaining": max(0, 17 - self._normal_invocations_used(run)),
+            "format_repair_remaining": max(0, 2 - run.format_repair_used),
             "preparation_remaining": max(0, 2 - run.preparation_used),
             "transport_remaining": max(0, 5 - run.transport_used),
             "submit_repair_remaining": max(0, 5 - run.submit_repair_used),
@@ -1712,18 +1760,19 @@ class ItineraryPlanningService:
         state = await self._state_snapshot(run, pending=None)
         gaps = tuple(_to_gap_summary_snapshot(item) for item in self._current_gaps(run))
         record = InProgressItineraryRecord(schema_version="1.0", record_type="in_progress", state=state, gaps=gaps)
-        artifact = ItineraryPlanningArtifact(schema_version="2.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
+        artifact = ItineraryPlanningArtifact(schema_version="3.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
         slot = self._invocation_slot(run, run.invocation_count - 1)
         ref, _ = await self._persist(operation_id=slot.planning_state_operation_id, artifact_type="itinerary_planning.itinerary", content=artifact, expected=ItineraryPlanningArtifact)
         run.last_planning_ref = ref
         return ref
 
     async def _state_snapshot(self, run: _Run, *, pending: str | None) -> PlanningStateSnapshot:
-        return PlanningStateSnapshot(schema_version="2.0", request_kind="resume" if run.resumed else "initial",
+        return PlanningStateSnapshot(schema_version="3.0", request_kind="resume" if run.resumed else "initial",
             requirement_digest=_confirmed_digest(run.confirmed), effective_policy=None if run.policy is None else self._policy_snapshot(run.policy),
             draft=None if run.draft is None else _to_draft_snapshot(run.draft), budgets=_to_budget_snapshot(await self._budget_summary(run)),
             current_stage=run.current_stage, model_invocations_consumed=run.invocation_count, preparation_used=run.preparation_used,
             transport_used=run.transport_used, submit_repair_used=run.submit_repair_used, supplement_request_used=run.supplement_request_used,
+            format_repair_used=run.format_repair_used,
             no_progress_streak=run.no_progress, last_rejection=run.last_rejection, supplement_fingerprints=tuple(run.supplement_fingerprints), pending_call_id=pending)
 
     def _policy_snapshot(self, policy: EffectivePlanningPolicy) -> Any:
@@ -1734,7 +1783,7 @@ class ItineraryPlanningService:
         reason = "no_terminal_submission"
         if run.no_progress >= 2:
             reason = "no_progress"
-        elif run.invocation_count >= 17 or run.submit_repair_used >= 5:
+        elif self._normal_invocations_used(run) >= 17 or run.submit_repair_used >= 5:
             reason = "iteration_limit_reached"
         gap = PlanningProcessGapSummary(schema_version="1.0", summary_type="planning_process", gap_id=f"planning-{reason}", evidence_indexes=(), process_reason=reason)
         return (*tuple(self._gap_summary_from_gap(run, item) for item in run.pending_gaps), gap)
@@ -2315,7 +2364,7 @@ class ItineraryPlanningService:
             raise _BusinessRejected("optional_backups_do_not_require_supplement")
         if run.research_remaining <= 0 or run.place_remaining <= 0:
             raise _BusinessRejected("candidate_research_budget_exhausted")
-        if len(run.supplement_fingerprints) >= 5 or run.invocation_count >= 17:
+        if len(run.supplement_fingerprints) >= 5 or self._normal_invocations_used(run) >= 17:
             # A supplement limit alone does not prove that map work or a
             # submission is impossible.  Only the exhausted, route-free state
             # below has no remaining way to establish the mandatory routes.
@@ -2452,7 +2501,7 @@ class ItineraryPlanningService:
         if (state.model_invocations_consumed != run.invocation_count or state.pending_call_id is None or
             state.current_stage != run.current_stage or state.preparation_used != run.preparation_used or
             state.transport_used != run.transport_used or state.submit_repair_used != run.submit_repair_used or
-            state.supplement_request_used != run.supplement_request_used or state.last_rejection != run.last_rejection):
+            state.supplement_request_used != run.supplement_request_used or state.format_repair_used != run.format_repair_used or state.last_rejection != run.last_rejection):
             return self._failed(run.last_planning_ref, await self._budget_summary(run), PlanningFailureCode.REQUEST_MISMATCH)
         pending = (ToolResult(call_id=state.pending_call_id, content=json.dumps({"status": "candidate_supplemented", "candidate_count": len(run.candidates)}, separators=(",", ":"))),)
         return await self._drive(run, first=False, pending_results=pending)
@@ -2496,7 +2545,7 @@ class ItineraryPlanningService:
         return await self._finish_failed(run, failure)
 
     async def _persist_terminal(self, run: _Run, record: Any) -> ItineraryPlanningOutcome:
-        artifact = ItineraryPlanningArtifact(schema_version="2.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
+        artifact = ItineraryPlanningArtifact(schema_version="3.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
         try:
             ref, fresh = await self._persist(operation_id=run.plan.terminal_successor_operation_id, artifact_type="itinerary_planning.itinerary", content=artifact, expected=ItineraryPlanningArtifact)
         except ArtifactCapacityExceededError:
@@ -2542,14 +2591,15 @@ class ItineraryPlanningService:
             snapshot = await self._budget.get_snapshot(key=self._direction_key(run))
             direction_limit, direction_consumed = snapshot.limit, snapshot.consumed
             total = await self._budget.get_snapshot(key=ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY)
-            complete = complete and total.limit == 17 and total.consumed == run.invocation_count
+            complete = complete and total.limit == 19 and total.consumed == run.invocation_count
         except Exception:
             complete = False
-        return PlanningBudgetSummary(schema_version="2.0", model_invocation_limit=17, model_invocations_consumed=run.invocation_count,
+        return PlanningBudgetSummary(schema_version="3.0", model_invocation_limit=19, model_invocations_consumed=run.invocation_count,
+            normal_invocation_limit=17, format_repair_limit=2, format_repair_used=run.format_repair_used,
             preparation_limit=2, preparation_used=run.preparation_used, transport_limit=5, transport_used=run.transport_used,
             submit_repair_limit=5, submit_repair_used=run.submit_repair_used, supplement_request_limit=5, supplement_request_used=run.supplement_request_used,
             direction_call_limit=direction_limit, direction_calls_consumed=direction_consumed, budget_snapshot_complete=complete,
-            semantic_invocation_limit=17, semantic_invocations_consumed=run.invocation_count, known_provider_attempts=run.provider_attempts,
+            semantic_invocation_limit=19, semantic_invocations_consumed=run.invocation_count, known_provider_attempts=run.provider_attempts,
             provider_attempts_complete=run.provider_attempts_complete, known_usage=run.usage, usage_complete=run.usage_complete, cache_hits=run.cache_hits)
 
     def _failed(self, last_ref: ArtifactRef | None, budgets: Any, code: PlanningFailureCode, *, possible_duplicate: bool = False) -> ItineraryPlanningFailed:
@@ -2559,18 +2609,19 @@ class ItineraryPlanningService:
         if code is PlanningFailureCode.ARTIFACT_ERROR and possible_duplicate:
             retryable = False
         failure = ControlPlanningFailure(schema_version="1.0", failure_type="control", code=code, retryable=retryable, possible_duplicate=possible_duplicate)
-        return ItineraryPlanningFailed(schema_version="2.0", outcome_type="failed", failure=failure, last_consistent_itinerary_ref=last_ref, failure_artifact_ref=None, budgets=budgets, retryable=retryable, possible_duplicate=possible_duplicate)
+        version = budgets.schema_version if budgets is not None else last_ref.schema_version if last_ref is not None else "3.0"
+        return ItineraryPlanningFailed(schema_version=version, outcome_type="failed", failure=failure, last_consistent_itinerary_ref=last_ref, failure_artifact_ref=None, budgets=budgets, retryable=retryable, possible_duplicate=possible_duplicate)
 
     def _outcome_from_terminal(self, ref: ArtifactRef, artifact: ItineraryPlanningArtifact) -> ItineraryPlanningOutcome:
         record = artifact.record
         if isinstance(record, CompletedItineraryRecord):
-            return ItineraryPlanningCompleted(schema_version="2.0", outcome_type="completed", itinerary_ref=ref, summary=_from_summary_snapshot(record.summary), budgets=_from_budget_snapshot(record.budgets))
+            return ItineraryPlanningCompleted(schema_version=artifact.schema_version, outcome_type="completed", itinerary_ref=ref, summary=_from_summary_snapshot(record.summary), budgets=_from_budget_snapshot(record.budgets))
         if isinstance(record, IncompleteItineraryRecord):
-            return ItineraryPlanningIncomplete(schema_version="2.0", outcome_type="incomplete", itinerary_ref=ref if record.draft is not None else None, summary=_from_summary_snapshot(record.summary), budgets=_from_budget_snapshot(record.budgets), gaps=tuple(_from_gap_summary_snapshot(item, artifact.directories) for item in record.gaps), stop_reasons=record.stop_reasons)
+            return ItineraryPlanningIncomplete(schema_version=artifact.schema_version, outcome_type="incomplete", itinerary_ref=ref if record.draft is not None else None, summary=_from_summary_snapshot(record.summary), budgets=_from_budget_snapshot(record.budgets), gaps=tuple(_from_gap_summary_snapshot(item, artifact.directories) for item in record.gaps), stop_reasons=record.stop_reasons)
         if isinstance(record, AwaitingCandidateSupplementRecord):
-            return ItineraryPlanningCandidateSupplementRequested(schema_version="2.0", outcome_type="candidate_supplement_requested", planning_ref=ref, candidate_set_ref=artifact.directories.candidate_set_refs[-1], gaps=tuple(_from_gap_summary_snapshot(item, artifact.directories) for item in record.gaps), gap_fingerprint=record.gap_fingerprint, budgets=_from_budget_snapshot(record.state.budgets))
+            return ItineraryPlanningCandidateSupplementRequested(schema_version=artifact.schema_version, outcome_type="candidate_supplement_requested", planning_ref=ref, candidate_set_ref=artifact.directories.candidate_set_refs[-1], gaps=tuple(_from_gap_summary_snapshot(item, artifact.directories) for item in record.gaps), gap_fingerprint=record.gap_fingerprint, budgets=_from_budget_snapshot(record.state.budgets))
         failure = _from_failure_snapshot(record.failure)
-        return ItineraryPlanningFailed(schema_version="2.0", outcome_type="failed", failure=failure, last_consistent_itinerary_ref=record.last_consistent_itinerary_ref, failure_artifact_ref=ref, budgets=None if record.budgets is None else _from_budget_snapshot(record.budgets), retryable=record.retryable, possible_duplicate=record.possible_duplicate)
+        return ItineraryPlanningFailed(schema_version=artifact.schema_version, outcome_type="failed", failure=failure, last_consistent_itinerary_ref=record.last_consistent_itinerary_ref, failure_artifact_ref=ref, budgets=None if record.budgets is None else _from_budget_snapshot(record.budgets), retryable=record.retryable, possible_duplicate=record.possible_duplicate)
 
 
 __all__ = ("ItineraryPlanningService",)

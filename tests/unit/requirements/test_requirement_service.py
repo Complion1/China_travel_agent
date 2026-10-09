@@ -73,10 +73,12 @@ def complete_requirement(destination: str = "杭州") -> TravelRequirement:
         time_window=TravelTimeWindow(
             arrival=TravelTimeWindowArrival(
                 hub_name="杭州东站",
+                hub_type=HubType.RAILWAY_STATION,
                 local_datetime="2025-06-01 09:00",
             ),
             departure=TravelTimeWindowDeparture(
                 hub_name="杭州东站",
+                hub_type=HubType.RAILWAY_STATION,
                 local_datetime="2025-06-03 18:00",
             ),
             sightseeing_start_date="2025-06-01",

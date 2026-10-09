@@ -227,7 +227,8 @@ async def test_real_runtime_resume_selects_new_candidate_from_visible_context() 
             return ProviderResponse(content=None if calls else "结束", tool_calls=calls,
                 finish_reason="tool_calls" if calls else "stop", model_name="deepseek-v4-flash",
                 usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
-                    "reasoning_tokens": 0, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1}, reasoning_content=None)
+                    "reasoning_tokens": 0, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1}, reasoning_content=None,
+                raw_tool_calls=tuple((call_id, name, json.dumps(arguments, ensure_ascii=False)) for call_id, name, arguments in calls))
 
         async def ainvoke_tools(self, value):
             context = json.loads(value.user.split("BEGIN_TYPED_PLANNING_DATA\n")[1].split("\nEND_TYPED_PLANNING_DATA")[0])
@@ -269,7 +270,7 @@ async def test_real_runtime_resume_selects_new_candidate_from_visible_context() 
     assert awaiting.outcome_type == "candidate_supplement_requested"
     original = (await repository.get(request.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
     supplied = _seed_supplemented_candidate(repository, original, request.operation_plan.run_id, request.candidate_set_ref, awaiting)
-    plan = _plan(request.operation_plan.run_id, suffix="visible_resume", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17)))
+    plan = _plan(request.operation_plan.run_id, suffix="visible_resume", slots=tuple(range(awaiting.budgets.model_invocations_consumed,19)))
     plan = plan.model_copy(update={"matrix_operation_ids": (OperationId(run_id=plan.run_id, phase=WorkflowPhase.ITINERARY_PLANNING, logical_step="visible_resume_matrix"),)})
     result = await service.plan_resume(ItineraryPlanningResumeRequest(predecessor_planning_ref=awaiting.planning_ref,
         supplemented_candidate_set_ref=supplied, operation_plan=plan, supplemental_operation_plan=_supplemental_plan(plan.run_id)))
@@ -485,14 +486,14 @@ async def test_supplement_outcome_converts_artifact_evidence_and_resume_uses_rem
         supplemental_operation_plan=_supplemental_plan(request.operation_plan.run_id),
         predecessor_planning_ref=awaiting.planning_ref,
         supplemented_candidate_set_ref=same_content_ref,
-        operation_plan=_plan(request.operation_plan.run_id, suffix="resume_same_content", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17))),
+        operation_plan=_plan(request.operation_plan.run_id, suffix="resume_same_content", slots=tuple(range(awaiting.budgets.model_invocations_consumed,19))),
     ))
     assert same_content.failure.code.value == "predecessor_invalid"
     resume = ItineraryPlanningResumeRequest(
         supplemental_operation_plan=_supplemental_plan(request.operation_plan.run_id),
         predecessor_planning_ref=awaiting.planning_ref,
         supplemented_candidate_set_ref=supplemented_ref,
-        operation_plan=_plan(request.operation_plan.run_id, suffix="resume", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17))),
+        operation_plan=_plan(request.operation_plan.run_id, suffix="resume", slots=tuple(range(awaiting.budgets.model_invocations_consumed,19))),
     )
 
     result = await service.plan_resume(resume)
@@ -592,7 +593,7 @@ async def test_five_supplements_have_independent_allowance_and_remaining_phase_c
         successor_ref = previous_ref.model_copy(update={"artifact_id": uuid4(), "operation_id": upstream_plan.terminal_successor_operation_id,
             "size_bytes": len(encoded), "content_hash": "sha256:" + hashlib.sha256(encoded).hexdigest()})
         repository.seed(successor_ref, supplied)
-        plan = _plan(run_id, suffix=f"five_resume_{index}", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17)))
+        plan = _plan(run_id, suffix=f"five_resume_{index}", slots=tuple(range(awaiting.budgets.model_invocations_consumed,19)))
         if index == 4 and not finish_with_sixth_supplement:
             plan = plan.model_copy(update={"matrix_operation_ids": tuple(OperationId(run_id=run_id, phase=WorkflowPhase.ITINERARY_PLANNING, logical_step=f"five_matrix_{i}") for i in range(5))})
         awaiting = await service.plan_resume(ItineraryPlanningResumeRequest(predecessor_planning_ref=awaiting.planning_ref,

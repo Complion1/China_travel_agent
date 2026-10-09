@@ -80,6 +80,12 @@ def _unique_issues(issues: list[RequirementIssue]) -> tuple[RequirementIssue, ..
     return tuple(sorted(unique.values(), key=lambda item: (item.field_path.value, item.code)))
 
 
+_HUB_ISSUE_CODES = frozenset({
+    "hub_name_missing", "hub_name_not_specific", "hub_type_missing",
+    "hub_type_mismatch", "hub_time_missing",
+})
+
+
 class RequirementDomainService:
     def __init__(
         self,
@@ -140,10 +146,11 @@ class RequirementDomainService:
 
         state = input.current.model_copy(deep=True)
         before = state.requirement.model_copy(deep=True)
-        result = self._merger.merge(state.requirement, patch)
+        result = self._merger.merge(state.requirement, patch,
+            verified_paths=(item.field_path.value for item in verified))
         state.requirement = result.requirement
-        validation_issues = self._merger.detect_conflicts(state.requirement)
-        state.issues = _unique_issues([*result.issues, *validation_issues])
+        metadata_paths = self._metadata_paths(state, patch)
+        state.issues = self._issues_after_merge(state, before, patch, result)
         update_metadata_for_patch(
             state.metadata,
             patch,
@@ -151,7 +158,7 @@ class RequirementDomainService:
             receipts=receipts,
             normalizations=normalizations,
             issues=state.issues,
-            field_paths=iter_patch_leaf_paths(patch),
+            field_paths=metadata_paths,
             derived_fields=result.derived_fields,
             pending_confirmation_fields=pending,
         )
@@ -232,18 +239,37 @@ class RequirementDomainService:
         before = working.requirement.model_copy(deep=True)
         result = self._merger.merge(working.requirement, patch)
         working.requirement = result.requirement
-        working.issues = _unique_issues(
-            [*result.issues, *self._merger.detect_conflicts(working.requirement)]
-        )
+        metadata_paths = self._metadata_paths(working, patch)
+        working.issues = self._issues_after_merge(working, before, patch, result)
         update_metadata_for_patch(
             working.metadata,
             patch,
             UUID(int=0),
             issues=working.issues,
-            field_paths=iter_patch_leaf_paths(patch),
+            field_paths=metadata_paths,
             derived_fields=result.derived_fields,
         )
         return self._decide_outcome(working, before, result)
+
+    def _issues_after_merge(self, state, before, patch, result):
+        touched = set(iter_patch_leaf_paths(patch)) | set(result.derived_fields)
+        prior_validation = {(issue.code, issue.field_path)
+            for issue in self._merger.detect_conflicts(before)}
+        previous = [*state.issues, *(issue for meta in state.metadata.metadata.values() for issue in meta.issues)]
+        remaining = [issue for issue in previous
+            if issue.field_path.value not in touched
+            and issue.code not in _HUB_ISSUE_CODES
+            and issue.code != RequirementErrorCode.CONFIRMATION_NOT_READY.value
+            and (issue.code, issue.field_path) not in prior_validation]
+        return _unique_issues([*remaining, *result.issues, *self._merger.detect_conflicts(state.requirement)])
+
+    @staticmethod
+    def _metadata_paths(state, patch):
+        # Revalidate both endpoints so a repaired mismatch cannot leave its
+        # unpatched counterpart marked INVALID in the clarification UI.
+        prior_hub_paths = {path.value for path, meta in state.metadata.metadata.items()
+            if any(issue.code in _HUB_ISSUE_CODES for issue in meta.issues)}
+        return set(iter_patch_leaf_paths(patch)) | prior_hub_paths
 
     async def _extract_with_one_repair(
         self,

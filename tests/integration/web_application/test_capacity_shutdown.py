@@ -132,12 +132,17 @@ async def test_lost_dedicated_connection_stops_new_admission_and_closes_owned_re
             assert len(rows) == 1
             await connection.execute("SELECT pg_terminate_backend(%s)",(rows[0][0],))
         with pytest.raises(WebApplicationDependencyError): await service._ready()
-        with pytest.raises((DecisionError,WebApplicationUsageError)):
-            await service.start(owner=owner,request=WebStartRequest(schema_version="1.0",request_id=uuid4(),user_message=provider.full_text),client_ip="192.0.2.1")
+        # Fault signalling closes admission immediately. During asynchronous
+        # pool shutdown, a public start could instead observe the dying pool.
+        # Verify the immediate slot gate, then the completed public lifecycle.
+        with pytest.raises(DecisionError): service._try_slot(uuid4())
         for _ in range(200):
             if provider.closed and maps.closed: break
             await asyncio.sleep(.05)
-        assert provider.closed and maps.closed and provider.calls == maps.calls == 0
+        assert service._closed and provider.closed and maps.closed and provider.calls == maps.calls == 0
+        with pytest.raises(WebApplicationUsageError):
+            await service.start(owner=owner,request=WebStartRequest(schema_version="1.0",request_id=uuid4(),user_message=provider.full_text),client_ip="192.0.2.1")
+        assert provider.calls == maps.calls == 0
 
 
 @pytest.mark.asyncio

@@ -69,6 +69,8 @@ def failure_code(failure):
         raise DurableExecutionDependencyError()
     if code == "budget_exhausted":
         return "workflow_budget_exhausted"
+    if code == "input_invalid":
+        return "requirement_failed"
     return "workflow_contract_failed"
 
 
@@ -93,7 +95,7 @@ class Nodes:
         current = None
         for number, ref in enumerate(refs):
             value = (await cap.read_only_artifact_repository.get(ref, expected_model=DemoControlArtifact)).content
-            if value.sequence != number or value.previous_ref != previous or ref.operation_id.logical_step != f"control_{number:02d}":
+            if value.schema_version != ref.schema_version or value.sequence != number or value.previous_ref != previous or ref.operation_id.logical_step != f"control_{number:02d}":
                 raise DurableExecutionStateError()
             if current is not None and (
                 value.map_requested != current.map_requested
@@ -194,7 +196,7 @@ class Nodes:
 
     async def supplemental_request(self, state, cap, control):
         planning = (await cap.read_only_artifact_repository.get(control.planning_ref, expected_model=ItineraryPlanningArtifact)).content
-        if planning.record.record_type != "awaiting_candidate_supplement":
+        if planning.schema_version != control.planning_ref.schema_version or planning.record.record_type != "awaiting_candidate_supplement":
             raise DurableExecutionStateError()
         predecessor = planning.directories.candidate_set_refs[-1]
         prior = (await cap.read_only_artifact_repository.get(predecessor, expected_model=CandidateResearchArtifact)).content
@@ -252,7 +254,7 @@ class Nodes:
             return goto(state, "terminal")
         if value.outcome_type == "candidate_supplement_requested":
             saved = (await cap.read_only_artifact_repository.get(value.planning_ref, expected_model=ItineraryPlanningArtifact)).content
-            if saved.record.record_type != "awaiting_candidate_supplement" or saved.record.gap_fingerprint != value.gap_fingerprint or restore_gaps(saved) != value.gaps or saved.directories.candidate_set_refs[-1] != value.candidate_set_ref:
+            if saved.schema_version != value.planning_ref.schema_version or saved.record.record_type != "awaiting_candidate_supplement" or saved.record.gap_fingerprint != value.gap_fingerprint or restore_gaps(saved) != value.gaps or saved.directories.candidate_set_refs[-1] != value.candidate_set_ref:
                 raise DurableExecutionStateError()
             if control.supplement_count >= 5 or value.gap_fingerprint in control.handled_gap_fingerprints:
                 state = await self.receipt(state, cap, **values, planning_ref=value.planning_ref, last_outcome="failed", terminal_code="planning_incomplete")
@@ -270,7 +272,7 @@ class Nodes:
             planning_ref = found.ref
             saved = (await cap.read_only_artifact_repository.get(planning_ref, expected_model=ItineraryPlanningArtifact)).content
             if (planning_ref.operation_id != plan.terminal_successor_operation_id
-                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "2.0"
+                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "3.0" or saved.schema_version != planning_ref.schema_version
                 or saved.request_digest != planning_request_digest(request)
                 or saved.record.record_type != "incomplete" or saved.record.stop_reasons != value.stop_reasons
                 or restore_gaps(saved) != value.gaps or saved.directories.candidate_set_refs[-1] != control.candidate_set_ref

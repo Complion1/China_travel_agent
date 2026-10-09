@@ -75,7 +75,7 @@ def create_demo_workflow_definition(*, dependencies):
     }
     rules = tuple(DurableExecutionNodeRecoveryRule(node_name=name, phase=phase, recovery_class=recovery)
         for name, (phase, recovery) in sorted(specs.items()))
-    payload = dict(schema_version="1.0", contract_id="demo_workflow.web.v2",
+    payload = dict(schema_version="1.0", contract_id="demo_workflow.web.v3",
         command_codec=codec.descriptor.model_dump(mode="json"), budgeted_phases=[phase.value for phase in BUDGETED_PHASES],
         node_rules=[rule.model_dump(mode="json") for rule in rules])
     contract = DurableExecutionContract.model_validate_json(canonical(payload | {"contract_digest": digest(canonical(payload))}), strict=True)
@@ -85,7 +85,7 @@ def create_demo_workflow_definition(*, dependencies):
     plans = [research_plan(bound_id), *(planning_plan(bound_id, days) for days in (1, 60))]
     if max([len(canonical(payload)), *(len(canonical(plan.model_dump(mode="json"))) for plan in plans)]) > limits.max_payload_bytes:
         raise DemoWorkflowConfigurationError()
-    if limits.max_managed_operations_per_run < 623 or dependencies.artifact_limits.max_artifacts < 61:
+    if limits.max_managed_operations_per_run < 625 or dependencies.artifact_limits.max_artifacts < 61:
         raise DemoWorkflowConfigurationError()
     services = Services()
     def build(caps):

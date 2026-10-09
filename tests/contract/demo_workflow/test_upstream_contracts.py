@@ -6,6 +6,22 @@ from app.requirements import NeedConfirmation
 from tests.support.demo_workflow_fakes import full_dependencies
 
 
+def test_input_invalid_routes_to_existing_input_terminal_and_preserves_safety_precedence():
+    from types import SimpleNamespace
+    from app.demo_workflow.nodes import failure_code
+    from app.durable_execution import DurableExecutionDependencyError
+    from app.workflow_contracts import OperationResultIndeterminateError
+    def failure(code, kind="control"):
+        return SimpleNamespace(failure_type=kind, code=SimpleNamespace(value=code))
+    assert failure_code(failure("input_invalid")) == "requirement_failed"
+    assert failure_code(failure("input_invalid", "llm")) == "workflow_provider_failed"
+    assert failure_code(failure("input_invalid", "map")) == "workflow_map_failed"
+    assert failure_code(failure("budget_exhausted")) == "workflow_budget_exhausted"
+    assert failure_code(failure("output_invalid")) == "workflow_contract_failed"
+    with pytest.raises(DurableExecutionDependencyError): failure_code(failure("persistence_error"))
+    with pytest.raises(OperationResultIndeterminateError): failure_code(failure("operation_result_indeterminate"))
+
+
 @pytest.mark.asyncio
 async def test_real_initial_requirement_and_production_definition():
     dependencies, turn, providers = await full_dependencies()
@@ -13,7 +29,7 @@ async def test_real_initial_requirement_and_production_definition():
     transition = await dependencies.domain_service.process_turn(turn)
     assert type(transition.outcome) is NeedConfirmation, transition
     assert len(providers.extractor.calls) == 1
-    assert definition.contract.contract_id == "demo_workflow.web.v2"
+    assert definition.contract.contract_id == "demo_workflow.web.v3"
     assert len(definition.contract.node_rules) == 76
     await definition.aclose()
 

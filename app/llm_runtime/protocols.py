@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from app.llm_runtime.profiles import ModelProfile
@@ -43,12 +43,14 @@ class ProviderToolContinuation:
 
 @dataclass(frozen=True, slots=True)
 class ProviderResponse:
-    content: str | None
-    tool_calls: tuple[tuple[str, str, dict[str, object]], ...]
+    content: str | None = field(repr=False)
+    tool_calls: tuple[tuple[str, str, dict[str, object]], ...] = field(repr=False)
     finish_reason: str
     model_name: str
     usage: dict[str, int]
-    reasoning_content: str | None
+    reasoning_content: str | None = field(repr=False)
+    # Complete wire order, retained before SDK JSON parsing; private to M02.
+    raw_tool_calls: tuple[tuple[str, str, str], ...] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)

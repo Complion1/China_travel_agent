@@ -168,13 +168,52 @@ class LLMInvocationFailure(BaseModel):
     error: LLMRuntimeError
 
 
+class ToolArgumentIssue(BaseModel):
+    """Safe schema feedback: never includes input, ctx values or error text."""
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    rule: Literal["missing", "type", "enum", "extra", "constraint", "invalid_json", "validation"]
+    field: Annotated[str, StringConstraints(min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_.\[\]-]+$")] | None
+
+
+class RejectedToolCall(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    call_id: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+    tool_name: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    issues: Annotated[tuple[ToolArgumentIssue, ...], Field(max_length=20)]
+
+
+class ToolTurnRejected(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    outcome_type: Literal["rejected"] = "rejected"
+    error: LLMRuntimeError
+    metadata: InvocationMetadata
+    calls: Annotated[tuple[RejectedToolCall, ...], Field(min_length=1, max_length=128)]
+
+    @model_validator(mode="after")
+    def _batch(self):
+        if self.error.code is not LLMErrorCode.TOOL_ARGUMENTS_INVALID or self.error.retryable:
+            raise ValueError("invalid parameter rejection")
+        if len({call.call_id for call in self.calls}) != len(self.calls) or not any(call.issues for call in self.calls):
+            raise ValueError("invalid rejected batch")
+        return self
+
+    def tool_results(self) -> tuple[ToolResult, ...]:
+        import json
+        return tuple(ToolResult(call_id=call.call_id, content=json.dumps({
+            "status": "not_executed", "code": "tool_arguments_invalid",
+            "batch_rejected": True,
+            "issues": [issue.model_dump(mode="json") for issue in call.issues],
+            "instruction": "整批工具均未执行。根据字段和规则修正参数，并重新输出完整且符合当前工具 schema 的批次；不要省略合法兄弟调用。",
+        }, ensure_ascii=False, separators=(",", ":"))) for call in self.calls)
+
+
 StructuredInvocationOutcome = Annotated[
     StructuredInvocationSuccess | LLMInvocationFailure,
     Field(discriminator="outcome_type"),
 ]
 
 ToolTurnOutcome = Annotated[
-    ToolCallsReady | ToolTurnCompleted | LLMInvocationFailure,
+    ToolCallsReady | ToolTurnCompleted | ToolTurnRejected | LLMInvocationFailure,
     Field(discriminator="outcome_type"),
 ]
 

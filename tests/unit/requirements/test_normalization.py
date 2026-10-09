@@ -149,6 +149,15 @@ def test_additional_normalization_edges():
     assert infer_hub_type("  ") is None
 
 
+@pytest.mark.parametrize("name,expected", [
+    ("上海", None), ("虹桥", None), ("火车站", None), ("高铁站", None),
+    ("合肥汽车站", None), ("合肥客运站", None), ("合肥公交站", None), ("合肥地铁站", None),
+    ("机场", None), ("上海浦东机场T2航站楼", "airport"), ("合肥南站", "railway_station"),
+])
+def test_hub_inference_requires_specific_supported_marker(name, expected):
+    assert infer_hub_type(name) == expected
+
+
 def test_time_window_checks_relative_order_and_malformed_dates():
     tw = TravelTimeWindow(
         sightseeing_start_date="2025-06-02",

@@ -147,7 +147,7 @@ UTC_NOW = datetime(2026, 9, 3, tzinfo=timezone.utc)
 
 def _ref(run_id: UUID, artifact_type: str, phase: WorkflowPhase, step: str, content: str = "d") -> ArtifactRef:
     return ArtifactRef(
-        artifact_id=uuid4(), artifact_type=artifact_type, schema_version="2.0" if artifact_type == "itinerary_planning.itinerary" else "1.0",
+        artifact_id=uuid4(), artifact_type=artifact_type, schema_version="3.0" if artifact_type == "itinerary_planning.itinerary" else "1.0",
         content_hash="sha256:" + content * 64,
         operation_id=OperationId(run_id=run_id, phase=phase, logical_step=step.replace("-", "_")),
         created_at=UTC_NOW, size_bytes=1,
@@ -266,7 +266,7 @@ def _upstream(run_id: UUID) -> tuple[ArtifactRef, ArtifactRef, HotelSelectionArt
     return hotel_ref, candidate_ref, hotel, candidate_artifact
 
 
-def _plan(run_id: UUID, *, suffix: str = "initial", slots: tuple[int, ...] = tuple(range(17))) -> ItineraryPlanningOperationPlan:
+def _plan(run_id: UUID, *, suffix: str = "initial", slots: tuple[int, ...] = tuple(range(19))) -> ItineraryPlanningOperationPlan:
     phase = WorkflowPhase.ITINERARY_PLANNING
     invocation_slots = tuple(
         PlanningInvocationOperationIds(
@@ -2025,7 +2025,8 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
                     return value
                 calls = tuple((call.call_id, call.tool_name, replace(call.arguments.model_dump(mode="json"))) for call in step.calls)
                 return ProviderResponse(content=None, tool_calls=calls, finish_reason="tool_calls", model_name="deepseek-v4-flash",
-                    usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "reasoning_tokens": 0, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1}, reasoning_content=None)
+                    usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "reasoning_tokens": 0, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1}, reasoning_content=None,
+                    raw_tool_calls=tuple((call_id, name, json.dumps(arguments, ensure_ascii=False)) for call_id, name, arguments in calls))
 
             async def ainvoke_tools(self, value):
                 context = json.loads(value.user.split("BEGIN_TYPED_PLANNING_DATA\n")[1].split("\nEND_TYPED_PLANNING_DATA")[0])

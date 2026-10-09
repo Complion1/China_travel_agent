@@ -165,9 +165,16 @@ class FakeModelOperation:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def ainvoke_tools(self, prompt: object, contracts: tuple[object, ...], *, admission_callback=None, request_stage=None) -> BaseModel:
+    async def ainvoke_tools(self, prompt: object, contracts: tuple[object, ...], *, admission_callback=None, request_stage=None, allow_argument_repair=False) -> BaseModel:
         self.prompts.append(prompt)
         self.tool_contracts.append(contracts)
+        if admission_callback is not None:
+            from app.llm_runtime import InteractionCallIdentity
+            await admission_callback(InteractionCallIdentity(call_id=uuid4(), logical_call_index=self.call_count))
+        return await self._next()
+
+    async def arepair_tools(self, *, tools=None, admission_callback=None, request_stage=None) -> BaseModel:
+        self.tool_contracts.append(tools)
         if admission_callback is not None:
             from app.llm_runtime import InteractionCallIdentity
             await admission_callback(InteractionCallIdentity(call_id=uuid4(), logical_call_index=self.call_count))
@@ -276,7 +283,7 @@ class FakeRepository:
         return ref
 
 
-def make_planning_budget_manager(run_id: UUID, *, iteration_limit: int = 17, direction_limit: int | None = None) -> InMemoryExecutionBudgetManager:
+def make_planning_budget_manager(run_id: UUID, *, iteration_limit: int = 19, direction_limit: int | None = None) -> InMemoryExecutionBudgetManager:
     direction_limit = 8 * 1 + 2 if direction_limit is None else direction_limit
     plan = ExecutionBudgetPlan(
         schema_version="1.0", run_id=run_id,

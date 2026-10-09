@@ -70,5 +70,5 @@ async def test_public_missing_terminal_audits_state_before_action_and_never_rese
     assert len(repository.put_requests) == writes
     assert runtime.start_count == 1 and operation.call_count == 2
     if state_case == "intact":
-        assert repository.lookup_calls[1:18] == [slot.planning_state_operation_id for slot in request.operation_plan.invocation_slots]
-        assert repository.lookup_calls[18:35] == [slot.action_operation_id for slot in request.operation_plan.invocation_slots]
+        assert repository.lookup_calls[1:20] == [slot.planning_state_operation_id for slot in request.operation_plan.invocation_slots]
+        assert repository.lookup_calls[20:39] == [slot.action_operation_id for slot in request.operation_plan.invocation_slots]

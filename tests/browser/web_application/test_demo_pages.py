@@ -13,6 +13,27 @@ def control(page,origin,**changes):
     assert response.status==200
 
 
+@pytest.mark.parametrize("code", ["requirement_failed", "workflow_contract_failed"])
+def test_closed_input_failure_displays_safe_hub_reason_without_resume_controls(page,origin,code):
+    from app.web_application import WebInputIssue
+    from app.requirements import validate_requirement_hubs
+    from tests.unit.web_application.test_hub_input_details import legacy_state
+    state, view = legacy_state(code)
+    issues = tuple(WebInputIssue(schema_version="1.0",field=item.field_path,code=item.code,message=item.message)
+        for item in validate_requirement_hubs(state.requirement_outcome.requirement))
+    projection = WebRunView(schema_version="1.0",run=view,card=None,actions=(),
+        result_available=False,summary_status="not_saved",input_issues=issues)
+    page.route("**/api/runs/"+str(view.run_id), lambda route: route.fulfill(
+        status=200,content_type="application/json",body=projection.model_dump_json()))
+    page.goto(origin+"/tasks/"+str(view.run_id))
+    expect(page.locator("#task-status")).to_have_text("旅行需求未通过校验")
+    expect(page.locator("#input-issues")).to_be_visible()
+    expect(page.locator("#input-issues")).to_contain_text("不能只填写城市名")
+    expect(page.locator("#input-issues")).to_contain_text("请选择离开枢纽类型")
+    assert page.locator("#interaction button, #controls button").count() == 0
+    assert "上海" not in page.locator("#input-issues").inner_text()
+
+
 def info(page,origin): return page.request.get(origin+"/__test/info").json()
 
 
@@ -43,7 +64,7 @@ def answer_current_questions(page,origin,**overrides):
             labels=value if isinstance(value,list) else [value]
             if value is None: labels=["由 Agent 决定"]
             for label in labels:
-                option=next((item for item in question["options"] if item["label"]==label),None)
+                option=next((item for item in question["options"] if item["label"]==label or item["value"]==label),None)
                 if option:
                     page.locator(prefix+"-"+option["value"]).check()
                 else:
@@ -72,6 +93,10 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     page.reload();expect(page.locator("#clarify-preferences-interests-culture")).to_be_visible()
     assert info(page,origin)["provider_calls"]==1
     assert page.locator("#interaction input:checked").count()==0
+    expect(page.get_by_text("到达杭州的机场/车站", exact=True).first).to_be_visible()
+    expect(page.get_by_text("离开杭州的机场/车站", exact=True).first).to_be_visible()
+    expect(page.locator("#clarify-time_window-arrival-hub_type-airport")).to_be_visible()
+    expect(page.locator("#clarify-time_window-departure-hub_type-railway_station")).to_be_visible()
     answer_current_questions(page,origin,**{"preferences.interests":["人文","自然"],"rooms.room_type_requirements":"需要两张床"})
     page.get_by_text("其他补充说明（可选）",exact=True).click()
     page.locator("#clarify-input").fill("保留我的选择草稿")
@@ -169,6 +194,9 @@ def test_busy_429_low_disk_preserve_input_samples_and_disconnect_never_restarts(
 
 def test_expired_and_other_browser_uniform_404_xss_canary_and_sse_read_only(page,origin,browser):
     page.goto(origin+"/history");links=page.get_by_role("link",name="进入任务")
+    # An empty initial container does not prove the asynchronous session/history
+    # bootstrap has finished. Wait for its authenticated empty-history response.
+    expect(page.locator("#history-list")).to_have_text("当前浏览器尚无任务。")
     # This independent cookie has no access to the preceding visitors' tasks.
     expect(links).to_have_count(0)
     response=page.request.get(origin+"/api/runs/00000000-0000-4000-8000-000000000001")
@@ -214,16 +242,20 @@ def test_truncated_post_response_keeps_original_id_and_queries_one_real_run(page
     (Path(os.environ["MODULE14_EVIDENCE_DIR"])/"sse-shutdown-fixture.json").write_text(json.dumps({"run_id":page.url.rsplit("/",1)[1],"cookie":cookie}),encoding="utf-8")
 
 
-def test_registered_failed_terminal_projection_is_clear_without_partial_result(page,origin):
+@pytest.mark.parametrize("terminal_code,expected", [
+    ("planning_incomplete", "规划失败，未生成完整攻略"),
+    ("workflow_provider_failed", "规划失败，模型调用或输出校验未通过"),
+])
+def test_registered_failed_terminal_projection_is_clear_without_partial_result(page,origin,terminal_code,expected):
     # A UI projection fixture, not a claim of running a failed business graph.
     run_id="00000000-0000-4000-8000-000000000014"
     view={"schema_version":"1.0","run":{"run_id":run_id,"trace_id":run_id,"created_at":"2026-08-20T00:00:00Z","finalized_at":"2026-08-20T00:01:00Z",
-        "lifecycle":"closed","activity":"terminal","phase":"itinerary_planning","delivery_status":"failed","terminal_code":"planning_incomplete","pause_generation":None,"cancel_requested":False},
+        "lifecycle":"closed","activity":"terminal","phase":"itinerary_planning","delivery_status":"failed","terminal_code":terminal_code,"pause_generation":None,"cancel_requested":False},
         "card":None,"actions":[],"result_available":False,"summary_status":"not_saved"}
     WebRunView.model_validate_json(json.dumps(view),strict=True)
     page.route(f"**/api/runs/{run_id}",lambda route:route.fulfill(status=200,content_type="application/json",body=json.dumps(view)))
     page.goto(origin+f"/tasks/{run_id}")
-    expect(page.locator("#task-status")).to_contain_text("规划失败，未生成完整攻略")
+    expect(page.locator("#task-status")).to_have_text(expected)
     expect(page.locator("#result")).to_be_hidden()
     expect(page.get_by_role("link",name="查看完整样例",exact=True)).to_be_visible()
 

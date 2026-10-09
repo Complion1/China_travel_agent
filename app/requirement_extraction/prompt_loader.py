@@ -5,11 +5,11 @@ from functools import cache
 from importlib.resources import files
 
 
-PROMPT_VERSION = "requirement-extraction-v3-explicit-negatives"
-EXTRACT_PROMPT_RESOURCE = "extract_v3_explicit_negatives.txt"
-REPAIR_PROMPT_RESOURCE = "repair_v3_explicit_negatives.txt"
-EXTRACT_PROMPT_SHA256 = "1398108807fe64cd6c49d65c0a95e88a500c09842c1c43a09b904706e3ee2e0b"
-REPAIR_PROMPT_SHA256 = "ea2f9faa8c9e513b42fd10cd5b593d766ddae83dd4261c7baa3abf5ccc3ff496"
+PROMPT_VERSION = "requirement-extraction-v4-hub-roles"
+EXTRACT_PROMPT_RESOURCE = "extract_v4_hub_roles.txt"
+REPAIR_PROMPT_RESOURCE = "repair_v4_hub_roles.txt"
+EXTRACT_PROMPT_SHA256 = "7d61442919c3bb859e41f2617a21a77710277e67f0580c8d108d16ac197d8463"
+REPAIR_PROMPT_SHA256 = "35024c063ea64d5c7422b2aee1964cc7cc200462c94ef86cf8fd34ff362a4481"
 
 
 def _load_prompt(resource_name: str, expected_sha256: str) -> str:

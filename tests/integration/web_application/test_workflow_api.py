@@ -63,6 +63,130 @@ async def complete_run(service,owner,provider):
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_origin_hub_reasks_before_hotel_and_evidenced_form_completes_real_graph(pg_settings,monkeypatch):
+    async with workflow_context(pg_settings,monkeypatch) as (service,owner,_,provider,maps,_,_):
+        # Reproduce the historical extraction mistake at the provider boundary;
+        # actual M02/M03/M01 must block it before any hotel/research/map call.
+        old_name = provider.payload["departure_hub_name"]
+        name_span = f'departure_hub_name: {json.dumps(old_name,ensure_ascii=False)}'
+        provider.full_text = provider.full_text.replace(name_span, 'departure_hub_name: "上海"')
+        provider.payload["departure_hub_name"] = "上海"
+        provider.payload["departure_hub_type"] = None
+        provider.payload["evidence"] = [dict(item, text='departure_hub_name: "上海"')
+            if item["field_path"] == "time_window.departure.hub_name" else item
+            for item in provider.payload["evidence"] if item["field_path"] != "time_window.departure.hub_type"]
+        receipt = await service.start(owner=owner,request=WebStartRequest(schema_version="1.0",request_id=uuid4(),
+            user_message=provider.full_text),client_ip="192.0.2.1")
+        waiting = await wait_for_view(service,owner,receipt.run_id,activity="awaiting_user")
+        assert waiting.card.kind == "clarification" and maps.calls == 0
+        questions = {item.field.value:item for item in waiting.card.questions}
+        assert questions["time_window.departure.hub_name"].label == "离开杭州的机场/车站"
+        assert questions["time_window.departure.hub_type"].kind == "single"
+        generation = waiting.run.pause_generation
+        await service.resume(owner=owner,run_id=receipt.run_id,request=WebClarifyRequest(schema_version="1.0",
+            request_id=uuid4(),pause_generation=generation,user_message="补充旅行需求：\n离开杭州的机场/车站：杭州萧山机场\n离开枢纽类型：机场"))
+        async with asyncio.timeout(25):
+            while True:
+                ready = await service.get_run(owner=owner,run_id=receipt.run_id)
+                if ready.card is not None and ready.card.kind == "confirmation" and ready.run.pause_generation != generation:
+                    break
+                await asyncio.sleep(.05)
+        assert maps.calls == 0 and provider.calls == 2
+        hotel = await accept_to_hotel(service,owner,receipt.run_id,ready)
+        await service.resume(owner=owner,run_id=receipt.run_id,request=WebHotelRequest(schema_version="1.0",request_id=uuid4(),
+            pause_generation=hotel.run.pause_generation,decision="select",ordinal=1))
+        done = await wait_for_view(service,owner,receipt.run_id,activity="terminal")
+        assert done.run.terminal_code in {"workflow_completed","workflow_degraded"}
+        assert done.result_available and done.input_issues == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_responses", [1, 2, 3])
+async def test_generic_argument_recovery_real_graph_pg_and_read_only_reopen(pg_settings,monkeypatch,bad_responses):
+    from dataclasses import replace
+    from app.demo_workflow.artifacts import DemoControlArtifact
+    from app.itinerary_planning import ItineraryPlanningArtifact, ItineraryPlanningModelActionArtifact
+    async with workflow_context(pg_settings,monkeypatch) as (service,owner,cookie,provider,maps,_,factory):
+        original_first, original_next = provider.ainvoke_tools, provider.ainvoke_tool_continuation
+        saved = {}
+        async def first(request):
+            good = await original_first(request)
+            assert good.tool_calls and all(name == "geocode_hub" for _, name, _ in good.tool_calls)
+            bad = list(good.raw_tool_calls)
+            bad[0] = (bad[0][0], bad[0][1], '{}')
+            saved.update(good=good, bad=replace(good, tool_calls=(), raw_tool_calls=tuple(bad)),
+                         remaining=bad_responses - 1, map_calls=maps.calls)
+            return saved["bad"]
+        async def continuation(request):
+            if saved.get("good") is None:
+                return await original_next(request)
+            # M02-generated rejection feedback covers every ID. No maps ran.
+            assert maps.calls == saved["map_calls"]
+            feedback = [json.loads(message["content"]) for message in request.messages if message["role"] == "tool"]
+            assert len(feedback) >= len(saved["bad"].raw_tool_calls)
+            assert all(item["status"] == "not_executed" for item in feedback)
+            provider.calls += 1
+            if saved["remaining"]:
+                saved["remaining"] -= 1
+                return saved["bad"]
+            good, saved["good"] = saved["good"], None
+            return good
+        monkeypatch.setattr(provider,"ainvoke_tools",first)
+        monkeypatch.setattr(provider,"ainvoke_tool_continuation",continuation)
+        receipt,view=await start_to_confirmation(service,owner,provider)
+        hotel=await accept_to_hotel(service,owner,receipt.run_id,view)
+        await service.resume(owner=owner,run_id=receipt.run_id,request=WebHotelRequest(schema_version="1.0",request_id=uuid4(),
+            pause_generation=hotel.run.pause_generation,decision="select",ordinal=1))
+        terminal=await wait_for_view(service,owner,receipt.run_id,activity="terminal")
+        assert terminal.result_available == (bad_responses < 3)
+        assert terminal.run.terminal_code in ({"workflow_completed","workflow_degraded"}
+            if bad_responses < 3 else {"workflow_provider_failed"})
+        summary=await wait_for_summary(service,owner,receipt.run_id)
+        state=await service._deps.durable.get_state(run_id=receipt.run_id)
+        control_ref=max((ref for ref in state.artifact_refs if ref.artifact_type=="demo.control"),
+            key=lambda ref: ref.operation_id.logical_step)
+        repository=service._deps.artifacts.repository
+        control=(await repository.get(control_ref,expected_model=DemoControlArtifact)).content
+        planning_refs=[ref for ref in state.artifact_refs if ref.artifact_type=="itinerary_planning.itinerary"
+            and ref.operation_id.logical_step.endswith("_terminal")]
+        assert len(planning_refs)==1
+        planning_ref=planning_refs[0]
+        if bad_responses < 3:
+            assert control.planning_ref==planning_ref
+        else:
+            # Failed outcomes carry their failure_artifact_ref in state; the
+            # control's planning_ref continues to mean a consistent itinerary.
+            assert control.planning_ref is None and control.last_outcome=="failed"
+        planning=(await repository.get(planning_ref,expected_model=ItineraryPlanningArtifact)).content
+        assert planning.schema_version == planning_ref.schema_version == "3.0"
+        budget=planning.record.budgets
+        assert budget.format_repair_used == min(bad_responses,2)
+        assert budget.model_invocations_consumed == sum((budget.preparation_used,budget.transport_used,
+            budget.submit_repair_used,budget.supplement_request_used,budget.format_repair_used))
+        actions=[(await repository.get(ref,expected_model=ItineraryPlanningModelActionArtifact)).content
+            for ref in planning.directories.model_action_refs]
+        assert sum(action.budget_category=="format_repair" for action in actions)==min(bad_responses,2)
+        assert all(action.action_kind=="llm_failure" and action.invocation_metadata is None
+            and not action.call_summaries for action in actions[:bad_responses])
+        if bad_responses==3:
+            assert planning.record.failure.error.code == "tool_arguments_invalid"
+            assert not planning.record.retryable and maps.calls==saved["map_calls"]
+        result=await service.read_result(owner=owner,run_id=receipt.run_id) if bad_responses < 3 else None
+        before_calls=(provider.calls,maps.calls)
+        source_bytes=planning.model_dump_json()
+    # New DB pools and runtime read terminal artifacts/summary; no live history.
+    async with factory() as reopened:
+        reopened_owner=await reopened._authenticate(cookie=cookie)
+        assert (await reopened.get_run(owner=reopened_owner,run_id=receipt.run_id)).run==terminal.run
+        assert (await reopened.read_summary(owner=reopened_owner,run_id=receipt.run_id)).summary==summary.summary
+        source=await reopened._deps.artifacts.repository.get(planning_ref,expected_model=ItineraryPlanningArtifact)
+        assert source.ref==planning_ref and source.content.model_dump_json()==source_bytes
+        if result is not None:
+            assert await reopened.read_result(owner=reopened_owner,run_id=receipt.run_id)==result
+        assert (provider.calls,maps.calls)==before_calls
+
+
+@pytest.mark.asyncio
 async def test_http_real_workflow_all_owner_routes_strict_dtos_and_zero_call_reads(pg_settings,monkeypatch):
     import httpx
     from app.web_application import create_web_application

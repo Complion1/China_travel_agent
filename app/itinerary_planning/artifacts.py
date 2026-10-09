@@ -53,6 +53,7 @@ from .models import (
     OpeningHoursConflictGapSummary,
     PaceCapacityGapSummary,
     PlanningBudgetSummary,
+    _PlanningBudgetSummaryV2,
     PlanningDayKind,
     PlanningFailure,
     PlanningFailureCode,
@@ -725,7 +726,7 @@ PlanningGapSummarySnapshot: TypeAlias = Annotated[
 ]
 
 
-class PlanningBudgetSummarySnapshot(_ArtifactModel):
+class _PlanningBudgetSummarySnapshotV2(_ArtifactModel):
     schema_version: Literal["2.0"]
     model_invocation_limit: Literal[17]
     model_invocations_consumed: Annotated[int, Field(ge=0, le=17)]
@@ -750,7 +751,7 @@ class PlanningBudgetSummarySnapshot(_ArtifactModel):
 
     @model_validator(mode="after")
     def _budget(self):
-        classified = self.preparation_used + self.transport_used + self.submit_repair_used + self.supplement_request_used
+        classified = self.preparation_used + self.transport_used + self.submit_repair_used + self.supplement_request_used + getattr(self, "format_repair_used", 0)
         if self.direction_calls_consumed > self.direction_call_limit:
             raise ValueError("direction budget exceeded")
         if self.budget_snapshot_complete and (classified != self.model_invocations_consumed or self.semantic_invocations_consumed != self.model_invocations_consumed):
@@ -758,6 +759,21 @@ class PlanningBudgetSummarySnapshot(_ArtifactModel):
         if self.provider_attempts_complete and self.known_provider_attempts < self.semantic_invocations_consumed:
             raise ValueError("provider attempts below known invocations")
         return self
+
+
+class PlanningBudgetSummarySnapshot(_PlanningBudgetSummarySnapshotV2):
+    schema_version: Literal["3.0"]
+    model_invocation_limit: Literal[19]
+    model_invocations_consumed: Annotated[int, Field(ge=0, le=19)]
+    normal_invocation_limit: Literal[17]
+    format_repair_limit: Literal[2]
+    format_repair_used: Annotated[int, Field(ge=0, le=2)]
+    semantic_invocation_limit: Literal[19]
+    semantic_invocations_consumed: Annotated[int, Field(ge=0, le=19)]
+    known_provider_attempts: Annotated[int, Field(ge=0, le=38)]
+
+
+BudgetSnapshot = Annotated[PlanningBudgetSummarySnapshot | _PlanningBudgetSummarySnapshotV2, Field(discriminator="schema_version")]
 
 
 class PlanningSummarySnapshot(_ArtifactModel):
@@ -790,15 +806,17 @@ class LLMRuntimeErrorSnapshot(_ArtifactModel):
 
 
 class LLMPlanningFailureSnapshot(_ArtifactModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["1.0", "2.0"]
     failure_type: Literal["llm"]
     error: LLMRuntimeErrorSnapshot
-    invocation_index: Annotated[int, Field(ge=0, le=16)]
+    invocation_index: Annotated[int, Field(ge=0, le=18)]
     retryable: bool
     possible_duplicate: bool
 
     @model_validator(mode="after")
     def _flags(self) -> LLMPlanningFailureSnapshot:
+        if self.schema_version == "1.0" and self.invocation_index > 16:
+            raise ValueError("legacy LLM failure index exceeded")
         if self.error.role is not ModelRole.ITINERARY_PLANNING or (self.retryable, self.possible_duplicate) != (self.error.retryable, self.error.possible_duplicate):
             raise ValueError("invalid LLM failure flags")
         return self
@@ -859,13 +877,13 @@ class PlanningRejectionSnapshot(_ArtifactModel):
     relevant_evidence_fingerprint: ArtifactDigest
 
 
-class PlanningStateSnapshot(_ArtifactModel):
+class _PlanningStateSnapshotV2(_ArtifactModel):
     schema_version: Literal["2.0"]
     request_kind: Literal["initial", "resume"]
     requirement_digest: ArtifactDigest
     effective_policy: EffectivePlanningPolicySnapshot | None
     draft: ItineraryDraftSnapshot | None
-    budgets: PlanningBudgetSummarySnapshot
+    budgets: _PlanningBudgetSummarySnapshotV2
     current_stage: Literal["preparation", "transport", "submit_repair"]
     model_invocations_consumed: Annotated[int, Field(ge=0, le=17)]
     preparation_used: Annotated[int, Field(ge=0, le=2)]
@@ -879,7 +897,7 @@ class PlanningStateSnapshot(_ArtifactModel):
 
     @model_validator(mode="after")
     def _counts(self):
-        keys = ("model_invocations_consumed", "preparation_used", "transport_used", "submit_repair_used", "supplement_request_used")
+        keys = ("model_invocations_consumed", "preparation_used", "transport_used", "submit_repair_used", "supplement_request_used") + (("format_repair_used",) if self.schema_version == "3.0" else ())
         if any(getattr(self, key) != getattr(self.budgets, key) for key in keys):
             raise ValueError("state and budget counts differ")
         if self.budgets.budget_snapshot_complete and sum(getattr(self, key) for key in keys[1:]) != self.model_invocations_consumed:
@@ -887,10 +905,20 @@ class PlanningStateSnapshot(_ArtifactModel):
         return self
 
 
+class PlanningStateSnapshot(_PlanningStateSnapshotV2):
+    schema_version: Literal["3.0"]
+    budgets: PlanningBudgetSummarySnapshot
+    model_invocations_consumed: Annotated[int, Field(ge=0, le=19)]
+    format_repair_used: Annotated[int, Field(ge=0, le=2)]
+
+
+PlanningState = Annotated[PlanningStateSnapshot | _PlanningStateSnapshotV2, Field(discriminator="schema_version")]
+
+
 class InProgressItineraryRecord(_ArtifactModel):
     schema_version: Literal["1.0"]
     record_type: Literal["in_progress"]
-    state: PlanningStateSnapshot
+    state: PlanningState
     gaps: Annotated[tuple[PlanningGapSummarySnapshot, ...], Field(min_length=0, max_length=128)]
 
     @model_validator(mode="after")
@@ -903,7 +931,7 @@ class InProgressItineraryRecord(_ArtifactModel):
 class AwaitingCandidateSupplementRecord(_ArtifactModel):
     schema_version: Literal["1.0"]
     record_type: Literal["awaiting_candidate_supplement"]
-    state: PlanningStateSnapshot
+    state: PlanningState
     gaps: Annotated[tuple[PlanningGapSummarySnapshot, ...], Field(min_length=1, max_length=32)]
     gap_fingerprint: ArtifactDigest
     pending_call_id: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1, max_length=256)]
@@ -920,7 +948,7 @@ class CompletedItineraryRecord(_ArtifactModel):
     record_type: Literal["completed"]
     draft: ItineraryDraftSnapshot
     summary: PlanningSummarySnapshot
-    budgets: PlanningBudgetSummarySnapshot
+    budgets: BudgetSnapshot
 
 
 class IncompleteItineraryRecord(_ArtifactModel):
@@ -928,7 +956,7 @@ class IncompleteItineraryRecord(_ArtifactModel):
     record_type: Literal["incomplete"]
     draft: ItineraryDraftSnapshot | None
     summary: PlanningSummarySnapshot
-    budgets: PlanningBudgetSummarySnapshot
+    budgets: BudgetSnapshot
     gaps: Annotated[tuple[PlanningGapSummarySnapshot, ...], Field(min_length=1, max_length=128)]
     stop_reasons: Annotated[tuple[PlanningStopReason, ...], Field(min_length=1, max_length=8)]
 
@@ -945,7 +973,7 @@ class FailedItineraryRecord(_ArtifactModel):
     record_type: Literal["failed"]
     last_consistent_itinerary_ref: ArtifactRef | None
     failure: PlanningFailureSnapshot
-    budgets: PlanningBudgetSummarySnapshot | None
+    budgets: BudgetSnapshot | None
     retryable: bool
     possible_duplicate: bool
 
@@ -964,12 +992,12 @@ ItineraryRecord: TypeAlias = Annotated[
 
 
 class ItineraryPlanningModelActionArtifact(_ArtifactModel):
-    schema_version: Literal["5.0"]
+    schema_version: Literal["5.0", "6.0"]
     request_digest: ArtifactDigest
-    invocation_index: Annotated[int, Field(ge=0, le=16)]
+    invocation_index: Annotated[int, Field(ge=0, le=18)]
     request_stage: Literal["preparation", "transport", "submit_repair"]
-    budget_category: Literal["preparation", "transport", "submit_repair", "supplement_request"]
-    prompt_version: Literal["planning-v5"]
+    budget_category: Literal["preparation", "transport", "submit_repair", "supplement_request", "format_repair"]
+    prompt_version: Literal["planning-v5", "planning-v6"]
     prompt_hash: ArtifactDigest
     action_kind: Literal["tool_calls", "final_text", "llm_failure"]
     call_summaries: Annotated[tuple[ModelCallSummary, ...], Field(min_length=0, max_length=71)]
@@ -978,6 +1006,10 @@ class ItineraryPlanningModelActionArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _action(self) -> ItineraryPlanningModelActionArtifact:
+        if self.schema_version == "5.0" and (self.invocation_index > 16 or self.prompt_version != "planning-v5" or self.budget_category == "format_repair"):
+            raise ValueError("legacy model action bounds/version mismatch")
+        if self.schema_version == "6.0" and self.prompt_version != "planning-v6":
+            raise ValueError("model action prompt version mismatch")
         if self.action_kind == "tool_calls" and (not self.call_summaries or self.invocation_metadata is None):
             raise ValueError("tool-call action requires calls and metadata")
         if self.action_kind == "final_text" and (self.call_summaries or self.invocation_metadata is None):
@@ -1002,7 +1034,7 @@ class ItineraryPlanningHubGeocodeObservationArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _observation(self) -> ItineraryPlanningHubGeocodeObservationArtifact:
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version != "5.0":
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0"}:
             raise ValueError("observation must reference a model action")
         if self.observation_status == "success":
             if self.success_candidate is None or self.ambiguous_candidates or self.provenance is None or self.provenance.capability is not MapCapability.GEOCODING or not self.provenance.verified or self.map_failure is not None:
@@ -1037,7 +1069,7 @@ class ItineraryPlanningRouteMatrixObservationArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _observation(self) -> ItineraryPlanningRouteMatrixObservationArtifact:
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version != "5.0":
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0"}:
             raise ValueError("observation must reference a model action")
         actual = tuple((cell.origin_index, cell.destination_index) for cell in self.cells)
         if self.observation_status == "success":
@@ -1095,7 +1127,7 @@ class ItineraryPlanningDirectionsObservationArtifact(_ArtifactModel):
     def _observation(self) -> ItineraryPlanningDirectionsObservationArtifact:
         if (self.route_mode is not TravelMode.TRANSIT or self.transport_semantic is not TransportSemantic.PUBLIC_TRANSIT) and any(isinstance(item, TransitRouteAlternativeSummarySnapshot) for item in self.alternatives):
             raise ValueError("instructions are only retained for transit")
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version != "5.0":
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0"}:
             raise ValueError("observation must reference a model action")
         if tuple(item.alternative_index for item in self.alternatives) != tuple(range(len(self.alternatives))):
             raise ValueError("directions alternatives must keep provider order")
@@ -1114,10 +1146,10 @@ class ItineraryPlanningDirectionsObservationArtifact(_ArtifactModel):
 
 
 class ArtifactRefDirectories(_ArtifactModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["1.0", "2.0"]
     hotel_selection_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=1, max_length=1)]
     candidate_set_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=1, max_length=6)]
-    model_action_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=0, max_length=17)]
+    model_action_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=0, max_length=19)]
     hub_geocode_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=0, max_length=2)]
     matrix_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=0, max_length=1020)]
     directions_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=0, max_length=482)]
@@ -1125,6 +1157,8 @@ class ArtifactRefDirectories(_ArtifactModel):
 
     @model_validator(mode="after")
     def _directories(self) -> ArtifactRefDirectories:
+        if self.schema_version == "1.0" and len(self.model_action_refs) > 17:
+            raise ValueError("legacy model action capacity exceeded")
         groups = {
             "hotel_selection": self.hotel_selection_refs,
             "candidate_set": self.candidate_set_refs,
@@ -1150,7 +1184,7 @@ class ArtifactRefDirectories(_ArtifactModel):
                 raise ValueError(f"{name} refs must be unique")
             artifact_type, phase = expected[name]
             for ref in refs:
-                expected_schema_version = "5.0" if name == "model_action" else "1.0"
+                expected_schema_version = ("5.0" if self.schema_version == "1.0" else "6.0") if name == "model_action" else "1.0"
                 if ref.schema_version != expected_schema_version or ref.artifact_type != artifact_type or ref.operation_id.phase is not phase or ref.operation_id.run_id != run_id:
                     raise ValueError(f"{name} ref type/version/run mismatch")
             all_refs.extend(refs)
@@ -1164,8 +1198,8 @@ def _refs_for_directory(directories: ArtifactRefDirectories, directory: str) -> 
 
 
 def _validate_ref(ref: ArtifactRef, *, artifact_type: str, run_id) -> None:
-    expected_schema_version = "5.0" if artifact_type == "itinerary_planning.model_action" else "2.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
-    if ref.schema_version != expected_schema_version or ref.artifact_type != artifact_type or ref.operation_id.run_id != run_id:
+    versions = {"5.0", "6.0"} if artifact_type == "itinerary_planning.model_action" else {"2.0", "3.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0"}
+    if ref.schema_version not in versions or ref.artifact_type != artifact_type or ref.operation_id.run_id != run_id:
         raise ValueError("artifact reference mismatch")
 
 
@@ -1188,7 +1222,7 @@ def _validate_indexes(value: object, directories: ArtifactRefDirectories) -> Non
 
 
 class ItineraryPlanningArtifact(_ArtifactModel):
-    schema_version: Literal["2.0"]
+    schema_version: Literal["2.0", "3.0"]
     request_digest: ArtifactDigest
     parent_planning_ref: ArtifactRef | None
     directories: ArtifactRefDirectories
@@ -1196,9 +1230,22 @@ class ItineraryPlanningArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _artifact(self) -> ItineraryPlanningArtifact:
+        if self.directories.schema_version != ("1.0" if self.schema_version == "2.0" else "2.0"):
+            raise ValueError("itinerary directory version mismatch")
+        state = getattr(self.record, "state", None)
+        budgets = state.budgets if state is not None else getattr(self.record, "budgets", None)
+        if state is not None and state.schema_version != self.schema_version:
+            raise ValueError("itinerary state version mismatch")
+        if budgets is not None and budgets.schema_version != self.schema_version:
+            raise ValueError("itinerary budget version mismatch")
+        failure = getattr(self.record, "failure", None)
+        if isinstance(failure, LLMPlanningFailureSnapshot) and failure.schema_version != ("1.0" if self.schema_version == "2.0" else "2.0"):
+            raise ValueError("itinerary failure version mismatch")
         run_id = self.directories.hotel_selection_refs[0].operation_id.run_id
         if self.parent_planning_ref is not None:
             _validate_ref(self.parent_planning_ref, artifact_type="itinerary_planning.itinerary", run_id=run_id)
+            if self.parent_planning_ref.schema_version != self.schema_version:
+                raise ValueError("parent itinerary version mismatch")
         _validate_indexes(self.record, self.directories)
 
         def check_draft(draft: ItineraryDraftSnapshot) -> None:
@@ -1213,6 +1260,8 @@ class ItineraryPlanningArtifact(_ArtifactModel):
             check_draft(self.record.state.draft)
         if isinstance(self.record, FailedItineraryRecord) and self.record.last_consistent_itinerary_ref is not None:
             _validate_ref(self.record.last_consistent_itinerary_ref, artifact_type="itinerary_planning.itinerary", run_id=run_id)
+            if self.record.last_consistent_itinerary_ref.schema_version != self.schema_version:
+                raise ValueError("last itinerary version mismatch")
         return self
 
 
@@ -1526,12 +1575,15 @@ def _from_draft_snapshot(value: ItineraryDraftSnapshot) -> ItineraryDraft:
 
 
 def _to_budget_snapshot(value: PlanningBudgetSummary) -> PlanningBudgetSummarySnapshot:
-    public = _fresh_public(value, PlanningBudgetSummary)
-    return PlanningBudgetSummarySnapshot.model_validate_json(public.model_dump_json(), strict=True)
+    public_type = _PlanningBudgetSummaryV2 if value.schema_version == "2.0" else PlanningBudgetSummary
+    public = _fresh_public(value, public_type)
+    local_type = _PlanningBudgetSummarySnapshotV2 if value.schema_version == "2.0" else PlanningBudgetSummarySnapshot
+    return local_type.model_validate_json(public.model_dump_json(), strict=True)
 
 
 def _from_budget_snapshot(value: PlanningBudgetSummarySnapshot) -> PlanningBudgetSummary:
-    return PlanningBudgetSummary.model_validate_json(value.model_dump_json(), strict=True)
+    public_type = _PlanningBudgetSummaryV2 if value.schema_version == "2.0" else PlanningBudgetSummary
+    return public_type.model_validate_json(value.model_dump_json(), strict=True)
 
 
 def _to_summary_snapshot(value: PlanningSummary) -> PlanningSummarySnapshot:
@@ -1611,7 +1663,7 @@ def _to_failure_snapshot(value: PlanningFailure):
     if isinstance(public, LLMPlanningFailure):
         error = public.error
         return LLMPlanningFailureSnapshot(
-            schema_version="1.0", failure_type="llm",
+            schema_version=public.schema_version, failure_type="llm",
             error=LLMRuntimeErrorSnapshot(
                 schema_version="1.0", code=error.code, role=error.role, retryable=error.retryable,
                 possible_duplicate=error.possible_duplicate, provider_status_code=error.provider_status_code,
@@ -1638,7 +1690,7 @@ def _from_failure_snapshot(value: PlanningFailureSnapshot) -> PlanningFailure:
             "max_bytes": error.max_bytes,
         }, strict=True)
         return LLMPlanningFailure.model_validate({
-            "schema_version": "1.0", "failure_type": "llm", "error": public_error,
+            "schema_version": value.schema_version, "failure_type": "llm", "error": public_error,
             "invocation_index": value.invocation_index, "retryable": value.retryable,
             "possible_duplicate": value.possible_duplicate,
         }, strict=True)
@@ -1651,10 +1703,12 @@ def _from_failure_snapshot(value: PlanningFailureSnapshot) -> PlanningFailure:
 
 ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS: tuple[ArtifactSchemaRegistration, ...] = (
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="5.0", model=ItineraryPlanningModelActionArtifact),
+    ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="6.0", model=ItineraryPlanningModelActionArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.hub_geocode_observation", schema_version="1.0", model=ItineraryPlanningHubGeocodeObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.route_matrix_observation", schema_version="1.0", model=ItineraryPlanningRouteMatrixObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.directions_observation", schema_version="1.0", model=ItineraryPlanningDirectionsObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.itinerary", schema_version="2.0", model=ItineraryPlanningArtifact),
+    ArtifactSchemaRegistration(artifact_type="itinerary_planning.itinerary", schema_version="3.0", model=ItineraryPlanningArtifact),
 )
 
 

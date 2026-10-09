@@ -104,7 +104,7 @@ async def test_byte_quota_and_callback_failure_issue_no_request(monkeypatch):
                     admission_callback=failed_callback, request_stage='preparation')
             assert not wire and operation._semantic_invocations_used == 0
             operation = runtime.start_operation(ModelRole.ITINERARY_PLANNING)
-            for index in range(17):
+            for index in range(19):
                 with interaction_call('planning'):
                     if index == 0:
                         result = await operation.ainvoke_tools(PromptEnvelope(system_text='fixture', user_text='fixture'), (tool,), admission_callback=callback, request_stage='transport')
@@ -114,7 +114,7 @@ async def test_byte_quota_and_callback_failure_issue_no_request(monkeypatch):
             with interaction_call('planning'):
                 quota = await operation.acontinue_tools((ToolResult(call_id=result.calls[0].call_id, content='{}'),),
                     tools=(tool,), admission_callback=callback, request_stage='transport')
-            assert isinstance(quota, LLMInvocationFailure) and len(wire) == len(claims) == 17
+            assert isinstance(quota, LLMInvocationFailure) and len(wire) == len(claims) == 19
     finally:
         await runtime.aclose()
 

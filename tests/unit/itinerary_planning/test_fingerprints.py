@@ -98,9 +98,9 @@ def test_resume_fingerprint_uses_local_v5_domain_and_both_full_plans():
     first = fingerprint_request_resume(request)
     def model_hash(value):
         return "sha256:" + hashlib.sha256(canonical_json_bytes(value.model_dump(mode="json", exclude_none=False))).hexdigest()
-    expected = {"fingerprint_version": "planning-resume-fp-v6", "kind": "request_resume", "fields": {
-            "capability_scope": "module09-phase-budget-v1",
-            "schema_version": "3.0", "run_id": run_id,
+    expected = {"fingerprint_version": "planning-resume-fp-v7", "kind": "request_resume", "fields": {
+            "capability_scope": "module09-format-recovery-v1",
+            "schema_version": "4.0", "run_id": run_id,
         "predecessor_planning_ref": artifact_ref_payload(request.predecessor_planning_ref),
         "supplemented_candidate_set_ref": artifact_ref_payload(request.supplemented_candidate_set_ref),
         "operation_plan": model_hash(request.operation_plan),
@@ -110,7 +110,7 @@ def test_resume_fingerprint_uses_local_v5_domain_and_both_full_plans():
     changed_plan = request.supplemental_operation_plan.model_copy(update={"terminal_successor_operation_id": OperationId(run_id=run_id, phase=WorkflowPhase.CANDIDATE_RESEARCH, logical_step="another_terminal")})
     assert fingerprint_request_resume(request.model_copy(update={"supplemental_operation_plan": changed_plan})) != first
     assert fingerprint_request_initial(initial) == initial_digest
-    assert request.schema_version == "3.0"
+    assert request.schema_version == "4.0"
 
 
 def _ref(size: int) -> ArtifactRef:

@@ -384,7 +384,7 @@ async def test_approved_planning_continuation_size_boundary_preserves_full_histo
                 {"role": "user", "content": PROMPT.user_text},
                 assistant, tool_message,
             )
-            assert continuation.max_output_tokens == 49_152
+            assert continuation.max_output_tokens == 131_072
             assert "semantic_used=2," in repr(op)
         assert reasoning not in repr(op)
     finally:

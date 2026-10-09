@@ -146,7 +146,7 @@ _READ_TYPES = {
     HotelPlaceSearchArtifact: ("hotel.place_search", "hotel_selection", "1.0"),
     CandidateResearchArtifact: ("candidate_research.candidate_set", "candidate_research", "1.0"),
     CandidateResearchPlaceObservationArtifact: ("candidate_research.place_observation", "candidate_research", "1.0"),
-    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", "5.0"),
+    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", ("5.0", "6.0")),
     ItineraryPlanningHubGeocodeObservationArtifact: ("itinerary_planning.hub_geocode_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningDirectionsObservationArtifact: ("itinerary_planning.directions_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningRouteMatrixObservationArtifact: ("itinerary_planning.route_matrix_observation", "itinerary_planning", "1.0"),
@@ -172,7 +172,7 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
     def read(ref: ArtifactRef, model: type[BaseModel]) -> Generator:
         artifact_type, phase, version = _READ_TYPES[model]
         _require(ref.operation_id.run_id == request.state.run_id)
-        _require(ref.artifact_type == artifact_type and ref.schema_version == version, Code.ARTIFACT_CONTRACT_ERROR)
+        _require(ref.artifact_type == artifact_type and ref.schema_version in ((version,) if isinstance(version, str) else version), Code.ARTIFACT_CONTRACT_ERROR)
         _require(ref.operation_id.phase.value == phase)
         if ref.artifact_id in read_cache:
             saved = read_cache[ref.artifact_id]
@@ -186,6 +186,7 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
             content = fresh_model(saved.content, model)
         except ResultFormattingUsageError:
             raise ProjectionFailure(Code.ARTIFACT_INTEGRITY_ERROR) from None
+        _require(content.schema_version == ref.schema_version, Code.ARTIFACT_INTEGRITY_ERROR)
         if isinstance(content, (CandidateResearchArtifact, CandidateResearchPlaceObservationArtifact)):
             _require(content.run_id == request.state.run_id)
         read_cache[ref.artifact_id] = ArtifactReadResult(ref=ref, content=content)

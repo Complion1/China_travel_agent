@@ -64,8 +64,8 @@ def _directories() -> local.ArtifactRefDirectories:
     )
 
 
-def _budget() -> local.PlanningBudgetSummarySnapshot:
-    return local.PlanningBudgetSummarySnapshot(
+def _budget() -> local._PlanningBudgetSummarySnapshotV2:
+    return local._PlanningBudgetSummarySnapshotV2(
         schema_version='2.0', model_invocation_limit=17, model_invocations_consumed=0, direction_call_limit=2,
         direction_calls_consumed=0, budget_snapshot_complete=True, semantic_invocation_limit=17,
         semantic_invocations_consumed=0, known_provider_attempts=0, provider_attempts_complete=True,
@@ -76,8 +76,8 @@ def _budget() -> local.PlanningBudgetSummarySnapshot:
         preparation_limit=2, preparation_used=min(2, 0), transport_limit=5, transport_used=max(0, 0 - 2), submit_repair_limit=5, submit_repair_used=0, supplement_request_limit=5, supplement_request_used=0)
 
 
-def _state(*, pending: str | None = None, request_kind: str = "initial") -> local.PlanningStateSnapshot:
-    return local.PlanningStateSnapshot(
+def _state(*, pending: str | None = None, request_kind: str = "initial") -> local._PlanningStateSnapshotV2:
+    return local._PlanningStateSnapshotV2(
         schema_version='2.0', request_kind=request_kind, requirement_digest=DIGEST,
         effective_policy=None, draft=None, budgets=_budget(), model_invocations_consumed=0,
         no_progress_streak=0,

@@ -52,6 +52,7 @@ from app.requirements.models import (
     VerifiedFieldEvidence,
 )
 from app.requirements.service import RequirementDomainService
+from app.requirements.normalization import validate_requirement_hubs
 
 __all__ = [
     "Clock",
@@ -102,4 +103,5 @@ __all__ = [
     "TravelTimeWindowDeparture",
     "VerifiedFieldEvidence",
     "ATTR_TO_PATH",
+    "validate_requirement_hubs",
 ]

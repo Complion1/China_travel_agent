@@ -1,5 +1,6 @@
 """Typed deterministic boundaries used only by M14 tests."""
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from app.web_application import WebApplicationSettings
 
@@ -39,16 +40,20 @@ class OfflineProvider:
         from app.llm_runtime.protocols import ProviderResponse
         return ProviderResponse(content=content, tool_calls=tool_calls, finish_reason=finish,
             model_name="deepseek-v4-flash", usage=dict(prompt_tokens=1, completion_tokens=1,
-                total_tokens=2, reasoning_tokens=0, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=1), reasoning_content=None)
+                total_tokens=2, reasoning_tokens=0, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=1), reasoning_content=None,
+            raw_tool_calls=tuple((call_id, name, json.dumps(arguments, ensure_ascii=False))
+                                 for call_id, name, arguments in tool_calls))
 
     def form_payload(self, message):
         """Decode this test's explicit form answers; never fill absent answers."""
         from app.requirements import ATTR_TO_PATH
+        import re
         labels = {
             "目的城市":"destination", "正式游玩开始日期":"sightseeing_start_date",
             "正式游玩结束日期":"sightseeing_end_date", "正式游玩天数":"sightseeing_days",
             "到达机场/车站":"arrival_hub_name", "到达日期与时间":"arrival_datetime",
             "离开机场/车站":"departure_hub_name", "离开日期与时间":"departure_datetime",
+            "到达枢纽类型":"arrival_hub_type", "离开枢纽类型":"departure_hub_type",
             "成人数量":"adults_count", "儿童数量":"children_count", "儿童年龄":"children_ages",
             "老人数量":"seniors_count", "房间数量":"room_count", "房型要求":"room_type_requirements",
             "行动限制":"mobility_constraints", "饮食禁忌":"dietary_restrictions",
@@ -59,6 +64,10 @@ class OfflineProvider:
         evidence = []
         for line in message.splitlines():
             label, separator, text = line.partition("：")
+            if re.fullmatch(r"到达.+的机场/车站", label):
+                label = "到达机场/车站"
+            elif re.fullmatch(r"离开.+的机场/车站", label):
+                label = "离开机场/车站"
             if not separator or label not in labels or not text:
                 continue
             attribute = labels[label]
@@ -71,6 +80,8 @@ class OfflineProvider:
                 value = [int(item) for item in text.split("、")]
             elif attribute == "interests":
                 value = text.split("、")
+            elif attribute in {"arrival_hub_type", "departure_hub_type"}:
+                value = {"机场":"airport", "火车站或高铁站":"railway_station"}[text]
             else:
                 value = text
             payload[attribute] = value

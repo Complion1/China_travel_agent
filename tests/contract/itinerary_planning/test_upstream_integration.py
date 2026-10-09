@@ -71,7 +71,8 @@ async def test_real_runtime_delivers_fifth_transport_result_to_submit_only_call(
                 finish_reason="stop" if not calls else "tool_calls", model_name="deepseek-v4-flash",
                 usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
                        "reasoning_tokens": 0, "prompt_cache_hit_tokens": 0,
-                       "prompt_cache_miss_tokens": 1}, reasoning_content=None)
+                       "prompt_cache_miss_tokens": 1}, reasoning_content=None,
+                raw_tool_calls=tuple((call_id, name, json.dumps(arguments, ensure_ascii=False)) for call_id, name, arguments in calls))
 
         async def ainvoke_tools(self, request):
             self.tool_requests.append(request)
@@ -111,9 +112,9 @@ async def test_real_runtime_delivers_fifth_transport_result_to_submit_only_call(
 
 def test_required_upstream_public_contracts_are_consumable() -> None:
     assert ModelRole.ITINERARY_PLANNING.value == "itinerary_planning"
-    assert ITINERARY_PLANNING_PROFILE.semantic_invocation_limit == 17
+    assert ITINERARY_PLANNING_PROFILE.semantic_invocation_limit == 19
     assert ITINERARY_PLANNING_PROFILE.max_request_utf8_bytes == 2097152
-    assert ITINERARY_PLANNING_PROFILE.max_output_tokens == 49152
+    assert ITINERARY_PLANNING_PROFILE.max_output_tokens == 131072
     assert ITINERARY_PLANNING_PROFILE.read_timeout_seconds == 120
     assert ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY.name == "planning.model_invocation"
     assert ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY.name == "planning.direction_call"
@@ -205,7 +206,7 @@ async def test_real_candidate_research_incomplete_unchanged_uid_resumes_exact_re
         assert successor.predecessor_ref == researched.candidate_set_ref
     resume = ItineraryPlanningResumeRequest(predecessor_planning_ref=awaiting.planning_ref,
         supplemented_candidate_set_ref=supplemented.candidate_set_ref,
-        operation_plan=_plan(run_id, suffix="actual_resume", slots=tuple(range(awaiting.budgets.model_invocations_consumed,17))), supplemental_operation_plan=supplemental_plan)
+        operation_plan=_plan(run_id, suffix="actual_resume", slots=tuple(range(awaiting.budgets.model_invocations_consumed,19))), supplemental_operation_plan=supplemental_plan)
     def changed_id(name):
         return OperationId(run_id=run_id, phase=WorkflowPhase.CANDIDATE_RESEARCH, logical_step=name)
     different_terminal = supplemental_plan.model_copy(update={"terminal_successor_operation_id": changed_id("different_research_terminal")})
@@ -248,7 +249,8 @@ async def test_real_runtime_uses_new_geocode_handle_for_directions() -> None:
             return ProviderResponse(content=None if calls else "结束", tool_calls=calls,
                 finish_reason="tool_calls" if calls else "stop", model_name="deepseek-v4-flash",
                 usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
-                    "reasoning_tokens": 0, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1}, reasoning_content=None)
+                    "reasoning_tokens": 0, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1}, reasoning_content=None,
+                raw_tool_calls=tuple((call_id, name, json.dumps(arguments, ensure_ascii=False)) for call_id, name, arguments in calls))
 
         async def ainvoke_tools(self, request):
             context = json.loads(request.user.split("BEGIN_TYPED_PLANNING_DATA\n")[1].split("\nEND_TYPED_PLANNING_DATA")[0])

@@ -8,15 +8,17 @@ from .errors import WebApplicationDependencyError
 from .models import WebInteractionCard, WebHotelChoice, WebFact, WebClarificationOption, WebClarificationQuestion, fresh
 
 
-# Presence-only UI descriptions of M01's public required fields, not validation.
+# UI descriptions of M01's public required fields and reported issues.
 _REQUIRED_QUESTIONS = (
     ("destination", "目的城市", "text", None, None),
     ("time_window.sightseeing_start_date", "正式游玩开始日期", "date", None, None),
     ("time_window.sightseeing_end_date", "正式游玩结束日期", "date", None, None),
     ("time_window.sightseeing_days", "正式游玩天数", "number", 1, 60),
     ("time_window.arrival.hub_name", "到达机场/车站", "text", None, None),
+    ("time_window.arrival.hub_type", "到达枢纽类型", "single", None, None),
     ("time_window.arrival.local_datetime", "到达日期与时间", "datetime", None, None),
     ("time_window.departure.hub_name", "离开机场/车站", "text", None, None),
+    ("time_window.departure.hub_type", "离开枢纽类型", "single", None, None),
     ("time_window.departure.local_datetime", "离开日期与时间", "datetime", None, None),
     ("party.adults_count", "成人数量", "number", 1, 100),
     ("party.children_count", "儿童数量", "number", 0, 100),
@@ -31,6 +33,8 @@ _STYLE_QUESTIONS = (
     ("preferences.pace", "行程节奏", "single", None, None),
 )
 _OPTIONS = {
+    "time_window.arrival.hub_type": (("airport", "机场"), ("railway_station", "火车站或高铁站")),
+    "time_window.departure.hub_type": (("airport", "机场"), ("railway_station", "火车站或高铁站")),
     "preferences.interests": (("culture", "人文"), ("nature", "自然"), ("food", "美食"), ("checkin", "打卡"), ("agent_decides", "由 Agent 决定")),
     "preferences.pace": (("relaxed", "轻松"), ("normal", "标准"), ("intense", "紧凑"), ("agent_decides", "由 Agent 决定")),
     "rooms.room_type_requirements": (("double", "大床房"), ("twin", "双床房"), ("family", "家庭房"), ("no_preference", "无特殊要求"), ("other", "其他")),
@@ -57,6 +61,9 @@ def _clarification_details(outcome):
         issue_fields.add("preferences.pace")
     questions, recorded = [], []
     for field, label, kind, minimum, maximum in (*_REQUIRED_QUESTIONS, *_STYLE_QUESTIONS):
+        if requirement.destination and field in {"time_window.arrival.hub_name", "time_window.departure.hub_name"}:
+            role = "到达" if field == "time_window.arrival.hub_name" else "离开"
+            label = f"{role}{requirement.destination}的机场/车站"
         value = _field_value(requirement, field)
         missing = value is None or isinstance(value, str) and not value.strip()
         if field == "preferences.interests" and value == []:

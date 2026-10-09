@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import openai
 from langchain_deepseek import ChatDeepSeek as _SDKChatDeepSeek
+from langchain_core.messages import AIMessage
 from .diagnostics import record_invalid_json
 from .interaction_recording import _capture_request, _capture_response, _observer_failure, _register_secrets
 
@@ -174,6 +175,24 @@ def _normalize_tool_calls(tool_calls: object, *, finish_reason=None) -> tuple[tu
     return tuple(normalized)
 
 
+def _raw_tool_calls(tool_calls: object) -> tuple[tuple[str, str, str], ...] | None:
+    """Read one complete wire batch; never merge parsed and invalid SDK lists."""
+    if not isinstance(tool_calls, (list, tuple)):
+        return None
+    calls = []
+    for item in tool_calls:
+        if not isinstance(item, Mapping) or item.get("type") != "function":
+            return None
+        function = item.get("function")
+        if not isinstance(function, Mapping):
+            return None
+        values = (item.get("id"), function.get("name"), function.get("arguments"))
+        if any(type(value) is not str for value in values):
+            return None
+        calls.append(values)
+    return tuple(calls)
+
+
 def _normalize_response(raw: Mapping[str, Any]) -> ProviderResponse | ProviderFailure:
     choices = raw.get("choices")
     if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], Mapping):
@@ -193,9 +212,10 @@ def _normalize_response(raw: Mapping[str, Any]) -> ProviderResponse | ProviderFa
     content = message.get("content")
     if content is not None and not isinstance(content, str):
         return _malformed()
-    tool_calls = _normalize_tool_calls(message.get("tool_calls", []), finish_reason=finish_reason)
-    if tool_calls is None:
+    raw_calls = _raw_tool_calls(message.get("tool_calls", []))
+    if raw_calls is None:
         return _malformed()
+    tool_calls = _normalize_tool_calls(message.get("tool_calls", []), finish_reason=finish_reason) or ()
     reasoning = message.get("reasoning_content")
     if reasoning is not None and not isinstance(reasoning, str):
         return _malformed()
@@ -206,6 +226,7 @@ def _normalize_response(raw: Mapping[str, Any]) -> ProviderResponse | ProviderFa
         model_name=model_name,
         usage=usage,
         reasoning_content=reasoning,
+        raw_tool_calls=raw_calls,
     )
 
 
@@ -221,18 +242,50 @@ def _malformed() -> ProviderFailure:
 class ChatDeepSeek(_SDKChatDeepSeek):
     """Retain required assistant reasoning through the locked SDK serializer."""
 
+    def _create_chat_result(self, response, generation_info=None):
+        # The locked SDK removes raw tool_calls from additional_kwargs after
+        # separating valid and invalid calls. Retain the original completion
+        # before that conversion; this is still the SDK-owned HTTP path.
+        raw = response.model_dump() if hasattr(response, "model_dump") else response
+        result = super()._create_chat_result(response, generation_info)
+        if isinstance(raw, Mapping) and isinstance(raw.get("choices"), list):
+            for generation, choice in zip(result.generations, raw["choices"]):
+                message = choice.get("message") if isinstance(choice, Mapping) else None
+                if isinstance(message, Mapping) and message.get("tool_calls") is not None:
+                    generation.message.additional_kwargs["tool_calls"] = message["tool_calls"]
+        return result
+
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         reasoning = kwargs.pop("_interaction_reasoning", ())
+        tool_batches = kwargs.pop("_interaction_tool_calls", ())
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         for index, content in reasoning:
             if index < len(payload["messages"]) and payload["messages"][index]["role"] == "assistant":
                 payload["messages"][index]["reasoning_content"] = content
+        for index, calls, content in tool_batches:
+            if index < len(payload["messages"]) and payload["messages"][index]["role"] == "assistant":
+                payload["messages"][index]["tool_calls"] = calls
+                payload["messages"][index]["content"] = content
         return payload
 
 
 def _continuation_reasoning(messages):
     return tuple((index, message["reasoning_content"]) for index, message in enumerate(messages)
         if message.get("role") == "assistant" and isinstance(message.get("reasoning_content"), str))
+
+
+def _continuation_tool_calls(messages):
+    return tuple((index, message["tool_calls"], message.get("content")) for index, message in enumerate(messages)
+        if message.get("role") == "assistant" and message.get("tool_calls"))
+
+
+def _sdk_messages(messages):
+    # convert_to_messages(dict) json.loads every assistant tool argument before
+    # _get_request_payload. A typed empty assistant avoids that lossy parsing;
+    # the original complete batch is restored only at the owned wire boundary.
+    return [AIMessage(content=message.get("content") or "")
+        if message.get("role") == "assistant" and message.get("tool_calls") else message
+        for message in messages]
 
 
 class LangChainDeepSeekAdapter:
@@ -337,7 +390,9 @@ class LangChainDeepSeekAdapter:
     ) -> ProviderResponse | ProviderFailure:
         try:
             reasoning = _continuation_reasoning(messages)
-            raw = self._bound_tools(profile, tools).invoke(messages, **({"_interaction_reasoning": reasoning} if reasoning else {}))
+            batches = _continuation_tool_calls(messages)
+            raw = self._bound_tools(profile, tools).invoke(_sdk_messages(messages), **({"_interaction_reasoning": reasoning} if reasoning else {}),
+                **({"_interaction_tool_calls": batches} if batches else {}))
             return self._unwrap_raw(raw)
         except Exception as exc:
             return _failure_from_exception(exc)
@@ -350,7 +405,9 @@ class LangChainDeepSeekAdapter:
     ) -> ProviderResponse | ProviderFailure:
         try:
             reasoning = _continuation_reasoning(messages)
-            raw = await self._bound_tools(profile, tools).ainvoke(messages, **({"_interaction_reasoning": reasoning} if reasoning else {}))
+            batches = _continuation_tool_calls(messages)
+            raw = await self._bound_tools(profile, tools).ainvoke(_sdk_messages(messages), **({"_interaction_reasoning": reasoning} if reasoning else {}),
+                **({"_interaction_tool_calls": batches} if batches else {}))
             return self._unwrap_raw(raw)
         except Exception as exc:
             return _failure_from_exception(exc)
@@ -383,7 +440,9 @@ class LangChainDeepSeekAdapter:
     def _unwrap_ai_message(self, message: Any, parsed: Any = None) -> ProviderResponse | ProviderFailure:
         if message is None or not hasattr(message, "content"):
             return _malformed()
-        if getattr(message, "invalid_tool_calls", None):
+        additional = getattr(message, "additional_kwargs", None) or {}
+        has_raw = isinstance(additional, Mapping) and "tool_calls" in additional
+        if getattr(message, "invalid_tool_calls", None) and not has_raw:
             metadata = getattr(message, "response_metadata", None) or {}
             for ordinal, call in enumerate(message.invalid_tool_calls[:20]):
                 record_invalid_json(call.get("args"), ordinal=ordinal,
@@ -401,9 +460,16 @@ class LangChainDeepSeekAdapter:
         if usage is None or finish_reason not in _KNOWN_FINISH_REASONS or not isinstance(model_name, str) or not model_name:
             return _malformed()
         model_name = _canonical_model_name(model_name)
-        tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", []), finish_reason=finish_reason)
-        if tool_calls is None:
-            return _malformed()
+        raw_calls = None
+        if has_raw:
+            raw_calls = _raw_tool_calls(additional["tool_calls"])
+            if raw_calls is None:
+                return _malformed()
+            tool_calls = _normalize_tool_calls(additional["tool_calls"], finish_reason=finish_reason) or ()
+        else:
+            tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", []), finish_reason=finish_reason)
+            if tool_calls is None:
+                return _malformed()
         content = getattr(message, "content", None)
         if parsed is not None:
             if hasattr(parsed, "model_dump"):
@@ -414,7 +480,6 @@ class LangChainDeepSeekAdapter:
                 return _malformed()
         if content is not None and not isinstance(content, str):
             return _malformed()
-        additional = getattr(message, "additional_kwargs", None) or {}
         reasoning = additional.get("reasoning_content") if isinstance(additional, Mapping) else None
         if reasoning is not None and not isinstance(reasoning, str):
             return _malformed()
@@ -425,6 +490,7 @@ class LangChainDeepSeekAdapter:
             model_name=model_name,
             usage=usage,
             reasoning_content=reasoning,
+            raw_tool_calls=raw_calls,
         )
 
     def list_models(self) -> tuple[str, ...]:

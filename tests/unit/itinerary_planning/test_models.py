@@ -17,8 +17,8 @@ def test_resume_v2_requires_actual_upstream_plan_and_preserves_other_versions():
         supplemental_operation_plan=_supplemental_plan(run_id))
     request = ItineraryPlanningResumeRequest(**fields)
     assert tuple(type(request).model_fields) == ("schema_version", "predecessor_planning_ref", "supplemented_candidate_set_ref", "operation_plan", "supplemental_operation_plan")
-    assert request.schema_version == "3.0"
-    assert request.operation_plan.schema_version == ITINERARY_PLANNING_SCHEMA_VERSION == "2.0"
+    assert request.schema_version == "4.0"
+    assert request.operation_plan.schema_version == ITINERARY_PLANNING_SCHEMA_VERSION == "3.0"
     assert request.supplemental_operation_plan.schema_version == "1.0"
     assert ItineraryPlanningResumeRequest.model_validate_json(request.model_dump_json(), strict=True) == request
     with pytest.raises(ValidationError):

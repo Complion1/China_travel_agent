@@ -8,9 +8,13 @@
 
 **快速体验链接：待发布。** 先阅读[完整公开模拟样例](app/web_application/samples/demo_trip.md)，或按[本机启动步骤](#m14-本机启动)复现。简历只需提供本 GitHub 仓库链接；取得单独部署授权并通过公网验收后，在这里填写实际体验链接。
 
-匿名身份可查看当前浏览器的历史任务，Cookie 固定有效 30 天。全站 200 新任务/日、每访客 20/日、每 IP 5/小时，同时执行 1 个任务且无队列；最终运行摘要同库保存后释放完整事件内存。设计已于 2026-10-05 批准，当前分支为 `feature/module-14-web-application`，尚未提交或合并 M14。逐阶段双审和本次验证见[实施状态](docs/IMPLEMENTATION_STATUS.md)，规范见[M14设计](docs/14_web_application.md)与[执行规范](docs/14_web_application_vibe_coding.md)。
+匿名身份可查看当前浏览器的历史任务，Cookie 固定有效 30 天。全站 200 新任务/日、每访客 20/日、每 IP 5/小时，同时执行 1 个任务且无队列；最终运行摘要同库保存后释放完整事件内存。M14 初始实现已进入本地 `main`（`b3438ca`），当前源码还包含通用工具参数修复、枢纽澄清维护及 M08/M09 额度调整。本轮已获提交并本地合并授权；逐阶段双审、验证和整合状态见[实施状态](docs/IMPLEMENTATION_STATUS.md)，网页规范见[M14设计](docs/14_web_application.md)与[执行规范](docs/14_web_application_vibe_coding.md)。
 
-模块 01–13 的当前批准范围实现已进入本地 `main`，包括 M11 网页控制扩展、M13 生产主图、公交换乘展示、M09 分阶段规划及完整交互诊断；实现提交为 `2ee962e`，本地合并记录由说明文档提交 `71767d3` 固化（2026-09-30）。记录见[规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。Module 11 保留演示范围验收及既有延期边界。生产 LLM Profile 使用 DeepSeek V4 Flash；Module 10/11 提供 PostgreSQL 产物和执行状态持久化，当前 M14 复用同库。完整 M15、腾讯云 2GB 实机及公网资格尚未取得；本次本机真实网页测试范围及结果以实施状态为准。push、PR、部署均未执行。
+规划工具参数的缺失、类型、枚举、额外字段、范围/数量及非法 JSON 使用统一严格校验。出现参数错误时整批不执行，由模型重新生成；正常规划仍最多 17 次，另有同一 run 共享的 2 次格式修正储备，总计 19 次。补研返回不重置额度，修正后仍须通过行程业务校验。两次修正后仍不合格会停止。设计与实施入口见[M09 §26](docs/09_itinerary_planning_loop.md#26-通用参数修正与共享储备2026-10-06用户已批准)、[执行规范 §30](docs/09_itinerary_planning_loop_vibe_coding.md#30-通用参数修复实施入口2026-10-06用户已批准)，实际离线、数据库、浏览器门禁和独立审查见[实施状态](docs/IMPLEMENTATION_STATUS.md)。本轮新真实供应商资格尚未运行；本机18080已按此前更新授权更换为经过离线验证的128K镜像。
+
+M08 候选研究的固定生成上限已按 2026-10-07 批准调整为 131,072（128K），Action 和 Observation Judgment 共用；high、120 秒读取超时及原调用预算保持不变。定向、M02/M08 和全项目离线回归结果见[实施状态](docs/IMPLEMENTATION_STATUS.md)。本机18080已在用户授权后更新，运行中Profile实查为131,072，首页、就绪接口及JS/CSS均200，原数据库、卷与暂停凭证保留；访问 http://127.0.0.1:18080 并刷新页面即可使用。这次更新未执行真实模型测试，新的供应商资格仍未取得。设计和维护入口见[M02 §6](docs/02_llm_runtime_and_model_profiles.md#6-固定-profile-矩阵)与[执行规范](docs/02_llm_runtime_and_model_profiles_vibe_coding.md#m08-生成额度维护入口2026-10-07用户已批准)。
+
+模块 01–13 的当前批准范围实现已进入本地 `main`，包括 M11 网页控制扩展、M13 生产主图、公交换乘展示、M09 分阶段规划及完整交互诊断；实现提交为 `2ee962e`，本地合并记录由说明文档提交 `71767d3` 固化（2026-09-30）。记录见[规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。Module 11 保留演示范围验收及既有延期边界。生产 LLM Profile 使用 DeepSeek V4 Flash；Module 10/11 提供 PostgreSQL 产物和执行状态持久化，当前 M14 复用同库。完整 M15、腾讯云 2GB 实机及公网资格尚未取得；本次本机真实网页测试范围及结果以实施状态为准。本机18080更新已执行，push、PR、云端部署均未执行。
 
 ## M14 本机启动
 
@@ -55,7 +59,7 @@ docker compose --env-file .m14-local/config.env --project-name cta-m14-local --p
 
 模块 01–12 修复收尾时的全量 Docker unit/contract 回归为 **2317 passed、8 warnings**（历史快照）。第 **18/20** 轮复用第 15 轮已通过的真实需求、酒店及 M08 候选检查点，从 M09 开始真实调用，获得 Completed；M12 三个日块、汇总索引及 PostgreSQL 重启后的读取/哈希一致性均通过。成功后停止，剩余两轮未使用。这是复用真实上游的集成链验证，不是第 18 轮重新调用全部上游；这份历史结果不能替代后续 M13/14 或完整 M11 恢复闭环验收，也不证明行程质量最优。历史问题见 [联调修复记录](./docs/12_live_pipeline_fixes.md)，模块历史验收见 [实施状态快照](./docs/IMPLEMENTATION_STATUS.md)；[首次真实联调报告](./docs/12_live_pipeline_acceptance.md) 保留当时的失败记录。
 
-当前规则：旅行预算金额功能延期，费用仍标未核验；抽取输出上限为 32,768 tokens，规划输入上限为 2 MiB。Module 09 使用 planning-v5 / ModelAction 5.0，规划与格式化结果为 2.0；备用点可选，缺项不阻止主行程完成、不触发备用点专用补研，已提供的备用点仍需通过资格、距离和证据校验。
+当前规则：旅行预算金额功能延期，费用仍标未核验；抽取输出上限为 32,768 tokens，规划输入上限为 2 MiB。Module 09 使用 planning-v6 / ModelAction 6.0，行程产物为 3.0，Module 12 格式化结果仍为 2.0；旧版本按各模块兼容合同独立读取。备用点可选，缺项不阻止主行程完成、不触发备用点专用补研，已提供的备用点仍需通过资格、距离和证据校验。
 
 ## Module 11 显式迁移与导入自检
 
@@ -226,3 +230,17 @@ Module 07 统一 Gate：`204 passed`；line `655/655 = 100.00%`、branch `194/19
 Module 08 的受控候选研究实现已完成 08-1～08-6、生产缺陷修复、独立代码审查和 MODULE-CLOSEOUT。最终代码保持四类 `1.0` Artifact、双 Prompt hash、6/48/12 预算、最多 3 并发、128 候选容量、initial/supplemental/replay/singleflight/close 生命周期及上游公共边界；无新增依赖、migration、live provider、HTTP/SDK 私有访问或 Secret。
 
 MODULE-CLOSEOUT 只同步两份 Module 08 设计中的用户验收例外、README、实施状态和 Docker runtime import 自检；没有修改 Module 08 生产代码或测试。最终实现与收尾提交为 `da2d1eadc09d5abac8f86054054c58d637de22db`，本地 `main` 已从 `7285fc2489b6a490bd38a65f1fb16b371159b094` fast-forward 到该提交，没有产生 merge commit。当前状态为 `MODULE08_COMPLETE_ON_LOCAL_MAIN`；push、PR 和 deploy 均未执行。
+
+## 枢纽澄清维护（2026-10-07）
+
+当前分支增加目的城市的抵达、离开枢纽检查。名称、类型或当地时间缺失，以及名称与类型冲突时，确认前继续追问；网页提供机场、火车站或高铁站的类型选项，不预选答案。有问题的已填字段仍可核对并凭当前回答修正，历史需求记录保持可读。可核验的枢纽输入失败展示固定字段提示，并引导核对后新建任务。
+
+实现依据为 [M01 枢纽澄清规则](docs/01_requirement_and_dialogue.md)、[M03 端点角色规则](docs/03_requirement_extraction_adapter.md)、[M13 输入失败映射](docs/13_demo_workflow.md) 和 [M14 表单与安全提示](docs/14_web_application.md)，阶段门槛见 [E01 维护执行入口](docs/01_requirement_and_dialogue_vibe_coding.md)。本次离线快照、保留的失败及同步后交付物验证入口见 [实施状态](docs/IMPLEMENTATION_STATUS.md#枢纽澄清维护离线快照2026-10-07)。
+
+该维护阶段未替换现有18080网页镜像。新 `requirement-extraction-v4-hub-roles` Prompt 的真实供应商资格为 `NOT_RUN`，离线测试和历史版本资格不能替代它。后续本机换版及本轮提交前验收分别按实际收据记录，见实施状态。
+
+## M09 单次生成额度（2026-10-08）
+
+当前修复分支的 M09 行程规划单次输出上限为 **128K（131,072 tokens）**，首次规划、续调及参数修正统一使用；思考仍为 `enabled/high`，总逻辑调用仍为17次普通规划加2次共享参数修正。设计依据为 [M02 Profile矩阵](docs/02_llm_runtime_and_model_profiles.md#6-固定-profile-矩阵) 和 [M09额度维护](docs/09_itinerary_planning_loop.md#27-m09-单次生成额度128k2026-10-08用户已批准)，执行及验证快照见 [实施状态](docs/IMPLEMENTATION_STATUS.md#m09-单次生成128k维护快照2026-10-08)。
+
+该源码维护阶段不替换现有18080网页镜像，也不自动重跑旧任务；真实API资格为NOT_RUN。后续本机换版与本轮提交前镜像、完整离线回归及两位独立审查的实收分别记录，不以历史快照代替新资格。

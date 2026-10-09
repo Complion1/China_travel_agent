@@ -128,9 +128,10 @@ def infer_hub_type(name: str) -> Optional[str]:
     normalized = name.strip()
     if not normalized:
         return None
-    if normalized.endswith("机场"):
+    if re.fullmatch(r".+机场(?:\s*[Tt]?\d+航站楼)?", normalized):
         return "airport"
-    if normalized.endswith(("站", "火车站", "高铁站")):
+    if (normalized.endswith("站") and normalized not in {"站", "车站", "火车站", "高铁站", "铁路站", "铁路车站"}
+            and not any(marker in normalized for marker in ("汽车", "客运", "公交", "地铁"))):
         return "railway_station"
     return None
 
@@ -141,6 +142,27 @@ def _issue(code: str, field_path: str, message: str) -> RequirementIssue:
         field_path=RequirementFieldPath(field_path),
         message=message,
     )
+
+
+def validate_requirement_hubs(req: TravelRequirement) -> tuple[RequirementIssue, ...]:
+    """Validate endpoint completeness without changing historical DTOs or guessing geography."""
+    issues: list[RequirementIssue] = []
+    for role, label in (("arrival", "到达"), ("departure", "离开")):
+        hub = getattr(req.time_window, role)
+        prefix = f"time_window.{role}"
+        inferred = infer_hub_type(hub.hub_name) if hub.hub_name else None
+        if not hub.hub_name or not hub.hub_name.strip():
+            issues.append(_issue("hub_name_missing", f"{prefix}.hub_name", f"请填写{label}目的城市的具体机场或火车站名称"))
+        elif inferred is None:
+            issues.append(_issue("hub_name_not_specific", f"{prefix}.hub_name", f"请填写{label}目的城市的具体机场或火车站全名，不能只填写城市名"))
+        if hub.hub_type is None:
+            issues.append(_issue("hub_type_missing", f"{prefix}.hub_type", f"请选择{label}枢纽类型：机场或火车站/高铁站"))
+        elif inferred is not None and inferred != hub.hub_type.value:
+            for field in ("hub_name", "hub_type"):
+                issues.append(_issue("hub_type_mismatch", f"{prefix}.{field}", f"{label}枢纽名称与类型不一致，请核对具体名称及类型"))
+        if not hub.local_datetime or not hub.local_datetime.strip():
+            issues.append(_issue("hub_time_missing", f"{prefix}.local_datetime", f"请填写{label}目的城市的日期与时间"))
+    return tuple(issues)
 
 
 def _parse_date(value: Optional[str], field_path: str, issues: list[RequirementIssue]) -> Optional[date]:

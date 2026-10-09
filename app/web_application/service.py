@@ -23,7 +23,7 @@ from app.durable_execution import (DurableExecutionRuntime, DurableRunView,
     DurableExecutionRunBlockedError, DurableExecutionIncompatibleRunError)
 from app.requirement_extraction import ExtractionInvocationEvent
 from app.requirements import (RequirementTurnInput, RequirementIntent, RequirementDomainState,
-    RequirementConfirmation)
+    RequirementConfirmation, ConfirmedTravelRequirement, validate_requirement_hubs)
 from app.requirement_subgraph import RequirementClarificationResume, RequirementConfirmationResume
 from app.hotel_selection import HotelSelectCommand, HotelDeclineCommand
 from app.result_formatting import (ResultFormattingService, ResultReadRequest, ResultFormattingLoaded)
@@ -34,7 +34,7 @@ from .errors import (WebApplicationUsageError, WebApplicationDependencyError,
 from .models import (WebVisitorContext, WebSessionView, WebAdmissionView, WebStartRequest,
     WebClarifyRequest, WebConfirmRequest, WebHotelRequest, WebControlRequest,
     WebCommandReceipt, WebRunView, WebHistoryPage, WebResultView, WebResultDay,
-    WebSummaryView, WebSamplesView, fresh, utc)
+    WebSummaryView, WebSamplesView, WebInputIssue, fresh, utc)
 from .settings import WebApplicationSettings
 from .security import ip_hash
 from .store import WebMetadataStore, DecisionError, RequestRecord
@@ -658,8 +658,28 @@ class WebApplicationService:
         else:
             card = None
         status = (await self._summary_view(view)).status
+        input_issues = await self._input_issues(view) if details else ()
         return WebRunView(schema_version="1.0", run=view, card=card, actions=tuple(actions),
-            result_available=available, summary_status=status)
+            result_available=available, summary_status=status, input_issues=input_issues)
+
+    async def _input_issues(self, view):
+        if not (view.lifecycle == "closed" and view.activity == "terminal"
+                and view.delivery_status is DeliveryStatus.FAILED
+                and view.terminal_code in {"requirement_failed", "workflow_contract_failed"}):
+            return ()
+        try:
+            state = fresh(await self._deps.durable.get_state(run_id=view.run_id), TravelSessionState)
+            if (state.run_id != view.run_id or state.trace_id != view.trace_id
+                    or state.terminal_code != view.terminal_code or state.delivery_status != view.delivery_status
+                    or type(state.requirement_outcome) is not ConfirmedTravelRequirement):
+                return ()
+            issues = validate_requirement_hubs(state.requirement_outcome.requirement)
+            return tuple(WebInputIssue(schema_version="1.0", field=issue.field_path,
+                code=issue.code, message=issue.message) for issue in issues)
+        except Exception:
+            # Diagnosis is optional. Unverifiable historical state must not
+            # change the task's terminal semantics or trigger recovery.
+            return ()
 
     async def get_run(self, *, owner: WebVisitorContext, run_id: UUID) -> WebRunView:
         self._check()

@@ -9,7 +9,12 @@ from langchain_core.messages import AIMessage
 from pydantic import SecretStr
 from pydantic import BaseModel, ConfigDict
 
-from app.llm_runtime.profiles import REQUIREMENT_EXTRACTION_PROFILE
+from app.llm_runtime.profiles import (
+    CANDIDATE_RESEARCH_PROFILE,
+    ITINERARY_PLANNING_PROFILE,
+    REPLANNING_PROFILE,
+    REQUIREMENT_EXTRACTION_PROFILE,
+)
 from app.llm_runtime.protocols import (
     ProviderFailure,
     ProviderJSONRequest,
@@ -254,6 +259,7 @@ def test_normalize_raw_openai_response_and_rejects_bad_shapes():
                 "content": None,
                 "tool_calls": [{
                     "id": "c",
+                    "type": "function",
                     "function": {"name": "echo", "arguments": '{"value":"x"}'},
                 }],
             },
@@ -431,7 +437,17 @@ def test_unwrap_ai_message_rejects_metadata_content_reasoning_and_bad_parsed():
     assert isinstance(adapter._unwrap_ai_message(make_message(), {"bad": object()}), ProviderFailure)
 
 
-def test_build_model_uses_only_locked_profile_values(monkeypatch):
+@pytest.mark.parametrize(
+    ("profile", "max_tokens"),
+    [
+        (REQUIREMENT_EXTRACTION_PROFILE, 32_768),
+        (CANDIDATE_RESEARCH_PROFILE, 131_072),
+        (ITINERARY_PLANNING_PROFILE, 131_072),
+        (REPLANNING_PROFILE, 32_768),
+    ],
+    ids=["requirement_extraction", "candidate_research", "itinerary_planning", "replanning"],
+)
+def test_build_model_uses_only_locked_profile_values(monkeypatch, profile, max_tokens):
     captured = {}
 
     def fake_chat_deepseek(**kwargs):
@@ -439,12 +455,14 @@ def test_build_model_uses_only_locked_profile_values(monkeypatch):
         return object()
 
     monkeypatch.setattr("app.llm_runtime.provider.ChatDeepSeek", fake_chat_deepseek)
-    make_adapter()._build_model(REQUIREMENT_EXTRACTION_PROFILE)
+    make_adapter()._build_model(profile)
     assert captured["model"] == "deepseek-v4-flash"
-    assert captured["max_tokens"] == 32_768
+    assert captured["max_tokens"] == max_tokens
     assert captured["max_retries"] == 0
     assert captured["streaming"] is False
     assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert captured["reasoning_effort"] == "high"
+    assert captured["timeout"].read == 120
     assert "temperature" not in captured
 
 

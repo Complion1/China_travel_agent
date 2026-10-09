@@ -17,8 +17,10 @@ from app.requirements.models import (
     TravelRequirement,
 )
 from app.requirements.normalization import (
+    infer_hub_type,
     validate_party,
     validate_requirement_bounds,
+    validate_requirement_hubs,
     validate_rooms,
     validate_time_window,
 )
@@ -49,7 +51,8 @@ def _conflict(path: str) -> RequirementIssue:
 
 
 class RequirementMerger:
-    def merge(self, current: TravelRequirement, patch: RequirementPatch) -> MergeResult:
+    def merge(self, current: TravelRequirement, patch: RequirementPatch, *,
+              verified_paths: Iterable[str] = ()) -> MergeResult:
         updated = current.model_copy(deep=True)
         patch_fields = _fields_set(patch) - {"evidence", "is_correction"}
         if not patch_fields:
@@ -57,7 +60,24 @@ class RequirementMerger:
 
         issues: list[RequirementIssue] = []
         changed: list[str] = []
-        evidence_paths = {item.field_path for item in patch.evidence}
+        evidence_paths = {item.field_path.value for item in patch.evidence} | set(verified_paths)
+        invalid_hub_fields = {
+            issue.field_path.value
+            for issue in validate_requirement_hubs(current)
+            if issue.code in {"hub_name_not_specific", "hub_type_mismatch"}
+        }
+
+        def evidenced_hub_repair(path: str, new: object) -> bool:
+            prefix, _, field = path.rpartition(".")
+            if path not in invalid_hub_fields or field not in {"hub_name", "hub_type"}:
+                return False
+            if path in evidence_paths:
+                return True
+            # M01 may derive the type from the verified name in this same patch.
+            if field == "hub_type" and f"{prefix}.hub_name" in evidence_paths:
+                hub = getattr(patch.time_window, prefix.rsplit(".", 1)[1])
+                return bool(hub.hub_name and infer_hub_type(hub.hub_name) == new)
+            return False
 
         def apply(
             path: str,
@@ -85,7 +105,7 @@ class RequirementMerger:
                 return
             if old == new:
                 return
-            if _is_unset_domain_value(old) or patch.is_correction:
+            if _is_unset_domain_value(old) or patch.is_correction or evidenced_hub_repair(path, new):
                 setter(new)
                 changed.append(path)
             else:
@@ -257,8 +277,10 @@ class RequirementMerger:
             ("time_window.sightseeing_end_date", req.time_window.sightseeing_end_date),
             ("time_window.sightseeing_days", req.time_window.sightseeing_days),
             ("time_window.arrival.hub_name", req.time_window.arrival.hub_name),
+            ("time_window.arrival.hub_type", req.time_window.arrival.hub_type),
             ("time_window.arrival.local_datetime", req.time_window.arrival.local_datetime),
             ("time_window.departure.hub_name", req.time_window.departure.hub_name),
+            ("time_window.departure.hub_type", req.time_window.departure.hub_type),
             ("time_window.departure.local_datetime", req.time_window.departure.local_datetime),
             ("party.adults_count", req.party.adults_count),
             ("party.children_count", req.party.children_count),
@@ -278,6 +300,7 @@ class RequirementMerger:
     def detect_conflicts(self, req: TravelRequirement) -> list[RequirementIssue]:
         issues = [
             *validate_requirement_bounds(req),
+            *validate_requirement_hubs(req),
             *validate_time_window(req.time_window),
             *validate_party(req.party.adults_count, req.party.children_count, req.party.children_ages, req.party.seniors_count),
             *validate_rooms(req.rooms.room_count, req.party.total_people or 0),

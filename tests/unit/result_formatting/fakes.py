@@ -182,6 +182,7 @@ async def make_scenario(
     zero_route: bool = False, run_id: UUID = RUN_ID,
     budget_total_cny: float | None = 10000.5,
     transit_instructions: tuple[str, ...] | None = None,
+    planning_version: str = "2.0",
 ) -> Scenario:
     """Persist complete evidence; return request, itinerary, evidence and repository.
 
@@ -191,6 +192,8 @@ async def make_scenario(
     """
     if type(days) is not int or not 1 <= days <= 60:
         raise ValueError("scenario days must be between one and sixty")
+    if planning_version not in {"2.0", "3.0"}:
+        raise ValueError("unsupported planning fixture version")
     if repository is None:
         repository = InMemoryArtifactRepository(
             registry=make_registry(), utc_clock=FixedClock(WRITE_TIME),
@@ -320,9 +323,9 @@ async def make_scenario(
     planning_digest = digest("planning-original-request")
     action = await save("planning_action", ItineraryPlanningModelActionArtifact,
                         "itinerary_planning.model_action", WorkflowPhase.ITINERARY_PLANNING, {
-        "schema_version": "5.0", "request_digest": planning_digest, "invocation_index": 0,
+        "schema_version": "6.0" if planning_version == "3.0" else "5.0", "request_digest": planning_digest, "invocation_index": 0,
         "request_stage": "preparation", "budget_category": "preparation",
-        "prompt_version": "planning-v5", "prompt_hash": digest("synthetic-prompt"),
+        "prompt_version": "planning-v6" if planning_version == "3.0" else "planning-v5", "prompt_hash": digest("synthetic-prompt"),
         "action_kind": "tool_calls", "call_summaries": [{"schema_version": "1.0",
             "call_id": "synthetic-geocode", "ordinal": 0, "tool": "geocode_hub",
             "arguments_fingerprint": digest("arguments"), "handle_count": 0,
@@ -430,7 +433,7 @@ async def make_scenario(
                               visits=visits, route_legs=legs, backups=backups))
     departure_route = await route("departure_route", hotel_location, hubs[1],
                                   local_time(START_DATE + timedelta(days=days), 15))
-    directories = dict(schema_version="1.0", hotel_selection_refs=[tree(hotel)],
+    directories = dict(schema_version="2.0" if planning_version == "3.0" else "1.0", hotel_selection_refs=[tree(hotel)],
                        candidate_set_refs=[tree(candidate_set)], model_action_refs=[tree(action)],
                        hub_geocode_refs=[tree(ref) for ref in hub_refs], matrix_refs=[tree(ref) for ref in matrix_refs],
                        directions_refs=[tree(ref) for ref in direction_refs],
@@ -445,7 +448,7 @@ async def make_scenario(
                  arrival_transfer=transfers[0], days=plan_days, departure_transfer=transfers[1], upstream_gap_ids=[])
     itinerary_ref = await save("itinerary", ItineraryPlanningArtifact, "itinerary_planning.itinerary",
                                 WorkflowPhase.ITINERARY_PLANNING, {
-        "schema_version": "2.0", "request_digest": digest("planning-resume-request") if resume else planning_digest,
+        "schema_version": planning_version, "request_digest": digest("planning-resume-request") if resume else planning_digest,
         "parent_planning_ref": None, "directories": directories, "record": {
             "schema_version": "1.0", "record_type": "completed", "draft": draft,
             "summary": dict(schema_version="1.0", effective_pace="标准", sightseeing_days=days,
@@ -454,13 +457,15 @@ async def make_scenario(
                 dinner_count=0 if transit_only else days, unique_main_candidates=0 if transit_only else 2 * days + 1,
                 boundary_transfers=2, route_legs=len(direction_refs), backups=0 if transit_only else 3 * days,
                 unknown_hours=0 if transit_only else 6 * days - 1),
-            "budgets": dict(schema_version="2.0", preparation_limit=2, preparation_used=1, transport_limit=5, transport_used=0,
+            "budgets": dict(schema_version=planning_version, preparation_limit=2, preparation_used=1, transport_limit=5, transport_used=0,
                 submit_repair_limit=5, submit_repair_used=0, supplement_request_limit=5, supplement_request_used=0,
-                model_invocation_limit=17, model_invocations_consumed=1,
+                model_invocation_limit=19 if planning_version == "3.0" else 17, model_invocations_consumed=1,
                 direction_call_limit=8 * days + 2, direction_calls_consumed=len(direction_refs),
-                budget_snapshot_complete=True, semantic_invocation_limit=17, semantic_invocations_consumed=1,
+                budget_snapshot_complete=True, semantic_invocation_limit=19 if planning_version == "3.0" else 17, semantic_invocations_consumed=1,
                 known_provider_attempts=1, provider_attempts_complete=True, known_usage=ZERO_USAGE,
-                usage_complete=True, cache_hits=0)},
+                usage_complete=True, cache_hits=0,
+                **({"normal_invocation_limit": 17, "format_repair_limit": 2, "format_repair_used": 0}
+                   if planning_version == "3.0" else {}))},
     })
     state = TravelSessionState(schema_version="2.0", run_id=run_id, trace_id=TRACE_ID,
         phase=WorkflowPhase.ITINERARY_PLANNING, delivery_status=DeliveryStatus.IN_PROGRESS,

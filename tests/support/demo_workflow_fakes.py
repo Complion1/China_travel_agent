@@ -161,7 +161,7 @@ class PlanningModel:
     def close(self):
         self.closed = True
 
-    async def ainvoke_tools(self, prompt, contracts, *, admission_callback=None, request_stage=None):
+    async def ainvoke_tools(self, prompt, contracts, *, admission_callback=None, request_stage=None, allow_argument_repair=False):
         if admission_callback is not None:
             from app.llm_runtime import InteractionCallIdentity
             from uuid import uuid4

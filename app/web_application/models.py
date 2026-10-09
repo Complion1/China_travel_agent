@@ -188,17 +188,49 @@ class WebInteractionCard(WebModel):
             raise ValueError("invalid questions")
         return self
 
+class WebInputIssue(WebModel):
+    field: RequirementFieldPath
+    code: Literal["hub_name_missing", "hub_name_not_specific", "hub_type_missing", "hub_type_mismatch", "hub_time_missing"]
+    message: Text
+
+    @model_validator(mode="after")
+    def validate_hub_issue(self):
+        parts = self.field.value.split(".")
+        if len(parts) != 3 or parts[0] != "time_window" or parts[1] not in {"arrival", "departure"}:
+            raise ValueError("hub field required")
+        allowed = {"hub_name_missing": {"hub_name"}, "hub_name_not_specific": {"hub_name"},
+            "hub_type_missing": {"hub_type"}, "hub_type_mismatch": {"hub_name", "hub_type"},
+            "hub_time_missing": {"local_datetime"}}
+        label = "到达" if parts[1] == "arrival" else "离开"
+        messages = {
+            "hub_name_missing": f"请填写{label}目的城市的具体机场或火车站名称",
+            "hub_name_not_specific": f"请填写{label}目的城市的具体机场或火车站全名，不能只填写城市名",
+            "hub_type_missing": f"请选择{label}枢纽类型：机场或火车站/高铁站",
+            "hub_type_mismatch": f"{label}枢纽名称与类型不一致，请核对具体名称及类型",
+            "hub_time_missing": f"请填写{label}目的城市的日期与时间",
+        }
+        if parts[2] not in allowed[self.code] or self.message != messages[self.code]:
+            raise ValueError("fixed safe hub issue required")
+        return self
+
 class WebRunView(WebModel):
     run: DurableRunView
     card: WebInteractionCard | None
     actions: tuple[Action, ...]
     result_available: bool
     summary_status: SummaryStatus
+    input_issues: tuple[WebInputIssue, ...] = Field(default=(), max_length=6)
     @model_validator(mode="after")
     def copy_run(self):
         object.__setattr__(self, "run", DurableRunView.model_validate_json(self.run.model_dump_json(), strict=True))
         if len(set(self.actions)) != len(self.actions):
             raise ValueError("duplicate action")
+        if len({issue.field for issue in self.input_issues}) != len(self.input_issues):
+            raise ValueError("duplicate input issue")
+        if self.input_issues and not (self.run.lifecycle == "closed" and self.run.activity == "terminal"
+                and self.run.delivery_status is DeliveryStatus.FAILED
+                and self.run.terminal_code in {"requirement_failed", "workflow_contract_failed"}):
+            raise ValueError("failed input task required")
         return self
 
 class WebHistoryPage(WebModel):
@@ -206,7 +238,7 @@ class WebHistoryPage(WebModel):
     next_cursor: str | None = Field(max_length=512)
     @model_validator(mode="after")
     def validate_history(self):
-        if any(item.card is not None for item in self.items):
+        if any(item.card is not None or item.input_issues for item in self.items):
             raise ValueError("history has no cards")
         return self
 
