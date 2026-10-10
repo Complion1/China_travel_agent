@@ -83,3 +83,66 @@ async def test_wrong_event_identity_and_terminal_identity_are_rejected():
         await diagnostic.finish(state=make_cancelled_state(state),budget_snapshots=())
     with pytest.raises(DemoWorkflowUsageError):
         await diagnostic.finish(state=make_cancelled_state(state.model_copy(update={"trace_id":uuid4()})),budget_snapshots=())
+def test_active_phase_scope_nested_identity_and_summary_counts():
+    from app.demo_workflow import DemoWorkflowUsageError
+    from app.workflow_contracts import WorkflowPhase
+    state = safe_state()
+    diagnostic = diagnostics()
+    diagnostic.start_run(run_id=state.run_id, trace_id=state.trace_id)
+    read = lambda: diagnostic.get_active_phase(run_id=state.run_id, trace_id=state.trace_id)
+    assert read() is None
+    diagnostic._observe_phase(state)  # Standalone M11 use has no web scope.
+    assert read() is None
+    with diagnostic.operation(run_id=state.run_id, trace_id=state.trace_id, turn_id=None, kind="initial"):
+        assert read() is None
+        diagnostic._observe_phase(state)
+        assert read() is WorkflowPhase.REQUIREMENTS
+        with diagnostic.operation(run_id=state.run_id, trace_id=state.trace_id, turn_id=None, kind="resume"):
+            diagnostic._observe_phase(state.model_copy(update={"phase": WorkflowPhase.CANDIDATE_RESEARCH}))
+            assert read() is WorkflowPhase.CANDIDATE_RESEARCH
+        assert read() is WorkflowPhase.CANDIDATE_RESEARCH
+        assert diagnostic.get_active_phase(run_id=uuid4(), trace_id=state.trace_id) is None
+        assert diagnostic.get_active_phase(run_id=state.run_id, trace_id=uuid4()) is None
+        with pytest.raises(DemoWorkflowUsageError):
+            diagnostic.get_active_phase(run_id=str(state.run_id), trace_id=state.trace_id)
+        with pytest.raises(DemoWorkflowUsageError):
+            diagnostic._observe_phase(state.model_copy(update={"trace_id": uuid4()}))
+        with pytest.raises(DemoWorkflowUsageError):
+            diagnostic._observe_phase(state.model_copy(update={"phase": "requirements"}))
+    assert read() is None
+
+
+@pytest.mark.asyncio
+async def test_phase_child_scope_expires_across_next_execution_and_errors_release():
+    import asyncio
+    from app.workflow_contracts import WorkflowPhase
+    state = safe_state()
+    diagnostic = diagnostics()
+    diagnostic.start_run(run_id=state.run_id, trace_id=state.trace_id)
+    read = lambda: diagnostic.get_active_phase(run_id=state.run_id, trace_id=state.trace_id)
+    gate = asyncio.Event()
+    async def late():
+        await gate.wait()
+        diagnostic._observe_phase(state.model_copy(update={"phase": WorkflowPhase.OUTPUT_FORMATTING}))
+    with diagnostic.operation(run_id=state.run_id, trace_id=state.trace_id, turn_id=None, kind="initial"):
+        async def legitimate(): diagnostic._observe_phase(state)
+        await asyncio.create_task(legitimate())
+        assert read() is WorkflowPhase.REQUIREMENTS
+        child = asyncio.create_task(late())
+    with diagnostic.operation(run_id=state.run_id, trace_id=state.trace_id, turn_id=None, kind="resume"):
+        diagnostic._observe_phase(state.model_copy(update={"phase": WorkflowPhase.ITINERARY_PLANNING}))
+        gate.set()
+        await child
+        assert read() is WorkflowPhase.ITINERARY_PLANNING
+    for error in (RuntimeError(), asyncio.CancelledError()):
+        with pytest.raises(type(error)):
+            with diagnostic.operation(run_id=state.run_id, trace_id=state.trace_id, turn_id=None, kind="recover"):
+                diagnostic._observe_phase(state)
+                raise error
+        assert read() is None
+    summary = (await diagnostic.finish(state=make_cancelled_state(state), budget_snapshots=())).summary
+    counts = {item.name: item.value for item in summary.counters}
+    assert counts["workflow.started"] == counts["workflow.terminal"] == 1
+    assert sum(counts.values()) == 2  # Observation adds no diagnostics events.
+    diagnostic.release_run(run_id=state.run_id)
+    assert read() is None

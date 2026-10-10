@@ -1,1 +1,78 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>旅行规划 · 我的任务</title><link rel="stylesheet" href="/static/site.css"><script src="/static/app.js" defer></script></head><body data-page="task"><header><a href="/">中国旅行规划</a><nav><a href="/samples">完整样例</a><a href="/history">我的任务</a></nav></header><main><h1>旅行规划任务</h1><p id="task-status" role="status">正在读取真实任务状态…</p><p id="message" aria-live="polite"></p><button id="query-request" hidden>查询原请求</button><section id="input-issues" aria-live="polite" hidden></section><section id="interaction"></section><div id="controls"></div><section id="result" hidden><h2>完整旅行攻略</h2><p id="delivery-note"></p><div class="actions"><button id="copy-result">复制 Markdown</button><button id="download-result">下载 Markdown</button></div><details><summary>总览与完整 Markdown</summary><pre id="result-markdown"></pre></details><div id="result-days"></div></section><details id="statistics"><summary>运行统计</summary><p id="summary-status">展开后读取最终保存的统计。</p><button id="refresh-summary" type="button">刷新统计</button><div id="summary-content"></div></details><p><a href="/">新建任务</a> · <a href="/samples">查看完整样例</a></p></main><footer>刷新或关闭页面不会取消任务。恢复需要明确点击；取消以真实终态为准。</footer></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>旅行规划 · 我的任务</title>
+  <link rel="stylesheet" href="/static/site.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body data-page="task">
+<header><a href="/">中国旅行规划</a><nav><a href="/samples">完整样例</a><a href="/history">我的任务</a></nav></header>
+<main>
+  <div class="task-heading"><div><p class="eyebrow">你的旅行，正在成形</p><h1 id="task-title">旅行规划任务</h1><p id="task-status" role="status">正在读取真实任务状态…</p></div><a class="secondary button" href="/">新建任务</a></div>
+  <p id="message" aria-live="polite"></p>
+  <button id="query-request" hidden>查询原请求</button>
+  <section id="workflow" aria-label="旅行规划流程" hidden>
+    <div id="workflow-canvas" class="workflow-canvas">
+      <svg id="workflow-edges" aria-hidden="true" focusable="false">
+        <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5"/></marker></defs>
+        <g id="workflow-paths"></g>
+      </svg>
+      <div class="flow-groups">
+        <div class="flow-group">
+          <h2 class="flow-group-title">旅行条件</h2>
+          <div class="flow-node" data-step="requirements" data-state="pending">
+            <svg class="flow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h14v18H5zM8 7h8M8 11h8M8 15h5"/></svg>
+            <h3>理解旅行需求</h3><p class="flow-node-status">待开始</p><span class="flow-indicator" aria-hidden="true"></span>
+          </div>
+          <div class="flow-node" data-step="hotel" data-state="pending">
+            <svg class="flow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5v15M3 10h18v10M3 16h18M7 7h5v3H7z"/></svg>
+            <h3>选择酒店</h3><p class="flow-node-status">待开始</p><span class="flow-indicator" aria-hidden="true"></span>
+          </div>
+        </div>
+        <div class="flow-group flow-group-planning">
+          <h2 class="flow-group-title">研究与规划</h2>
+          <div class="flow-node" data-step="research" data-state="pending">
+            <svg class="flow-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg>
+            <h3>研究游览地点</h3><p class="flow-node-status">待开始</p><span class="flow-indicator" aria-hidden="true"></span>
+          </div>
+          <div class="flow-node" data-step="planning" data-state="pending">
+            <svg class="flow-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 5h9a4 4 0 0 1 0 8H8a3 3 0 0 0 0 6h9"/></svg>
+            <h3>规划每日行程</h3><p class="flow-node-status">待开始</p><span class="flow-indicator" aria-hidden="true"></span>
+          </div>
+        </div>
+        <div class="flow-group">
+          <h2 class="flow-group-title">攻略交付</h2>
+          <div class="flow-node" data-step="formatting" data-state="pending">
+            <svg class="flow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9l5 5v13H5zM14 3v5h5M8 12h8M8 16h8"/></svg>
+            <h3>整理完整攻略</h3><p class="flow-node-status">待开始</p><span class="flow-indicator" aria-hidden="true"></span>
+          </div>
+          <div class="flow-node" data-step="delivered" data-state="pending">
+            <svg class="flow-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg>
+            <h3>攻略已完成</h3><p class="flow-node-status">待开始</p><span class="flow-indicator" aria-hidden="true"></span>
+          </div>
+        </div>
+      </div>
+      <div class="flow-legend" aria-label="流程状态图例"><span class="legend-done">已完成</span><span class="legend-running">进行中</span><span class="legend-waiting">等待操作</span><span class="legend-pending">待开始</span></div>
+    </div>
+    <div class="phase-detail"><div class="phase-detail-heading"><h2 id="phase-title"></h2><span id="phase-badge" class="phase-badge"></span></div><p id="phase-description"></p><p id="phase-next" class="muted"></p></div>
+  </section>
+  <section id="input-issues" aria-live="polite" hidden></section>
+  <section id="interaction"></section>
+  <div id="controls"></div>
+  <section id="result" hidden>
+    <div class="result-heading"><div><p class="eyebrow">旅行规划结果</p><h2>完整旅行攻略</h2></div><div class="actions"><button id="copy-result">复制 Markdown</button><button id="download-result" class="secondary">下载 Markdown</button></div></div>
+    <p id="delivery-note" class="delivery-note"></p>
+    <section id="result-overview" class="result-overview markdown-body" aria-label="旅行总览"></section>
+    <nav id="result-day-nav" class="day-navigation" aria-label="每日行程导航"></nav>
+    <div id="result-days"></div>
+    <section id="result-notes" class="result-notes markdown-body" aria-label="返程与出行提醒"></section>
+    <details class="raw-result"><summary>查看原始 Markdown</summary><pre id="result-markdown"></pre></details>
+  </section>
+  <details id="statistics"><summary>运行统计</summary><p id="summary-status">展开后读取最终保存的统计。</p><button id="refresh-summary" type="button">刷新统计</button><div id="summary-content"></div></details>
+  <p><a href="/">新建任务</a> · <a href="/samples">查看完整样例</a></p>
+</main>
+<footer>刷新或关闭页面不会取消任务。恢复需要明确点击；取消以真实终态为准。</footer>
+</body>
+</html>

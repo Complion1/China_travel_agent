@@ -6,7 +6,7 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 from app.durable_execution import DurableRunView
 from app.requirements import RequirementFieldPath
-from app.workflow_contracts import DeliveryStatus, RunSummary, TerminalCode
+from app.workflow_contracts import DeliveryStatus, RunSummary, TerminalCode, WorkflowPhase
 
 MAX_SAFE = 2**53 - 1
 Nonnegative = Annotated[int, Field(ge=0, le=MAX_SAFE)]
@@ -220,11 +220,16 @@ class WebRunView(WebModel):
     result_available: bool
     summary_status: SummaryStatus
     input_issues: tuple[WebInputIssue, ...] = Field(default=(), max_length=6)
+    progress_phase: WorkflowPhase | None = None
     @model_validator(mode="after")
     def copy_run(self):
         object.__setattr__(self, "run", DurableRunView.model_validate_json(self.run.model_dump_json(), strict=True))
         if len(set(self.actions)) != len(self.actions):
             raise ValueError("duplicate action")
+        if self.progress_phase is not None and not (self.run.lifecycle == "open"
+                and self.run.activity == "executing" and not self.run.cancel_requested
+                and self.run.phase is None):
+            raise ValueError("active execution observation required")
         if len({issue.field for issue in self.input_issues}) != len(self.input_issues):
             raise ValueError("duplicate input issue")
         if self.input_issues and not (self.run.lifecycle == "closed" and self.run.activity == "terminal"

@@ -42,8 +42,17 @@ def capture_sse(page):
     page.add_init_script("""(() => {
       const Native = window.EventSource;
       window.ctaTestStreams = [];
+      window.ctaTestSnapshots = [];
       window.EventSource = class extends Native {
-        constructor(...args) { super(...args); window.ctaTestStreams.push(this); }
+        constructor(...args) {
+          super(...args); window.ctaTestStreams.push(this);
+          this.addEventListener('snapshot', event => {
+            const value = JSON.parse(event.data);
+            if(!value.run)return;
+            window.ctaTestSnapshots.push({activity:value.run.activity,phase:value.run.phase,progress_phase:value.progress_phase});
+            if(window.ctaTestSnapshots.length>32)window.ctaTestSnapshots.shift();
+          });
+        }
       };
     })();""")
 
@@ -81,6 +90,7 @@ def answer_current_questions(page,origin,**overrides):
 
 def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_download(page,origin):
     capture_sse(page)
+    control(page,origin,phase_blocks=["requirements","hotel_selection","candidate_research","itinerary_planning","output_formatting"])
     page.goto(origin+"/")
     expect(page.locator("#offline-badge")).to_contain_text("离线资格测试")
     assert page.evaluate("isSecureContext") is False
@@ -89,6 +99,8 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     page.locator("#trip-input").fill("我想去杭州")
     page.locator("#date-confirm").check();page.locator("#start-button").dblclick()
     page.wait_for_url("**/tasks/*")
+    assert_active_phase(page,origin,"requirements","requirements")
+    control(page,origin,phase_release="requirements")
     expect(page.locator("#clarify-preferences-interests-culture")).to_be_visible()
     page.reload();expect(page.locator("#clarify-preferences-interests-culture")).to_be_visible()
     assert info(page,origin)["provider_calls"]==1
@@ -117,18 +129,39 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     assert page.locator("#map-requested").is_checked()
     page.locator("#map-requested").uncheck()
     page.get_by_role("button",name="确认需求",exact=True).click()
+    assert_active_phase(page,origin,"hotel_selection","hotel")
+    control(page,origin,phase_release="hotel_selection")
     expect(page.get_by_role("button",name="选择这家酒店",exact=True)).to_be_visible()
     expect(page.locator("#task-status")).to_contain_text("选择酒店")
     page.get_by_role("button",name="选择这家酒店",exact=True).click()
     expect(page.locator("#message")).to_contain_text("请先选择")
     page.locator("input[name=hotel]").first.check()
+    control(page,origin,supplement=True)
     page.get_by_role("button",name="选择这家酒店",exact=True).click()
+    assert_active_phase(page,origin,"candidate_research","research")
+    control(page,origin,phase_release="candidate_research")
+    assert_active_phase(page,origin,"itinerary_planning","planning")
+    initial_research_calls=info(page,origin)["fixture_research_calls"]
+    control(page,origin,phase_release="itinerary_planning",phase_blocks=["candidate_research"])
+    assert_active_phase(page,origin,"candidate_research","research")
+    fixture=info(page,origin)
+    assert fixture["fixture_supplement_target"]=={"details_status":"not_requested","initial_details_success_count":3}
+    assert fixture["fixture_research_calls"]==initial_research_calls
+    expect(page.locator('[data-step="planning"]')).to_have_attribute("data-state","pending")
+    control(page,origin,phase_release="candidate_research",phase_blocks=["itinerary_planning"])
+    assert_active_phase(page,origin,"itinerary_planning","planning")
+    assert info(page,origin)["fixture_research_calls"]>initial_research_calls
+    control(page,origin,phase_release="itinerary_planning")
+    assert_active_phase(page,origin,"output_formatting","formatting")
+    control(page,origin,phase_release="output_formatting")
     expect(page.locator("#result")).to_be_visible(timeout=45000)
     assert not page.locator("#statistics").evaluate("e=>e.open")
     run_id=page.url.rsplit("/",1)[1]
+    assert page.request.get(origin+f"/api/runs/{run_id}").json()["progress_phase"] is None
     expected=page.request.get(origin+f"/api/runs/{run_id}/result").json()["markdown"]
     assert page.locator("#result-markdown").text_content()==expected
     expect(page.locator("#result-days article")).to_have_count(1)
+    page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"])/"browser-guide-main-chain.png"),full_page=True)
     assert "2026-09-02" in expected and "2026-09-04" in expected
     before=info(page,origin)
     page.locator("#statistics summary").click()
@@ -150,6 +183,27 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     assert not page.evaluate("Object.keys(localStorage).length")
     page.goto(origin+"/history");expect(page.get_by_role("link",name="进入任务")).to_have_count(1)
     page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"])/"browser-history.png"),full_page=True)
+
+
+def assert_active_phase(page,origin,phase,step):
+    try:
+        expect(page.locator(f'[data-step="{step}"][data-state="running"]')).to_be_visible(timeout=45000)
+    except AssertionError:
+        fixture=info(page,origin)
+        print("fixture_phase_metadata="+json.dumps({key:fixture[key] for key in (
+            "fixture_tool_trace","fixture_supplement_target","fixture_research_calls")}))
+        raise
+    run_id=page.url.rsplit("/",1)[1]
+    before=info(page,origin)
+    for _ in range(2):
+        response=page.request.get(origin+f"/api/runs/{run_id}")
+        assert response.status==200
+        view=WebRunView.model_validate_json(response.text(),strict=True)
+        assert view.run.activity=="executing" and view.run.phase is None
+        assert view.progress_phase.value==phase and view.card is None
+    page.wait_for_function("phase => {const item=ctaTestSnapshots.at(-1);return item?.activity==='executing' && item.phase===null && item.progress_phase===phase}",arg=phase)
+    after=info(page,origin)
+    assert (before["provider_calls"],before["map_calls"])==(after["provider_calls"],after["map_calls"])
 
 
 def test_busy_429_low_disk_preserve_input_samples_and_disconnect_never_restarts(page,origin,browser):
@@ -413,3 +467,253 @@ def test_controls_fixture_exclusivity_other_age_zero_polling_generation_and_manu
     assert len(submitted)==2 and submitted[1]["pause_generation"]==2
     assert submitted[1]["user_message"]=="本轮用文字回答，保留原领域处理。"
     assert page.evaluate("Object.keys(localStorage).length") == 0
+
+
+# UI projection fixtures below test the presentation of public DTOs only.
+# The existing main-chain test above still uses the actual M01/M03/M11/M13/M12 and PostgreSQL.
+def ui_projection(run_id, **run_fields):
+    view = {"schema_version": "1.0", "run": {
+        "run_id": run_id, "trace_id": run_id, "created_at": "2026-08-20T00:00:00Z",
+        "finalized_at": None, "lifecycle": "open", "activity": "executing",
+        "phase": "candidate_research", "delivery_status": "in_progress",
+        "terminal_code": None, "pause_generation": None, "cancel_requested": False,
+    } | run_fields, "card": None, "actions": [], "result_available": False,
+        "summary_status": "not_finalized"}
+    if view["run"]["activity"] == "executing":
+        view["progress_phase"], view["run"]["phase"] = view["run"]["phase"], None
+    WebRunView.model_validate_json(json.dumps(view), strict=True)
+    return view
+
+
+def route_projection(page, run_id, view):
+    def respond(route):
+        projection = WebRunView.model_validate_json(json.dumps(view), strict=True)
+        route.fulfill(status=200, content_type="application/json", body=projection.model_dump_json())
+    page.route(f"**/api/runs/{run_id}", respond)
+
+
+def refresh_projection(page):
+    # Dispatch a public snapshot notification; the page then really reads the routed HTTP DTO.
+    page.evaluate("ctaTestStreams[0].dispatchEvent(new MessageEvent('snapshot', {data:'{}'}))")
+
+
+def test_workflow_canvas_tracks_public_phases_research_return_and_reduced_motion(page, origin):
+    capture_sse(page)
+    run_id = "00000000-0000-4000-8000-000000000061"
+    view = ui_projection(run_id)
+    route_projection(page, run_id, view)
+    writes = []
+    page.on("request", lambda request: writes.append(request.url) if request.method == "POST" else None)
+    page.set_viewport_size({"width": 1280, "height": 920})
+    page.goto(origin + f"/tasks/{run_id}")
+    expect(page.locator('[data-step="research"][data-state="running"]')).to_be_visible()
+    page.wait_for_function("() => ctaTestStreams.length === 1")
+    expect(page.locator(".flow-node")).to_have_count(6)
+    assert "确认并补充" not in page.locator("#workflow").inner_text()
+    assert "%" not in page.locator("#workflow").inner_text()
+    widths = page.locator(".flow-node").evaluate_all("nodes=>nodes.map(node=>node.getBoundingClientRect().width)")
+    assert max(widths) - min(widths) < 1
+    assert page.locator(".flow-node").evaluate_all("nodes=>nodes.every(node=>Math.abs(node.getBoundingClientRect().height-88)<1)")
+    assert page.locator(".flow-node").evaluate_all("""nodes=>nodes.every(node=>{
+        const a=node.getBoundingClientRect(),b=node.parentElement.getBoundingClientRect();
+        return Math.abs(a.left+a.width/2-b.left-b.width/2)<1;
+    })""")
+    expect(page.locator("#workflow-paths path")).to_have_count(6)
+    page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"]) / "browser-flow-desktop.png"), full_page=True)
+    for phase, step in [
+        ("requirements", "requirements"), ("hotel_selection", "hotel"),
+        ("candidate_research", "research"), ("itinerary_planning", "planning"),
+        ("validation", "planning"), ("budget_evaluation", "planning"),
+        ("output_formatting", "formatting"), ("itinerary_planning", "planning"),
+        ("candidate_research", "research"),
+    ]:
+        view["progress_phase"] = phase
+        refresh_projection(page)
+        expect(page.locator(f'[data-step="{step}"][data-state="running"]')).to_be_visible()
+        expect(page.locator('.flow-node[data-state="running"]')).to_have_count(1)
+        expect(page.locator(f'[data-step="{step}"]')).to_have_attribute("aria-current", "step")
+    expect(page.locator('[data-step="planning"]')).to_have_attribute("data-state", "pending")
+    page.emulate_media(reduced_motion="reduce")
+    expect(page.locator('[data-step="research"]')).to_have_css("animation-name", "none")
+    expect(page.locator('[data-step="research"] .flow-indicator')).to_have_css("animation-name", "none")
+    page.set_viewport_size({"width": 390, "height": 844})
+    expect(page.locator("#workflow-edges")).to_be_hidden()
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"]) / "browser-flow-mobile.png"), full_page=True)
+    view["progress_phase"] = None
+    refresh_projection(page)
+    expect(page.locator('.flow-node[data-state="running"]')).to_have_count(0)
+    expect(page.locator('.flow-node[data-state="complete"]')).to_have_count(2)
+    expect(page.locator('[data-step="research"]')).to_have_attribute("data-state", "observed")
+    expect(page.locator("#phase-title")).to_have_text("当前阶段暂不可读")
+    assert not writes
+
+
+def test_workflow_wait_recovery_blocked_cancel_and_failed_never_animate_as_running(page, origin):
+    capture_sse(page)
+    run_id = "00000000-0000-4000-8000-000000000062"
+    view = ui_projection(run_id, phase="itinerary_planning")
+    route_projection(page, run_id, view)
+    page.goto(origin + f"/tasks/{run_id}")
+    page.wait_for_function("() => ctaTestStreams.length === 1")
+    for activity, lifecycle, expected, label in [
+        ("awaiting_user", "open", "waiting", "等待你的选择"),
+        ("recovery_required", "open", "stopped", "需要明确恢复"),
+        ("blocked", "blocked", "stopped", "当前任务无法安全继续"),
+        ("incompatible", "blocked", "stopped", "任务版本不兼容"),
+        ("cancelling", "open", "waiting", "正在取消"),
+    ]:
+        view["progress_phase"] = None
+        view["run"]["phase"] = "itinerary_planning"
+        view["run"].update(activity=activity, lifecycle=lifecycle, cancel_requested=activity == "cancelling")
+        refresh_projection(page)
+        expect(page.locator('[data-step="planning"]')).to_have_attribute("data-state", expected)
+        expect(page.locator("#phase-badge")).to_have_text(label)
+        expect(page.locator('.flow-node[data-state="running"]')).to_have_count(0)
+        expect(page.locator('[data-step="planning"] .flow-indicator')).to_have_css("animation-name", "none")
+        expect(page.locator('[data-step="delivered"]')).to_have_attribute("data-state", "pending")
+        if activity == "awaiting_user":
+            expect(page.locator("#phase-description")).to_contain_text("暂时没有可用的选项")
+    view["run"].update(activity="terminal", lifecycle="closed", delivery_status="cancelled",
+                       terminal_code="cancelled_by_user", finalized_at="2026-08-20T00:01:00Z")
+    refresh_projection(page)
+    expect(page.locator("#task-status")).to_have_text("已取消")
+    expect(page.locator("#phase-description")).to_contain_text("当前没有可交付的完整攻略")
+    expect(page.locator('[data-step="planning"]')).to_have_attribute("data-state", "stopped")
+    expect(page.locator('[data-step="planning"] .flow-node-status')).to_have_text("已停止")
+    expect(page.locator("#result")).to_be_hidden()
+    view["run"].update(delivery_status="failed", terminal_code="workflow_provider_failed", cancel_requested=False)
+    page.reload()
+    expect(page.locator("#task-status")).to_contain_text("规划失败")
+    expect(page.locator('[data-step="delivered"]')).to_have_attribute("data-state", "pending")
+    expect(page.locator('.flow-node[data-state="running"]')).to_have_count(0)
+
+
+def test_workflow_failed_read_retains_last_observation_stops_motion_then_recovers(page, origin):
+    capture_sse(page)
+    run_id = "00000000-0000-4000-8000-000000000063"
+    view = ui_projection(run_id)
+    outage = [False]
+    def respond(route):
+        if outage[0]:
+            route.fulfill(status=503, content_type="application/json",
+                          body=json.dumps({"schema_version": "1.0", "code": "dependency_unavailable",
+                                           "message": "服务暂不可用，请稍后查询",
+                                           "request_id": None, "retry_after_seconds": None}))
+        else:
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(view))
+    page.route(f"**/api/runs/{run_id}", respond)
+    page.goto(origin + f"/tasks/{run_id}")
+    page.wait_for_function("() => ctaTestStreams.length === 1")
+    expect(page.locator('[data-step="research"]')).to_have_attribute("data-state", "running")
+    outage[0] = True
+    refresh_projection(page)
+    expect(page.locator("#workflow")).to_have_attribute("data-connection", "unavailable")
+    expect(page.locator("#phase-description")).to_contain_text("最近一次确认的阶段")
+    expect(page.locator('[data-step="research"]')).to_have_css("animation-name", "none")
+    expect(page.locator('[data-step="research"] .flow-indicator')).to_have_css("animation-name", "none")
+    outage[0] = False
+    view["progress_phase"] = "itinerary_planning"
+    refresh_projection(page)
+    expect(page.locator("#workflow")).to_have_attribute("data-connection", "available")
+    expect(page.locator('[data-step="planning"]')).to_have_attribute("data-state", "running")
+
+
+def test_result_readable_overview_days_transit_sources_safe_dom_and_original_download(page, origin):
+    from app.web_application import WebResultView
+    run_id = "00000000-0000-4000-8000-000000000064"
+    view = ui_projection(run_id, activity="terminal", lifecycle="closed", phase="output_formatting",
+                         delivery_status="degraded", terminal_code="workflow_degraded",
+                         finalized_at="2026-08-20T00:01:00Z")
+    view["result_available"] = True
+    route_projection(page, run_id, view)
+    header = "# 杭州旅行攻略\n\n- 游览日期：2026-09-03—2026-09-04；共 2 天。\n\n## 已确认酒店\n\n- 西湖酒店\\#1\\/A；地址：湖滨路 2\\/3 号。\n- 房态与价格未核验。"
+    day1 = ("## 第 1 天｜2026-09-03｜西湖\\#周边\n\n- 天气未获取。\n\n### 主行程\n\n"
+            "- 2026-09-03 09:00—2026-09-03 09:30（北京时间）｜交通：酒店 → 西湖；公共交通；费用未核验。〔来源 1〕\n\n"
+            "  乘车顺序（班次与实时运营未核验）：\n\n  1. 在湖滨站乘车。\n  2. 在西湖站下车。\n\n"
+            "- 2026-09-03 10:00—2026-09-03 11:00（北京时间）｜景点：湖边；营业时间未核验，请出行前确认。\n\n"
+            "| 时间 | 安排 |\n| --- | --- |\n| 12:00 | 午餐\\|备选 |\n\n"
+            "- **保留提醒**；路径 C:\\\\旅行\\/计划。\n\n"
+            "&lt;img src=x onerror=&quot;globalThis.ctaXss=1&quot;&gt;\n\n"
+            "[危险链接](javascript:alert(1))；[地点来源](https://example.com/place)\n")
+    day2 = "## 第 2 天｜2026-09-04｜返程\n\n- 日类型：纯交通日。\n- 本日未安排游览。"
+    footer = "## 酒店到返程枢纽\n\n- 返程：2026-09-04 18:00；请预留交通时间。\n\n## 费用核验状态\n\n- 住宿：未核验。\n\n## 来源清单\n\n- 〔来源 1〕百度地图｜获取时间：2026-08-20；查询时快照。\n\n## 出行前复核\n\n- 部分营业信息不足，出行前请复核。"
+    # Match M12's exact assembly, including each day fragment's original bytes.
+    day1 = day1.rstrip("\n")
+    original = header + "\n\n" + day1 + "\n\n" + day2 + "\n\n" + footer + "\n"
+    result = WebResultView.model_validate_json(json.dumps({
+        "schema_version": "1.0", "result_schema_version": "2.0", "markdown": original,
+        "days": [{"schema_version": "1.0", "ordinal": 1, "markdown": day1},
+                 {"schema_version": "1.0", "ordinal": 2, "markdown": day2}],
+        "delivery_status": "degraded", "terminal_code": "workflow_degraded",
+    }), strict=True)
+    page.route(f"**/api/runs/{run_id}/result", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=result.model_dump_json()))
+    page.set_viewport_size({"width": 1280, "height": 920})
+    page.goto(origin + f"/tasks/{run_id}")
+    expect(page.locator("#result")).to_be_visible()
+    expect(page.locator('.flow-node[data-state="complete"]')).to_have_count(6)
+    expect(page.locator("#delivery-note")).to_contain_text("部分信息不足")
+    expect(page.locator("#result-overview")).to_contain_text("西湖酒店#1/A")
+    expect(page.locator("#result-overview")).to_contain_text("2/3 号")
+    expect(page.locator("#result-days article")).to_have_count(2)
+    expect(page.locator("#result-day-nav a")).to_have_count(2)
+    expect(page.locator("#itinerary-day-1 .timeline-time")).to_have_count(2)
+    expect(page.locator("#itinerary-day-1 ol")).to_contain_text("在西湖站下车")
+    expect(page.locator("#itinerary-day-1 td")).to_contain_text(["12:00", "午餐|备选"])
+    expect(page.locator("#itinerary-day-1 strong")).to_have_text("保留提醒")
+    expect(page.locator("#itinerary-day-2")).to_contain_text("本日未安排游览")
+    expect(page.locator("#result-notes")).to_contain_text("返程：2026-09-04 18:00")
+    expect(page.locator("#result-notes")).to_contain_text("〔来源 1〕")
+    expect(page.locator("#result-notes")).to_contain_text("部分营业信息不足")
+    assert page.locator("#result img, #result script").count() == 0
+    assert page.evaluate("globalThis.ctaXss") is None
+    assert page.locator('#result a[href^="javascript:"]').count() == 0
+    expect(page.get_by_role("link", name="地点来源", exact=True)).to_have_attribute("rel", "noopener noreferrer")
+    assert not page.locator(".raw-result").evaluate("node=>node.open")
+    assert page.locator("#result-markdown").text_content() == original
+    page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"]) / "browser-guide-desktop.png"), full_page=True)
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"]) / "browser-guide-mobile.png"), full_page=True)
+    with page.expect_download() as download:
+        page.locator("#download-result").click()
+    assert Path(download.value.path()).read_text(encoding="utf-8") == original
+    expect(page.locator("#statistics")).not_to_have_attribute("open", "")
+
+
+def test_result_delivery_only_completes_after_successful_read_and_has_lossless_fallback(page, origin):
+    run_id = "00000000-0000-4000-8000-000000000065"
+    view = ui_projection(run_id, activity="terminal", lifecycle="closed", phase="output_formatting",
+                         delivery_status="demo_ready", terminal_code="workflow_completed",
+                         finalized_at="2026-08-20T00:01:00Z")
+    view["result_available"] = True
+    route_projection(page, run_id, view)
+    available = [False]
+    original = "# 完整攻略\n\n总览与全部提醒保留。费用未核验。\n"
+    def result(route):
+        if not available[0]:
+            route.fulfill(status=503, content_type="application/json",
+                          body=json.dumps({"schema_version": "1.0", "code": "dependency_unavailable",
+                                           "message": "服务暂不可用，请稍后查询",
+                                           "request_id": None, "retry_after_seconds": None}))
+        else:
+            # A deliberately mismatched DOM fixture, not a valid M12 business Artifact.
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "schema_version": "1.0", "result_schema_version": "2.0", "markdown": original,
+                "days": [{"schema_version": "1.0", "ordinal": 1, "markdown": "不匹配的日片段"}],
+                "delivery_status": "demo_ready", "terminal_code": "workflow_completed",
+            }))
+    page.route(f"**/api/runs/{run_id}/result", result)
+    page.goto(origin + f"/tasks/{run_id}")
+    expect(page.locator("#workflow")).to_have_attribute("data-connection", "unavailable")
+    expect(page.locator('[data-step="delivered"]')).to_have_attribute("data-state", "waiting")
+    expect(page.locator('.flow-node[data-state="complete"]')).to_have_count(5)
+    expect(page.locator("#result")).to_be_hidden()
+    available[0] = True
+    expect(page.locator("#result")).to_be_visible(timeout=15000)
+    expect(page.locator('.flow-node[data-state="complete"]')).to_have_count(6)
+    expect(page.locator("#result-overview")).to_contain_text("总览与全部提醒保留")
+    expect(page.locator("#result-day-nav")).to_be_hidden()
+    expect(page.locator("#result-days article")).to_have_count(0)
+    assert page.locator("#result-markdown").text_content() == original

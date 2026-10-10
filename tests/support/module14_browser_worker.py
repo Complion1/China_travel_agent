@@ -38,6 +38,74 @@ async def serve(port):
         pause_key_file=Path(os.environ["MODULE14_EVIDENCE_DIR"])/"isolated-pause-key.json")
     provider,maps=await offline_boundaries()
     patch=pytest.MonkeyPatch()
+    # Test-only external-boundary barriers hold actual graph nodes in flight.
+    # The production observer and public DTO are never substituted.
+    phase_blocks = {}
+    phases = {"requirements", "hotel_selection", "candidate_research", "itinerary_planning", "output_formatting"}
+    async def phase_wait(phase):
+        event = phase_blocks.get(phase)
+        if event is not None: await event.wait()
+    from app.llm_runtime import ModelRole
+    from app.result_formatting import ResultFormattingService
+    original_json,original_tools,original_continue = provider.ainvoke_json,provider.ainvoke_tools,provider.ainvoke_tool_continuation
+    original_search,original_details,original_prepare = maps.search_places,maps.get_place_details,ResultFormattingService.prepare
+    tool_trace = []
+    supplement_target = None
+    def observe_tools(kind, response):
+        # Bounded fixture metadata only: no prompts, arguments or response bodies.
+        tool_trace.append({"kind":kind,"supplement":provider.planning.supplement,
+            "names":[call[1] for call in response.tool_calls]})
+        del tool_trace[:-16]
+        return response
+    async def json_call(request):
+        await phase_wait("requirements" if request.profile.role is ModelRole.REQUIREMENT_EXTRACTION else "candidate_research")
+        return await original_json(request)
+    async def tool_call(request):
+        nonlocal supplement_target
+        await phase_wait("itinerary_planning")
+        response = await original_tools(request)
+        if response.tool_calls and response.tool_calls[0][1] == "request_candidate_supplement":
+            # Observe the actual fixture target without changing model arguments.
+            encoded = request.user.partition("\nBEGIN_TYPED_PLANNING_STATE\n")[2].partition("\nEND_TYPED_PLANNING_STATE")[0]
+            candidates = [candidate for observation in json.loads(encoded)["candidates"] for candidate in observation["candidates"]]
+            handle=response.tool_calls[0][2]["proposed_gaps"][0]["target"]["candidate_handles"][0]
+            selected=next(candidate for candidate in candidates if candidate["candidate_handle"]==handle)
+            supplement_target={"details_status":selected["details_status"],
+                "initial_details_success_count":sum(candidate["details_status"]=="success" for candidate in candidates)}
+        return observe_tools("initial",response)
+    async def continuation(request):
+        await phase_wait("itinerary_planning")
+        return observe_tools("continuation",await original_continue(request))
+    async def search(request):
+        if request.query in {"酒店", "宾馆", "住宿"} or request.query.endswith(" 酒店"):
+            await phase_wait("hotel_selection")
+        return await original_search(request)
+    async def details(request):
+        await phase_wait("candidate_research")
+        response=await original_details(request)
+        if provider.planning.supplement:
+            from app.baidu_map import PlaceDetailsSuccess,PlaceDetailsNoResult,PlaceDetails,BaiduCoordinate
+            assert type(response) is PlaceDetailsSuccess
+            if request.uid in {"a1","a2","a3","a4","a5","r3"}:
+                return PlaceDetailsNoResult(provenance=response.provenance)
+            # This scenario requests details in supplemental order. Match the
+            # typed external reply to that request instead of a fixed queue UID.
+            ordinal=int(request.uid[1:])
+            return PlaceDetailsSuccess(provenance=response.provenance,details=PlaceDetails(uid=request.uid,
+                name=request.uid,address=f"{request.uid} Road",
+                coordinate=BaiduCoordinate(latitude=30.1+ordinal/1000,longitude=120.1+ordinal/1000),
+                category="museum" if request.uid.startswith("a") else "restaurant",brand=None,telephone=None,
+                rating=4.0,business_hours=("10:00-20:00",)))
+        return response
+    async def prepare(instance, request):
+        await phase_wait("output_formatting")
+        return await original_prepare(instance, request)
+    patch.setattr(provider,"ainvoke_json",json_call)
+    patch.setattr(provider,"ainvoke_tools",tool_call)
+    patch.setattr(provider,"ainvoke_tool_continuation",continuation)
+    patch.setattr(maps,"search_places",search)
+    patch.setattr(maps,"get_place_details",details)
+    patch.setattr(ResultFormattingService,"prepare",prepare)
     disk=[20*1024**3]
     clock=FixedClock(datetime(2026,8,20,tzinfo=timezone.utc))
     factory=offline_factory(monkeypatch=patch,settings=settings,pg_settings=pg,provider=provider,maps=maps,disk_probe=lambda:disk[0],clock=clock)
@@ -62,11 +130,38 @@ async def serve(port):
     @app.get("/__test/info")
     async def info():
         return {"provider_calls":provider.calls,"map_calls":maps.calls,"full_text":provider.full_text,
-                "offline":True,"sse_count":len(app.state.streams.entries)}
+                "offline":True,"sse_count":len(app.state.streams.entries),"fixture_tool_trace":tool_trace,
+                "fixture_supplement_target":supplement_target,"fixture_research_calls":provider.research.call_count}
     @app.post("/__test/control")
     async def control(request:Request):
         payload=await request.json()
-        if set(payload)-{"block","release","disk","fail","fail_session","advance_seconds"}: raise RuntimeError("unknown fixture control")
+        if set(payload)-{"block","release","disk","fail","fail_session","advance_seconds","phase_blocks","phase_release","supplement"}: raise RuntimeError("unknown fixture control")
+        if "phase_release" in payload:
+            phase = payload["phase_release"]
+            if phase not in phases: raise RuntimeError("invalid phase barrier")
+            event = phase_blocks.pop(phase,None)
+            if event is not None: event.set()
+        if "phase_blocks" in payload:
+            values = payload["phase_blocks"]
+            if type(values) is not list or len(values)>5 or any(value not in phases for value in values):
+                raise RuntimeError("invalid phase barriers")
+            for phase in values: phase_blocks.setdefault(phase,asyncio.Event())
+        if "supplement" in payload:
+            if type(payload["supplement"]) is not bool: raise RuntimeError("invalid supplement fixture")
+            provider.planning.supplement = payload["supplement"]
+            if payload["supplement"]:
+                from app.candidate_research import NoUsefulActionProposed,ProposedActionBatch,ProposedDetailsAction
+                from tests.support.candidate_research_fakes import structured
+                def no_progress_details(_):
+                    objectives=json.loads(provider.research.prompts[-1].user_text)["objectives"]
+                    objective=next(item for item in objectives if item["kind"]=="details_maturity")
+                    return structured(ProposedActionBatch(actions=(ProposedDetailsAction(
+                        ordinal=0,objective_id=objective["objective_id"],uid="r3"),)))
+                # Retain the three visit details and their original evidence
+                # positions, leave r2 pending, then make one real empty query.
+                provider.research.responses[4:4]=[no_progress_details,provider.research.responses[3],
+                    structured(NoUsefulActionProposed(reason_code="prior_no_progress"))]
+                maps.research.responses.append(maps.research.responses[-1])
         if "advance_seconds" in payload:
             value=payload["advance_seconds"]
             if type(value) is not int or not 0<=value<=172800: raise RuntimeError("invalid fixture clock")

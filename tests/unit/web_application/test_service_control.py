@@ -150,3 +150,58 @@ async def test_noncooperative_preparation_blocks_close_until_stopped():
     assert not caller.done() and not service._closed and service._closing
     release.set(); await caller
     await service.close()
+@pytest.mark.asyncio
+async def test_progress_projection_is_owner_and_current_execution_bound_without_state_reads():
+    from datetime import datetime, timezone
+    from app.durable_execution import DurableRunView
+    from app.workflow_contracts import WorkflowPhase
+    from tests.requirement_subgraph_fakes import make_initial_state
+    diagnostic = diagnostics()
+    state = make_initial_state()
+    view = DurableRunView(run_id=state.run_id, trace_id=state.trace_id, created_at=datetime.now(timezone.utc),
+        finalized_at=None, lifecycle="open", activity="executing", phase=None, delivery_status=None,
+        terminal_code=None, pause_generation=0, cancel_requested=False)
+    async def owns(**kwargs):
+        if kwargs["owner"] != "owner": raise DecisionError("not_found")
+    async def latest(**kwargs): return view
+    async def forbidden(**kwargs): raise AssertionError("executing get_state is forbidden")
+    deps = WebApplicationDependencies(artifacts=None, durable=SimpleNamespace(get_run=latest,get_state=forbidden),
+        definition=None, diagnostics=diagnostic, extraction_sink=RunBoundExtractionInvocationSink(diagnostics=diagnostic),
+        result_service=None, store=SimpleNamespace(owns=owns), clock=FixedClock(), disk_probe=lambda:10**10)
+    service = WebApplicationService(settings=web_settings(), dependencies=deps)
+    with diagnostic.operation(run_id=state.run_id, trace_id=state.trace_id, turn_id=None, kind="initial"):
+        diagnostic._observe_phase(state.model_copy(update={"phase": WorkflowPhase.CANDIDATE_RESEARCH}))
+        assert (await service.get_run(owner="owner", run_id=state.run_id)).progress_phase is None
+        service._try_slot(state.run_id, state.trace_id)
+        projected = await service.get_run(owner="owner", run_id=state.run_id)
+        assert projected.run == view and projected.run.phase is None
+        assert projected.progress_phase is WorkflowPhase.CANDIDATE_RESEARCH
+        with pytest.raises(DecisionError): await service.get_run(owner="foreign", run_id=state.run_id)
+        service._slot_trace = uuid4()
+        assert (await service.get_run(owner="owner", run_id=state.run_id)).progress_phase is None
+        service._slot_trace = state.trace_id
+        for activity in ("awaiting_user", "recovery_required", "cancelling", "blocked", "incompatible"):
+            paused = view.model_copy(update={"activity":activity})
+            assert (await service._project(view=paused, details=False)).progress_phase is None
+        assert (await service._project(view=view.model_copy(update={"cancel_requested":True}), details=False)).progress_phase is None
+        service._release_slot(state.run_id, asyncio.current_task())
+    assert (await service.get_run(owner="owner", run_id=state.run_id)).progress_phase is None
+    await service.close()
+
+
+@pytest.mark.parametrize("changes", [
+    {"activity":"awaiting_user"}, {"activity":"recovery_required"}, {"activity":"cancelling"},
+    {"activity":"terminal", "lifecycle":"closed"}, {"activity":"blocked", "lifecycle":"blocked"},
+    {"cancel_requested":True}, {"phase":"candidate_research"},
+])
+def test_progress_dto_rejects_nonactive_observation(changes):
+    import json
+    from app.web_application import WebRunView
+    from pydantic import ValidationError
+    view = {"schema_version":"1.0", "run":{
+        "run_id":str(uuid4()),"trace_id":str(uuid4()),"created_at":"2026-08-20T00:00:00Z",
+        "finalized_at":None,"lifecycle":"open","activity":"executing","phase":None,"delivery_status":None,
+        "terminal_code":None,"pause_generation":0,"cancel_requested":False} | changes,
+        "card":None,"actions":[],"result_available":False,"summary_status":"not_finalized",
+        "progress_phase":"candidate_research"}
+    with pytest.raises(ValidationError): WebRunView.model_validate_json(json.dumps(view),strict=True)

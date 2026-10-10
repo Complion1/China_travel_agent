@@ -1,5 +1,6 @@
 """Production graph composition over existing module capabilities."""
 from uuid import UUID
+from inspect import isawaitable
 
 from langchain_core.runnables import RunnableLambda
 
@@ -17,9 +18,10 @@ def requirement_node(dependencies, caps):
     )
     caps.register_requirement_subgraph(node_name="requirements", driver=driver)
 
-    def accepted(state):
+    async def accepted(state):
         # M11 has already verified and entered the accepted operation scope.
         dependencies.diagnostics._resume_accepted(state)
+        dependencies.diagnostics._observe_phase(state)
         return state
 
     return RunnableLambda(accepted) | driver.graph
@@ -91,15 +93,21 @@ def create_demo_workflow_definition(*, dependencies):
     def build(caps):
         nodes = Nodes(dependencies, caps, services.instances)
         graph = StateGraph(TravelSessionState)
+        def observed(node):
+            async def enter(state):
+                dependencies.diagnostics._observe_phase(state)
+                result = node(state)
+                return await result if isawaitable(result) else result
+            return enter
         graph.add_node("requirements", requirement_node(dependencies, caps))
         for name in ("after_requirements", "hotel_discover", "hotel_wait", "hotel_select", "research", "planning", "terminal"):
-            graph.add_node(name, getattr(nodes, name))
+            graph.add_node(name, observed(getattr(nodes, name)))
         for phase, destination in ((hotel, "hotel_discover"), (research, "research"), (planning, "planning"), (output, "publish_day_1")):
             name = {hotel: "prepare_hotel", research: "prepare_research", planning: "prepare_planning", output: "prepare_output"}[phase]
-            graph.add_node(name, nodes.prepare(phase, destination))
+            graph.add_node(name, observed(nodes.prepare(phase, destination)))
         for day in range(1, 61):
-            graph.add_node(f"publish_day_{day}", day_node(nodes, day))
-        graph.add_node("publish_index", index_node(nodes))
+            graph.add_node(f"publish_day_{day}", observed(day_node(nodes, day)))
+        graph.add_node("publish_index", observed(index_node(nodes)))
         graph.add_edge(START, "requirements")
         graph.add_edge("requirements", "after_requirements")
         return graph

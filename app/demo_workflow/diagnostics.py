@@ -58,6 +58,11 @@ class _History:
     summary: object = None
 
 
+@dataclass
+class _PhaseScope:
+    active: bool = True
+
+
 class DemoDiagnostics:
     def __init__(self, *, sink, clock, monotonic_clock, uuid_provider, interaction_secrets=()):
         self._sink, self._clock, self._monotonic, self._uuid = sink, clock, monotonic_clock, uuid_provider
@@ -67,6 +72,7 @@ class DemoDiagnostics:
         self._interaction_secrets = tuple(interaction_secrets)
         self._interaction_scopes = {}
         self._active_operations = {}
+        self._active_phases = {}
 
     def _bind_interactions(self, recorder):
         self._interaction_recorder = recorder
@@ -93,18 +99,45 @@ class DemoDiagnostics:
         history = self._histories.get(run_id)
         if history is not None and history.trace_id != trace_id:
             raise DemoWorkflowUsageError()
-        token = self._operation.set((run_id, trace_id, turn_id, kind, set()))
+        observed = self._active_phases.get(run_id)
+        if observed is not None and observed[0] != trace_id:
+            raise DemoWorkflowUsageError()
+        scope = _PhaseScope()
+        token = self._operation.set((run_id, trace_id, turn_id, kind, set(), scope))
         self._active_operations[run_id] = self._active_operations.get(run_id, 0) + 1
+        self._active_phases.setdefault(run_id, (trace_id, None))
         try:
             with self._interaction_scope(run_id, trace_id):
                 yield
         finally:
+            scope.active = False
             self._operation.reset(token)
             remaining = self._active_operations[run_id] - 1
             if remaining:
                 self._active_operations[run_id] = remaining
             else:
                 self._active_operations.pop(run_id)
+                self._active_phases.pop(run_id, None)
+
+    def get_active_phase(self, *, run_id: UUID, trace_id: UUID) -> WorkflowPhase | None:
+        """Read one ephemeral phase; this is neither state nor durable progress."""
+        if type(run_id) is not UUID or type(trace_id) is not UUID:
+            raise DemoWorkflowUsageError()
+        observed = self._active_phases.get(run_id)
+        if not self._active_operations.get(run_id) or observed is None or observed[0] != trace_id:
+            return None
+        return observed[1]
+
+    def _observe_phase(self, state):
+        context = self._operation.get()
+        # Direct M11 users need no web observation scope. Expired inherited
+        # contexts must not recreate a marker after the owning execution exits.
+        if context is None or not context[5].active or not self._active_operations.get(context[0]):
+            return
+        if (state.run_id != context[0] or state.trace_id != context[1]
+                or type(state.phase) is not WorkflowPhase):
+            raise DemoWorkflowUsageError()
+        self._active_phases[state.run_id] = (state.trace_id, state.phase)
 
     def release_run(self, *, run_id: UUID) -> None:
         """Release completed observations; the caller owns terminal eligibility."""

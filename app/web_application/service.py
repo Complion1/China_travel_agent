@@ -659,8 +659,13 @@ class WebApplicationService:
             card = None
         status = (await self._summary_view(view)).status
         input_issues = await self._input_issues(view) if details else ()
+        progress = None
+        if (view.lifecycle == "open" and view.activity == "executing" and not view.cancel_requested
+                and view.phase is None and self._slot_run == view.run_id and self._slot_trace == view.trace_id
+                and self._slot_task is not None and not self._slot_task.done()):
+            progress = self._deps.diagnostics.get_active_phase(run_id=view.run_id, trace_id=view.trace_id)
         return WebRunView(schema_version="1.0", run=view, card=card, actions=tuple(actions),
-            result_available=available, summary_status=status, input_issues=input_issues)
+            result_available=available, summary_status=status, input_issues=input_issues, progress_phase=progress)
 
     async def _input_issues(self, view):
         if not (view.lifecycle == "closed" and view.activity == "terminal"

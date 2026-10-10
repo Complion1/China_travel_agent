@@ -502,3 +502,66 @@ async def test_actual_m12_rejects_corrupt_index_or_day_without_partial_delivery(
         finally: service._deps=actual
         assert await service.read_result(owner=owner,run_id=receipt.run_id) == result
         assert (provider.calls,maps.calls) == calls
+@pytest.mark.asyncio
+async def test_real_executing_phase_is_ephemeral_owner_safe_and_reads_do_not_run_graph(pg_settings,monkeypatch):
+    import httpx
+    from app.web_application import create_web_application,WebRunView
+    from app.durable_execution import DurableExecutionStateError
+    from app.workflow_contracts import WorkflowPhase
+    async with workflow_context(pg_settings,monkeypatch) as (service,owner,cookie,provider,maps,_,factory):
+        owner_loop=asyncio.get_running_loop()
+        original_observe=service._deps.diagnostics._observe_phase
+        def observe_on_owner_loop(state):
+            assert asyncio.get_running_loop() is owner_loop
+            original_observe(state)
+        monkeypatch.setattr(service._deps.diagnostics,"_observe_phase",observe_on_owner_loop)
+        provider.block=True
+        provider.entered.clear();provider.release.clear()
+        receipt=await service.start(owner=owner,request=WebStartRequest(schema_version="1.0",request_id=uuid4(),
+            user_message=provider.full_text),client_ip="192.0.2.21")
+        await asyncio.wait_for(provider.entered.wait(),10)
+        # The initial call has not produced a checkpoint pointer yet. M11
+        # rejects that read as StateError before its active-lease Busy guard.
+        with pytest.raises(DurableExecutionStateError):
+            await service._deps.durable.get_state(run_id=receipt.run_id)
+        @asynccontextmanager
+        async def borrowed(): yield service
+        app=create_web_application(settings=service._settings,service_factory=borrowed)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app,client=("192.0.2.21",1200)),
+                    base_url="http://127.0.0.1:8080",cookies={"cta_visitor":cookie}) as client:
+                before=(provider.calls,maps.calls)
+                for _ in range(3):
+                    response=await client.get(f"/api/runs/{receipt.run_id}")
+                    assert response.status_code==200
+                    view=WebRunView.model_validate_json(response.content,strict=True)
+                    assert view.run.activity=="executing" and view.run.phase is None and view.card is None
+                    assert view.progress_phase is WorkflowPhase.REQUIREMENTS
+                with service._snapshot_scope():
+                    snapshot=await service.get_run(owner=owner,run_id=receipt.run_id)
+                assert snapshot.progress_phase is WorkflowPhase.REQUIREMENTS and snapshot.card is None
+                assert (provider.calls,maps.calls)==before
+                client.cookies.clear();await client.get("/api/session")
+                assert (await client.get(f"/api/runs/{receipt.run_id}")).status_code==404
+                assert (provider.calls,maps.calls)==before
+        # Complete the observed operation to its real, verified pause. M11
+        # cannot promise cancelled_by_user before an initial checkpoint exists.
+        provider.release.set();provider.block=False
+        paused=await wait_for_view(service,owner,receipt.run_id,activity="awaiting_user")
+        assert paused.card.kind=="confirmation" and paused.progress_phase is None
+        assert service._deps.diagnostics.get_active_phase(run_id=receipt.run_id,trace_id=paused.run.trace_id) is None
+        before=(provider.calls,maps.calls)
+        # This borrowed API lifespan did not close the service. Public cancel
+        # must hide the marker and safely finish from the verified checkpoint.
+        await service.cancel(owner=owner,run_id=receipt.run_id,
+            request=WebControlRequest(schema_version="1.0",request_id=uuid4()))
+        cancelling=await service.get_run(owner=owner,run_id=receipt.run_id)
+        assert cancelling.progress_phase is None and cancelling.run.cancel_requested
+        terminal=await wait_for_view(service,owner,receipt.run_id,activity="terminal")
+        assert terminal.progress_phase is None and terminal.run.terminal_code=="cancelled_by_user"
+        assert service._deps.diagnostics.get_active_phase(run_id=receipt.run_id,trace_id=terminal.run.trace_id) is None
+        assert (provider.calls,maps.calls)==before
+    async with factory() as reopened:
+        old_owner=await reopened._authenticate(cookie=cookie)
+        assert (await reopened.get_run(owner=old_owner,run_id=receipt.run_id)).progress_phase is None
+        assert (provider.calls,maps.calls)==before
