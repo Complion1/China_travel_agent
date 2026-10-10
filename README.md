@@ -1,20 +1,68 @@
 # China Travel Agent
 
-中国境内旅游攻略 Agent，当前功能分支已提供 FastAPI 和原生网页入口：需求澄清、确认、人工选择酒店、完整攻略、我的任务及运行统计。本机浏览器离线资格使用真实业务主图与 PostgreSQL，模型和地图为明确标注的受控替身；真实供应商网页验收留 M15。
+中国境内旅游攻略 Agent，提供 FastAPI 和原生网页入口：需求澄清、确认、人工选择酒店、完整攻略、我的任务及运行统计。2026-10-10 已在腾讯云完成一个真实 DeepSeek／百度地图网页场景，以及同进程暂停续接和终态重启读回；实际范围与收据见 [M15 实施状态](docs/IMPLEMENTATION_STATUS.md#m15-云端部署与单场景交付2026-10-10)。
 
 “补充旅行需求”按本轮缺失信息显示表单：兴趣多选、节奏单选、日期时间与数量控件，房型及限制提供选项，特殊情况可填写其他说明。选项不预选；儿童人数确定后显示对应年龄；自动读取任务进度时保留未提交选择。提交后仍经过原需求校验和完整需求确认。最新澄清交互维护资格与双审状态见[实施状态](docs/IMPLEMENTATION_STATUS.md)。
 
-本次真实网页测试发现，抽取保留“行动限制：无”整行时，派生规则误显示需要行动辅助；已作最小修复，保留原约束文本及证据，只准确识别明确否定。修复后的离线资格及三个真实 API 场景结果以[实施状态](docs/IMPLEMENTATION_STATUS.md)为准，真实网页测试与完整 M15、云端及公网资格分别记录。
+2026-10-06 的真实网页测试发现，抽取保留“行动限制：无”整行时，派生规则误显示需要行动辅助；随后已作最小修复，保留原约束文本及证据。当前否定识别仍有表达范围限制，建议明确填写“行动限制：无”“饮食禁忌：无”，并核对需求确认页。历史修复与本次 M15 云端单场景分别记录在[实施状态](docs/IMPLEMENTATION_STATUS.md)。
 
-**快速体验链接：待发布。** 先阅读[完整公开模拟样例](app/web_application/samples/demo_trip.md)，或按[本机启动步骤](#m14-本机启动)复现。简历只需提供本 GitHub 仓库链接；取得单独部署授权并通过公网验收后，在这里填写实际体验链接。
+**快速体验：[开始旅行规划](http://203.0.113.10:8080)。** 也可查看[公开模拟样例](http://203.0.113.10:8080/samples)，或按[本机启动步骤](#m14-本机启动)复现。云端使用 HTTP；域名和 HTTPS 留待后续部署。首次使用请核对日期，按页面完成澄清、需求确认和酒店选择。
 
-匿名身份可查看当前浏览器的历史任务，Cookie 固定有效 30 天。全站 200 新任务/日、每访客 20/日、每 IP 5/小时，同时执行 1 个任务且无队列；最终运行摘要同库保存后释放完整事件内存。M14 初始实现已进入本地 `main`（`b3438ca`），当前源码还包含通用工具参数修复、枢纽澄清维护及 M08/M09 额度调整。本轮已获提交并本地合并授权；逐阶段双审、验证和整合状态见[实施状态](docs/IMPLEMENTATION_STATUS.md)，网页规范见[M14设计](docs/14_web_application.md)与[执行规范](docs/14_web_application_vibe_coding.md)。
+匿名身份可查看当前浏览器的历史任务，Cookie 固定有效 30 天。全站 200 新任务/日、每访客 20/日、每 IP 5/小时，同时执行 1 个任务且无队列；最终运行摘要同库保存后释放完整事件内存。M14 初始实现已进入本地 `main`（`b3438ca`），当前源码还包含通用工具参数修复、枢纽澄清维护及 M08/M09 额度调整。2026-10-09 的维护代码已获授权提交并本地整合；本次 M15 不执行 Git 提交、push 或 PR。逐阶段验证见[实施状态](docs/IMPLEMENTATION_STATUS.md)，网页规范见[M14设计](docs/14_web_application.md)与[执行规范](docs/14_web_application_vibe_coding.md)。
 
-规划工具参数的缺失、类型、枚举、额外字段、范围/数量及非法 JSON 使用统一严格校验。出现参数错误时整批不执行，由模型重新生成；正常规划仍最多 17 次，另有同一 run 共享的 2 次格式修正储备，总计 19 次。补研返回不重置额度，修正后仍须通过行程业务校验。两次修正后仍不合格会停止。设计与实施入口见[M09 §26](docs/09_itinerary_planning_loop.md#26-通用参数修正与共享储备2026-10-06用户已批准)、[执行规范 §30](docs/09_itinerary_planning_loop_vibe_coding.md#30-通用参数修复实施入口2026-10-06用户已批准)，实际离线、数据库、浏览器门禁和独立审查见[实施状态](docs/IMPLEMENTATION_STATUS.md)。本轮新真实供应商资格尚未运行；本机18080已按此前更新授权更换为经过离线验证的128K镜像。
+规划工具参数的缺失、类型、枚举、额外字段、范围/数量及非法 JSON 使用统一严格校验。出现参数错误时整批不执行，由模型重新生成；正常规划仍最多 17 次，另有同一 run 共享的 2 次格式修正储备，总计 19 次。补研返回不重置额度，修正后仍须通过行程业务校验。两次修正后仍不合格会停止。设计与实施入口见[M09 §26](docs/09_itinerary_planning_loop.md#26-通用参数修正与共享储备2026-10-06用户已批准)、[执行规范 §30](docs/09_itinerary_planning_loop_vibe_coding.md#30-通用参数修复实施入口2026-10-06用户已批准)，实际离线、数据库、浏览器门禁和独立审查见[实施状态](docs/IMPLEMENTATION_STATUS.md)。此前本机18080已获授权更换为经过离线验证的128K镜像；本次 M15 真实云场景采用当前源码。
 
-M08 候选研究的固定生成上限已按 2026-10-07 批准调整为 131,072（128K），Action 和 Observation Judgment 共用；high、120 秒读取超时及原调用预算保持不变。定向、M02/M08 和全项目离线回归结果见[实施状态](docs/IMPLEMENTATION_STATUS.md)。本机18080已在用户授权后更新，运行中Profile实查为131,072，首页、就绪接口及JS/CSS均200，原数据库、卷与暂停凭证保留；访问 http://127.0.0.1:18080 并刷新页面即可使用。这次更新未执行真实模型测试，新的供应商资格仍未取得。设计和维护入口见[M02 §6](docs/02_llm_runtime_and_model_profiles.md#6-固定-profile-矩阵)与[执行规范](docs/02_llm_runtime_and_model_profiles_vibe_coding.md#m08-生成额度维护入口2026-10-07用户已批准)。
+M08 候选研究的固定生成上限已按 2026-10-07 批准调整为 131,072（128K），Action 和 Observation Judgment 共用；high、120 秒读取超时及原调用预算保持不变。定向、M02/M08 和全项目离线回归结果见[实施状态](docs/IMPLEMENTATION_STATUS.md)。此前本机18080已在用户授权后更新，运行中Profile实查为131,072，首页、就绪接口及JS/CSS均200，原数据库、卷与暂停凭证保留；其入口为 http://127.0.0.1:18080。该次更新没有执行真实模型测试；本次 M15 另外记录当前源码的一个真实云场景。设计和维护入口见[M02 §6](docs/02_llm_runtime_and_model_profiles.md#6-固定-profile-矩阵)与[执行规范](docs/02_llm_runtime_and_model_profiles_vibe_coding.md#m08-生成额度维护入口2026-10-07用户已批准)。
 
-模块 01–13 的当前批准范围实现已进入本地 `main`，包括 M11 网页控制扩展、M13 生产主图、公交换乘展示、M09 分阶段规划及完整交互诊断；实现提交为 `2ee962e`，本地合并记录由说明文档提交 `71767d3` 固化（2026-09-30）。记录见[规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。Module 11 保留演示范围验收及既有延期边界。生产 LLM Profile 使用 DeepSeek V4 Flash；Module 10/11 提供 PostgreSQL 产物和执行状态持久化，当前 M14 复用同库。完整 M15、腾讯云 2GB 实机及公网资格尚未取得；本次本机真实网页测试范围及结果以实施状态为准。本机18080更新已执行，push、PR、云端部署均未执行。
+模块 01–13 的当前批准范围实现已进入本地 `main`，包括 M11 网页控制扩展、M13 生产主图、公交换乘展示、M09 分阶段规划及完整交互诊断；实现提交为 `2ee962e`，本地合并记录由说明文档提交 `71767d3` 固化（2026-09-30）。记录见[规划改进报告 §7、§9、§10](docs/m09_phase_budget_and_interaction_records_review.md)。Module 11 保留演示范围验收及既有延期边界。生产 LLM Profile 使用 DeepSeek V4 Flash；Module 10/11 提供 PostgreSQL 产物和执行状态持久化，当前 M14 复用同库。M15 本次按[批准范围 §3.1](docs/15_demo_release_gate.md#31-待批准的范围决定)验证云部署、一个真实网页场景和实机资源；原完整质量集、M03 新16例及 M11 历史覆盖率欠账仍单列，不以此清除。push 和 PR 未执行。
+
+## M15 云端体验与维护
+
+入口为 [http://203.0.113.10:8080](http://203.0.113.10:8080)，腾讯云上海 2 核 2GB，独立项目 `cta-m15-cloud`。本次真实场景完成两天攻略、酒店人工选择、枢纽接驳与来源展示，完整统计已保存；同进程暂停续接及终态 Web 重启后的结果、统计和调用元数据一致。资源采样最大值为 Web 243,691,520 bytes、PG 101,867,520 bytes、最多15连接，OOM/非预期重启0；这是一场景实测。
+
+先核对需求确认页，再接受需求。费用、天气、酒店实时房态/房型，以及部分补充文本偏好属于正文明确标注的未核验范围；地图链接请求尚未取得当前支持资格。真实规划会消耗公共 API 配额，运行统计中的计数不代表供应商账单。当前匿名身份限同一浏览器，Cookie 固定30天；换设备、清除Cookie或到期后无法找回。
+
+以下命令在该云实例终端执行，使用现有私有配置。配置权限为0600；Key为0600、UID/GID 10001，只读挂载；独立Key备份在维护者受限目录 `<private-backup-directory>`。实际数据卷为 `cta-m15-cloud_m14_demo_pg_data`，网络为 `cta-m15-cloud_m14-demo`；PG无公网映射。发行目录保留初始主链镜像归档和收尾镜像归档，当前镜像引用以私有配置及实施状态收据为准。
+
+```bash
+M15_RELEASE_DIR=/srv/china-travel-agent/releases/20261009-aa9740d1b2b9-a
+M15_CONFIG_FILE=/srv/china-travel-agent/private/m15/config.env
+m15_compose() {
+  sudo -n docker compose --env-file "$M15_CONFIG_FILE" --project-name cta-m15-cloud \
+    -f "$M15_RELEASE_DIR/compose.yaml" -f "$M15_RELEASE_DIR/compose.cloud.yaml" \
+    --profile m14-local "$@"
+}
+
+# 服务状态与真实就绪；回环请求也需要配置的公网 Host。
+m15_compose ps
+curl --fail --silent --show-error --max-time 10 \
+  -H 'Host: 203.0.113.10:8080' http://127.0.0.1:8080/health/ready
+
+# 日常启动，沿用现有配置、Key与数据卷；Web不自动恢复任务。
+m15_compose up --detach --wait --wait-timeout 120 --no-build --pull never m14-postgres m14-web
+
+# 日常停止，沿用Compose关闭宽限（Web 65秒），保留数据与Key。
+m15_compose stop m14-web m14-postgres
+
+# 仅汇总固定安全错误代码，避免输出日志正文。
+m15_compose logs --tail 100 --no-log-prefix m14-web 2>&1 \
+  | grep -oE 'WebApplicationStartupOrShutdownError|summary_not_saved|summary_finalization_failed|dependency_unavailable|service_closing' \
+  | sort | uniq -c
+```
+
+新环境首次部署须先按 [M15设计 §5—7](docs/15_demo_release_gate.md) 与[执行规范 C01—03](docs/15_demo_release_gate_vibe_coding.md)准备同一发行物、独立新配置、新Key及独立备份。仅对已核验的新空库执行下面的首次迁移顺序；现有实例已完成这三条迁移，日常启动使用上面的命令。
+
+```bash
+sudo -n docker load --input "$M15_RELEASE_DIR/runtime-closeout-c.tar"
+m15_compose up --detach --wait --wait-timeout 120 --no-build --pull never m14-postgres
+m15_compose run --rm --no-deps --pull never m14-web python -m alembic -c app/artifact_persistence/alembic.ini upgrade head
+m15_compose run --rm --no-deps --pull never m14-web python -m app.durable_execution.migrate
+m15_compose run --rm --no-deps --pull never m14-web python -m app.web_application.migrate
+m15_compose run --rm --no-deps --pull never m14-web python -m app.web_application.migrate --check
+m15_compose up --detach --wait --wait-timeout 120 --no-build --pull never m14-web
+```
+
+维护停止前先等待任务结束且统计已保存；有活动任务时停止后的恢复结果未在本批验证。已完成结果和保存统计可以跨进程读取。本次只验证终态重启；暂停跨进程、任意节点崩溃恢复及多人并发容量仍按原资格单列。磁盘可用空间低于5GiB会拒绝新任务。到期和续费由维护者在腾讯云控制台确认；本批保留现有服务、卷、Key和8080规则，后续备份自动化、域名与HTTPS另行设计。
 
 ## M14 本机启动
 
@@ -55,7 +103,7 @@ docker compose --env-file .m14-local/config.env --project-name cta-m14-local --p
 docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local stop m14-web m14-postgres
 ```
 
-再次启动沿用同一配置、密钥、项目名和卷。已保存结果和摘要可重读；进程重启不自动恢复业务。`compose.cloud.yaml` 已准备腾讯云上海 2 核 2GB 的同代码配置（Web 1GiB、PG 512MiB、最多 20 连接），云项目另建卷并配置精确公网 IP Origin；部署、真实容量及公网访问需后续独立授权与 M15 资格。
+再次启动沿用同一配置、密钥、项目名和卷。已保存结果和摘要可重读；进程重启不自动恢复业务。`compose.cloud.yaml` 使用同代码配置（Web 1GiB、PG 512MiB、最多20连接），本次云项目采用独立新卷及精确公网 Origin，实际收据见上方 [M15云端维护](#m15-云端体验与维护)。
 
 模块 01–12 修复收尾时的全量 Docker unit/contract 回归为 **2317 passed、8 warnings**（历史快照）。第 **18/20** 轮复用第 15 轮已通过的真实需求、酒店及 M08 候选检查点，从 M09 开始真实调用，获得 Completed；M12 三个日块、汇总索引及 PostgreSQL 重启后的读取/哈希一致性均通过。成功后停止，剩余两轮未使用。这是复用真实上游的集成链验证，不是第 18 轮重新调用全部上游；这份历史结果不能替代后续 M13/14 或完整 M11 恢复闭环验收，也不证明行程质量最优。历史问题见 [联调修复记录](./docs/12_live_pipeline_fixes.md)，模块历史验收见 [实施状态快照](./docs/IMPLEMENTATION_STATUS.md)；[首次真实联调报告](./docs/12_live_pipeline_acceptance.md) 保留当时的失败记录。
 
@@ -175,7 +223,7 @@ runtime 包含模块 01–14，默认 CMD 为 `python -m app.web_application`；
 
 基础镜像默认使用 `docker.m.daocloud.io/library/python:3.12-slim`，可通过 `.env` 中的 `PYTHON_IMAGE` 覆盖；能够访问 Docker Hub 时可改为 `python:3.12-slim-bookworm`。可选 PostgreSQL 服务同样允许通过 `POSTGRES_IMAGE` 覆盖镜像来源。
 
-当前分支从源码构建新镜像，执行完整离线关闭验收。每次使用未用过的前缀和不存在的绝对证据目录：
+业务修改后的完整离线关闭验收使用下列入口。每次使用未用过的前缀和不存在的绝对证据目录；M15本次无业务修改，按批准范围执行runtime和云交付复核，不重复这套历史门禁：
 
 ```powershell
 ./scripts/verify_module14.ps1 -Set Closeout -ProjectPrefix cta-m14-z-local-001 -EvidenceDir D:/m14-evidence/z-local-001
@@ -237,10 +285,10 @@ MODULE-CLOSEOUT 只同步两份 Module 08 设计中的用户验收例外、READM
 
 实现依据为 [M01 枢纽澄清规则](docs/01_requirement_and_dialogue.md)、[M03 端点角色规则](docs/03_requirement_extraction_adapter.md)、[M13 输入失败映射](docs/13_demo_workflow.md) 和 [M14 表单与安全提示](docs/14_web_application.md)，阶段门槛见 [E01 维护执行入口](docs/01_requirement_and_dialogue_vibe_coding.md)。本次离线快照、保留的失败及同步后交付物验证入口见 [实施状态](docs/IMPLEMENTATION_STATUS.md#枢纽澄清维护离线快照2026-10-07)。
 
-该维护阶段未替换现有18080网页镜像。新 `requirement-extraction-v4-hub-roles` Prompt 的真实供应商资格为 `NOT_RUN`，离线测试和历史版本资格不能替代它。后续本机换版及本轮提交前验收分别按实际收据记录，见实施状态。
+该维护阶段未替换当时的18080网页镜像。新 `requirement-extraction-v4-hub-roles` Prompt 的独立16例真实供应商资格仍为 `NOT_RUN`；本次M15云端一个场景验证不能替代它。后续本机换版和提交前验收按各自收据记录，见实施状态。
 
 ## M09 单次生成额度（2026-10-08）
 
 当前修复分支的 M09 行程规划单次输出上限为 **128K（131,072 tokens）**，首次规划、续调及参数修正统一使用；思考仍为 `enabled/high`，总逻辑调用仍为17次普通规划加2次共享参数修正。设计依据为 [M02 Profile矩阵](docs/02_llm_runtime_and_model_profiles.md#6-固定-profile-矩阵) 和 [M09额度维护](docs/09_itinerary_planning_loop.md#27-m09-单次生成额度128k2026-10-08用户已批准)，执行及验证快照见 [实施状态](docs/IMPLEMENTATION_STATUS.md#m09-单次生成128k维护快照2026-10-08)。
 
-该源码维护阶段不替换现有18080网页镜像，也不自动重跑旧任务；真实API资格为NOT_RUN。后续本机换版与本轮提交前镜像、完整离线回归及两位独立审查的实收分别记录，不以历史快照代替新资格。
+该源码维护阶段未替换当时的18080网页镜像，真实API资格当时为NOT_RUN。后续本机换版、提交前离线回归与本次M15云端单场景按各自收据记录，不以历史快照代替新资格。
