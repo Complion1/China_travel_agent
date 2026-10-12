@@ -359,8 +359,8 @@ async def test_module07_08_09_registrations_put_and_get_without_production_compo
     """Current Module 07-09 registrations are combined only by this test."""
 
     from app.candidate_research.artifacts import (
-        CandidateResearchArtifact,
-        CandidateResearchModelJudgmentArtifact,
+        CandidateResearchLegacyArtifact as CandidateResearchArtifact,
+        CandidateResearchLegacyModelJudgmentArtifact as CandidateResearchModelJudgmentArtifact,
         CandidateResearchPlaceObservationArtifact,
         InProgressCandidateSetRecord,
         JudgmentPatchSnapshot,

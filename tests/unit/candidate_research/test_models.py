@@ -473,7 +473,7 @@ def test_public_control_failure_evidence_ref_rejects_wrong_version_phase_or_run_
         include_last_consistent_ref=True,
     )
     if invalid_ref_field == "schema_version":
-        payload["failure_artifact_ref"]["schema_version"] = "2.0"
+        payload["failure_artifact_ref"]["schema_version"] = "99.0"
     elif invalid_ref_field == "phase":
         payload["failure_artifact_ref"]["operation_id"]["phase"] = "hotel_selection"
     else:

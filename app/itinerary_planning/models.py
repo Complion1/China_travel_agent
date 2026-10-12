@@ -41,7 +41,7 @@ from app.workflow_contracts import (
 )
 
 
-ITINERARY_PLANNING_SCHEMA_VERSION: Literal["3.0"] = "3.0"
+ITINERARY_PLANNING_SCHEMA_VERSION: Literal["3.0", "4.0"] = "4.0"
 ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY = ExecutionBudgetKey(
     scope=ExecutionBudgetScope.PHASE,
     name="planning.model_invocation",
@@ -169,7 +169,7 @@ class PlanningFailureCode(str, Enum):
 
 
 class PlanningInvocationOperationIds(_Model):
-    schema_version: Literal["3.0"] = "3.0"
+    schema_version: Literal["3.0", "4.0"] = "4.0"
     invocation_slot_index: Annotated[int, Field(ge=0, le=18)]
     action_operation_id: OperationId
     planning_state_operation_id: OperationId
@@ -187,7 +187,7 @@ class PlanningInvocationOperationIds(_Model):
 
 
 class ItineraryPlanningOperationPlan(_Model):
-    schema_version: Literal["3.0"] = "3.0"
+    schema_version: Literal["3.0", "4.0"] = "4.0"
     run_id: UUID
     invocation_slots: Annotated[tuple[PlanningInvocationOperationIds, ...], Field(min_length=0, max_length=19)]
     hub_geocode_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=0, max_length=2)]
@@ -218,7 +218,7 @@ class ItineraryPlanningOperationPlan(_Model):
 
 
 class ItineraryPlanningInitialRequest(_Model):
-    schema_version: Literal["3.0"] = "3.0"
+    schema_version: Literal["3.0", "4.0"] = "4.0"
     confirmed: ConfirmedTravelRequirement
     hotel_selection_ref: ArtifactRef
     candidate_set_ref: ArtifactRef
@@ -253,7 +253,7 @@ class ItineraryPlanningResumeRequest(_Model):
 
 
 def _require_ref(ref: ArtifactRef, artifact_type: str, phase: WorkflowPhase, run_id: UUID) -> None:
-    if ref.artifact_type != artifact_type or ref.schema_version not in (("2.0", "3.0") if artifact_type == "itinerary_planning.itinerary" else ("1.0",)):
+    if ref.artifact_type != artifact_type or ref.schema_version not in (("2.0", "3.0", "4.0") if artifact_type == "itinerary_planning.itinerary" else ("1.0", "2.0", "3.0", "4.0") if artifact_type == "candidate_research.candidate_set" else ("1.0",)):
         raise ValueError("artifact reference type/version mismatch")
     if ref.operation_id.phase is not phase or ref.operation_id.run_id != run_id:
         raise ValueError("artifact reference run/phase mismatch")
@@ -264,7 +264,7 @@ def _require_itinerary_ref(ref: ArtifactRef | None, *, required: bool = False) -
         if required:
             raise ValueError("itinerary reference is required")
         return
-    if ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version not in {"2.0", "3.0"} or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING:
+    if ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version not in {"2.0", "3.0", "4.0"} or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING:
         raise ValueError("reference must point to an itinerary planning artifact")
 
 
@@ -854,11 +854,32 @@ class GeocodeHubArgs(_Model):
     endpoint_kind: Literal["arrival", "departure"]
 
 
-class CalculateRouteMatrixArgs(_Model):
+class PurposeVisitIntent(_Model):
     schema_version: Literal["1.0"] = "1.0"
+    date: date
+    candidate_handle: Handle
+    visit_kind: VisitKind
+    is_backup: bool
+    must_group_ids: Annotated[tuple[StableId, ...], Field(max_length=100)] = ()
+    interval: TimeInterval | None = None
+    business_hours_state: BusinessHoursState = BusinessHoursState.UNKNOWN
+    business_evidence_handles: Annotated[tuple[Handle, ...], Field(max_length=8)] = ()
+
+    @model_validator(mode="after")
+    def _intent(self):
+        _unique(self.must_group_ids, "intent must ids")
+        _unique(self.business_evidence_handles, "intent business evidence")
+        if self.interval is not None and self.interval.start_at.date() != self.date:
+            raise ValueError("intent date differs from visit interval")
+        return self
+
+
+class CalculateRouteMatrixArgs(_Model):
+    schema_version: Literal["2.0"] = "2.0"
     date: date
     mode: MatrixTravelMode
     location_handles: Annotated[tuple[Handle, ...], Field(min_length=1, max_length=10)]
+    visit_intents: Annotated[tuple[PurposeVisitIntent, ...], Field(max_length=256)] = ()
 
     @model_validator(mode="after")
     def _locations(self) -> CalculateRouteMatrixArgs:
@@ -890,8 +911,9 @@ class DirectionLegIntent(_Model):
 
 
 class PlanDirectionsArgs(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     legs: Annotated[tuple[DirectionLegIntent, ...], Field(min_length=1, max_length=482)]
+    visit_intents: Annotated[tuple[PurposeVisitIntent, ...], Field(max_length=256)] = ()
 
     @model_validator(mode="after")
     def _legs(self) -> PlanDirectionsArgs:
@@ -900,10 +922,31 @@ class PlanDirectionsArgs(_Model):
         return self
 
 
-class SubmitItineraryArgs(_Model):
+class ProposedItineraryPatch(_Model):
     schema_version: Literal["1.0"] = "1.0"
+    days: Annotated[tuple[ProposedDayPlan, ...], Field(max_length=60)] = ()
+    arrival_transfer: ProposedBoundaryTransfer | None = None
+    departure_transfer: ProposedBoundaryTransfer | None = None
+
+    @model_validator(mode="after")
+    def _patch(self):
+        _unique(tuple(day.date for day in self.days), "patch dates")
+        if not self.days and self.arrival_transfer is None and self.departure_transfer is None:
+            raise ValueError("patch must explicitly replace at least one item")
+        return self
+
+
+class SubmitItineraryArgs(_Model):
+    schema_version: Literal["2.0"] = "2.0"
     effective_policy: ProposedEffectivePlanningPolicy
-    draft: ProposedItineraryDraft
+    draft: ProposedItineraryDraft | None = None
+    patch: ProposedItineraryPatch | None = None
+
+    @model_validator(mode="after")
+    def _submission(self):
+        if (self.draft is None) == (self.patch is None):
+            raise ValueError("submit exactly one of draft or patch")
+        return self
 
 
 class RequestCandidateSupplementArgs(_Model):
@@ -950,6 +993,19 @@ class MealCoverageTarget(_Model):
     radius_km: Literal[1, 3, 5, 10]
 
 
+class MealCountTarget(MealCoverageTarget):
+    schema_version: Literal["2.0"] = "2.0"
+    target_type: Literal["meal_count"] = "meal_count"
+    current_count: Annotated[int, Field(ge=0)]
+    target_count: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def _count(self):
+        if self.current_count >= self.target_count:
+            raise ValueError("meal quota must increase admitted supply")
+        return self
+
+
 class MustResolutionTarget(_Model):
     schema_version: Literal["1.0"] = "1.0"
     target_type: Literal["must_resolution"] = "must_resolution"
@@ -988,7 +1044,7 @@ class ReplacementTarget(_Model):
 
 CandidateSupplementTarget: TypeAlias = Annotated[
     CandidateCountTarget | AreaCoverageTarget | MealCoverageTarget | MustResolutionTarget
-    | AvoidResolutionTarget | CandidateDetailsTarget | ReplacementTarget,
+    | AvoidResolutionTarget | CandidateDetailsTarget | ReplacementTarget | MealCountTarget,
     Field(discriminator="target_type"),
 ]
 
@@ -1114,12 +1170,17 @@ class BackupUnavailableGap(_GapBase):
 
 
 class CandidateSupplyGap(_GapBase):
+    schema_version: Literal["1.0", "2.0"] = "1.0"
     gap_type: Literal["candidate_supply"] = "candidate_supply"
     date: date | None
     target: CandidateSupplementTarget
 
     @model_validator(mode="after")
     def _evidence(self) -> CandidateSupplyGap:
+        if (self.schema_version == "2.0" and self.target.target_type in {"candidate_count", "meal_count", "must_resolution"}
+                and len(self.evidence_refs) == 1 and self.evidence_refs[0].artifact_type == "candidate_research.candidate_set"
+                and self.evidence_refs[0].schema_version in {"2.0", "3.0", "4.0"}):
+            return self
         if not self.evidence_refs or any(ref.artifact_type != "candidate_research.place_observation" or ref.schema_version != "1.0" for ref in self.evidence_refs):
             raise ValueError("candidate supply gap requires candidate-research evidence refs")
         return self
@@ -1256,6 +1317,7 @@ class BackupUnavailableGapSummary(_GapSummaryBase):
 
 
 class CandidateSupplyGapSummary(_GapSummaryBase):
+    schema_version: Literal["1.0", "2.0"] = "1.0"
     summary_type: Literal["candidate_supply"] = "candidate_supply"
     date: date | None
     target: CandidateSupplementTarget
@@ -1318,7 +1380,7 @@ class _PlanningBudgetSummaryV2(_Model):
 
 
 class PlanningBudgetSummary(_PlanningBudgetSummaryV2):
-    schema_version: Literal["3.0"]
+    schema_version: Literal["3.0", "4.0"]
     model_invocation_limit: Literal[19]
     model_invocations_consumed: Annotated[int, Field(ge=0, le=19)]
     normal_invocation_limit: Literal[17]
@@ -1425,7 +1487,7 @@ PlanningFailure: TypeAlias = Annotated[
 
 
 class ItineraryPlanningCompleted(_Model):
-    schema_version: Literal["2.0", "3.0"] = "3.0"
+    schema_version: Literal["2.0", "3.0", "4.0"] = "4.0"
     outcome_type: Literal["completed"] = "completed"
     itinerary_ref: ArtifactRef
     summary: PlanningSummary
@@ -1439,7 +1501,7 @@ class ItineraryPlanningCompleted(_Model):
 
 
 class ItineraryPlanningIncomplete(_Model):
-    schema_version: Literal["2.0", "3.0"] = "3.0"
+    schema_version: Literal["2.0", "3.0", "4.0"] = "4.0"
     outcome_type: Literal["incomplete"] = "incomplete"
     itinerary_ref: ArtifactRef | None
     summary: PlanningSummary
@@ -1458,7 +1520,7 @@ class ItineraryPlanningIncomplete(_Model):
 
 
 class ItineraryPlanningCandidateSupplementRequested(_Model):
-    schema_version: Literal["2.0", "3.0"] = "3.0"
+    schema_version: Literal["2.0", "3.0", "4.0"] = "4.0"
     outcome_type: Literal["candidate_supplement_requested"] = "candidate_supplement_requested"
     planning_ref: ArtifactRef
     candidate_set_ref: ArtifactRef
@@ -1470,7 +1532,7 @@ class ItineraryPlanningCandidateSupplementRequested(_Model):
     def _refs(self) -> ItineraryPlanningCandidateSupplementRequested:
         _require_itinerary_ref(self.planning_ref, required=True)
         _validate_outcome_versions(self, self.planning_ref)
-        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version != "1.0":
+        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0"}:
             raise ValueError("supplement outcome must reference candidate set")
         if self.planning_ref.operation_id.run_id != self.candidate_set_ref.operation_id.run_id:
             raise ValueError("supplement outcome refs must share run")
@@ -1478,7 +1540,7 @@ class ItineraryPlanningCandidateSupplementRequested(_Model):
 
 
 class ItineraryPlanningFailed(_Model):
-    schema_version: Literal["2.0", "3.0"] = "3.0"
+    schema_version: Literal["2.0", "3.0", "4.0"] = "4.0"
     outcome_type: Literal["failed"] = "failed"
     failure: PlanningFailure
     last_consistent_itinerary_ref: ArtifactRef | None
@@ -1500,7 +1562,7 @@ class ItineraryPlanningFailed(_Model):
                 "itinerary_planning.itinerary",
             }
             expected_schema_version = (
-                ("5.0" if self.schema_version == "2.0" else "6.0")
+                ("5.0" if self.schema_version == "2.0" else "7.0" if self.schema_version == "4.0" else "6.0")
                 if self.failure_artifact_ref.artifact_type == "itinerary_planning.model_action"
                 else self.schema_version if self.failure_artifact_ref.artifact_type == "itinerary_planning.itinerary" else "1.0"
             )

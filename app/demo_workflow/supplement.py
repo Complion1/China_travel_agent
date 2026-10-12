@@ -11,6 +11,7 @@ from .commands import canonical
 _TARGETS = {
     "candidate_count": "candidate_count_shortfall", "area_coverage": "area_coverage_missing",
     "meal_coverage": "meal_coverage_missing", "must_resolution": "must_visit_resolution_missing",
+    "meal_count": "meal_count_shortfall",
     "avoid_resolution": "avoid_resolution_missing", "candidate_details": "candidate_details_missing",
     "replacement": "replacement_candidate_needed",
 }

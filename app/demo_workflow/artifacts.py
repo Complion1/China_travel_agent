@@ -19,6 +19,13 @@ _CATEGORIES = {
     "workflow_map_failed": "tool", "workflow_budget_exhausted": "budget",
     "workflow_configuration_failed": "configuration", "workflow_contract_failed": "internal",
     "workflow_output_failed": "validation",
+    "research_context_invalid": "internal", "research_correction_exhausted": "validation",
+    "research_judgment_invalid": "validation", "research_state_invalid": "internal",
+    "workflow_replay_mismatch": "internal",
+    "workflow_model_output_invalid": "validation",
+    "research_judgments_unfinished": "validation", "research_evidence_insufficient": "validation",
+    "research_candidates_unsuitable": "validation", "research_recovery_exhausted": "validation",
+    "research_budget_exhausted": "budget",
 }
 DEMO_TERMINAL_REGISTRATIONS = BASE_TERMINAL_CODE_REGISTRATIONS + tuple(
     TerminalCodeRegistration(
@@ -79,7 +86,7 @@ class DemoControlArtifact(BaseModel):
             (self.candidate_set_ref, "candidate_research.candidate_set", WorkflowPhase.CANDIDATE_RESEARCH),
             (self.planning_ref, "itinerary_planning.itinerary", WorkflowPhase.ITINERARY_PLANNING),
         ):
-            if ref is not None and (ref.artifact_type != artifact_type or ref.schema_version not in ({"2.0", "3.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0"}) or ref.operation_id.phase is not phase):
+            if ref is not None and (ref.artifact_type != artifact_type or ref.schema_version not in ({"2.0", "3.0", "4.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0", "2.0", "3.0", "4.0"} if artifact_type == "candidate_research.candidate_set" else {"1.0"}) or ref.operation_id.phase is not phase):
                 raise ValueError("upstream reference contract mismatch")
         refs = tuple(ref for ref in (self.previous_ref, self.hotel_candidate_ref,
             self.hotel_selection_ref, self.candidate_set_ref, self.planning_ref) if ref is not None)

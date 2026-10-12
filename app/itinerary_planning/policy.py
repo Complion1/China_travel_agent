@@ -659,10 +659,11 @@ def validate_time_sensitive_anchor(
 
 
 def candidate_is_eligible(record: object, role: ResearchRole | None = None) -> bool:
-    if type(record) is not CandidateRecord:
+    from app.candidate_research import CandidateRecordV2
+    if type(record) not in (CandidateRecord, CandidateRecordV2):
         return False
     try:
-        record = CandidateRecord.model_validate_json(
+        record = type(record).model_validate_json(
             record.model_dump_json(exclude_none=False), strict=True
         )
     except (TypeError, ValueError):

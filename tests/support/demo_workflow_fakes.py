@@ -111,6 +111,7 @@ def research_boundaries():
     from app.requirements import InterestTag
     from tests.support.candidate_research_fakes import FakeModelOperation, FakeMapAdapter, structured
     from tests.unit.candidate_research.test_service_initial import _multi_place_search, _matching_details
+    from tests.unit.candidate_research.test_qualification import legal_judgment
     model = FakeModelOperation()
     def actions(_):
         objectives = json.loads(model.prompts[-1].user_text)["objectives"][:8]
@@ -129,7 +130,8 @@ def research_boundaries():
             evidence_handles=(EvidenceHandle(handle_id="e:0"),)) for i, interest in enumerate((InterestTag.CULTURE, InterestTag.NATURE))),
         meal_updates=tuple(MealJudgmentUpdate(candidate_handle=f"c:{6+i}", meal_intent=meal,
             verdict=MatchVerdict.CONFIRMED, reason_code=MealReasonCode.TARGETED_MEAL_SEARCH,
-            evidence_handles=(EvidenceHandle(handle_id="e:1"),)) for i, meal in enumerate((MealIntent.LUNCH, MealIntent.DINNER))),
+            evidence_handles=(EvidenceHandle(handle_id=f"e:{2+i%2}"),))
+            for i, meal in enumerate((MealIntent.LUNCH, MealIntent.DINNER, MealIntent.LUNCH, MealIntent.DINNER))),
         requirement_group_updates=())
     def details(_):
         objective = next(o for o in json.loads(model.prompts[-1].user_text)["objectives"] if o["kind"] == "details_maturity")
@@ -138,10 +140,16 @@ def research_boundaries():
     def supplement(_):
         objective = next(o for o in json.loads(model.prompts[-1].user_text)["objectives"] if o["kind"] == "supplemental_gap")
         return structured(ProposedActionBatch(actions=(ProposedDetailsAction(ordinal=0,objective_id=objective["objective_id"],uid="r2"),)))
-    model.responses = [actions, structured(patch), details, structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=()))]
-    model.responses.extend([supplement,structured(JudgmentPatch(role_updates=(),interest_updates=(),meal_updates=(),requirement_group_updates=()))])
+    known_meals = {(item.candidate_handle, item.meal_intent) for item in patch.meal_updates}
+    patch = patch.model_copy(update={"meal_updates": (*patch.meal_updates, *tuple(
+        MealJudgmentUpdate(candidate_handle=f"c:{ordinal}", meal_intent=meal, verdict=MatchVerdict.UNRESOLVED,
+            reason_code=MealReasonCode.EVIDENCE_INSUFFICIENT, evidence_handles=(EvidenceHandle(handle_id="e:1"),))
+        for ordinal in range(6, 10) for meal in MealIntent if (f"c:{ordinal}", meal) not in known_meals))})
+    model.base_patch = patch
+    model.responses = [actions, lambda _: legal_judgment(model, patch), details, lambda _: legal_judgment(model)]
+    model.responses.extend([supplement, lambda _: legal_judgment(model)])
     searches = [(("a0", "a1", "a2", "a3", "a4", "a5"), "museum"), (("r0", "r1", "r2", "r3"), "restaurant"),
-        (("r0",), "restaurant"), (("r1",), "restaurant"), (("a0",), "museum"), (("a1",), "museum"), (("a2",), "museum"), (("r2",), "restaurant")]
+        (("r0", "r2"), "restaurant"), (("r1", "r3"), "restaurant"), (("a0",), "museum"), (("a1",), "museum"), (("a2",), "museum"), (("r2",), "restaurant")]
     adapter = FakeMapAdapter([*(_multi_place_search(uids, category=kind) for uids, kind in searches),
         *(_matching_details(uid, category="museum" if uid.startswith("a") else "restaurant") for uid in ("a0", "a1", "a2", "a3", "a4", "a5", "r0", "r1", "r2"))])
     return model, adapter
@@ -198,7 +206,7 @@ class PlanningModel:
             from uuid import uuid4
             await admission_callback(InteractionCallIdentity(call_id=uuid4(), logical_call_index=self.call_count))
         import json
-        from app.itinerary_planning.models import PlanDirectionsArgs, DirectionLegIntent, TransportSemantic
+        from app.itinerary_planning.models import PlanDirectionsArgs, DirectionLegIntent, TransportSemantic, PurposeVisitIntent, VisitKind
         from app.baidu_map import TravelMode
         self.feedback.append([json.loads(r.content) for r in results])
         if self.stage == 0:
@@ -209,7 +217,10 @@ class PlanningModel:
             self.endpoints = tuple(zip(handles, handles[1:]))
             return self.batch(("plan_directions", PlanDirectionsArgs(legs=tuple(DirectionLegIntent(leg_id=f"leg{i}",
                 origin_handle=a, destination_handle=b, transport_semantic=TransportSemantic.WALKING,
-                route_mode=TravelMode.WALKING, alternatives_limit=1) for i, (a, b) in enumerate(self.endpoints)))))
+                route_mode=TravelMode.WALKING, alternatives_limit=1) for i, (a, b) in enumerate(self.endpoints)),
+                visit_intents=tuple(PurposeVisitIntent(date=__import__("datetime").date(2026,9,3), candidate_handle=handle,
+                    visit_kind=kind, is_backup=False) for handle,kind in (("candidate-handle-0000",VisitKind.ATTRACTION),
+                    ("candidate-handle-0006",VisitKind.LUNCH),("candidate-handle-0007",VisitKind.DINNER))))))
         if self.stage == 2:
             self.stage = 3
             return self.batch(("submit_itinerary", self.proposal(self.feedback[-1])))

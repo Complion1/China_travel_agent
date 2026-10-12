@@ -12,7 +12,7 @@ def test_input_invalid_routes_to_existing_input_terminal_and_preserves_safety_pr
     from app.durable_execution import DurableExecutionDependencyError
     from app.workflow_contracts import OperationResultIndeterminateError
     def failure(code, kind="control"):
-        return SimpleNamespace(failure_type=kind, code=SimpleNamespace(value=code))
+        return SimpleNamespace(failure_type=kind, code=SimpleNamespace(value=code), error=SimpleNamespace(code=SimpleNamespace(value=code)))
     assert failure_code(failure("input_invalid")) == "requirement_failed"
     assert failure_code(failure("input_invalid", "llm")) == "workflow_provider_failed"
     assert failure_code(failure("input_invalid", "map")) == "workflow_map_failed"
@@ -29,7 +29,7 @@ async def test_real_initial_requirement_and_production_definition():
     transition = await dependencies.domain_service.process_turn(turn)
     assert type(transition.outcome) is NeedConfirmation, transition
     assert len(providers.extractor.calls) == 1
-    assert definition.contract.contract_id == "demo_workflow.web.v3"
+    assert definition.contract.contract_id == "demo_workflow.web.v6"
     assert len(definition.contract.node_rules) == 76
     await definition.aclose()
 

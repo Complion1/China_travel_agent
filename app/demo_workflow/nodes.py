@@ -19,6 +19,7 @@ from app.hotel_selection import (
 from app.candidate_research import (
     CandidateResearchArtifact, CandidateResearchInitialRequest, CandidateResearchSupplementalRequest,
     CandidateResearchOutcome, CANDIDATE_RESEARCH_ITERATION_BUDGET_KEY, CANDIDATE_RESEARCH_PLACE_CALL_BUDGET_KEY,
+    candidate_supply_status,
 )
 from app.itinerary_planning import (
     ItineraryPlanningArtifact, ItineraryPlanningInitialRequest, ItineraryPlanningResumeRequest,
@@ -59,6 +60,13 @@ def outcome(value, expected):
 def failure_code(failure):
     kind = failure.failure_type
     if kind in {"llm", "llm_failure"}:
+        if failure.error.code.value == "quota_exhausted":
+            return "workflow_budget_exhausted"
+        if failure.error.code.value in {"configuration_error", "capability_unavailable", "schema_unsupported", "input_too_large"}:
+            return "workflow_contract_failed"
+        if failure.error.code.value in {"structured_output_invalid", "tool_arguments_invalid", "unknown_tool",
+                "output_truncated", "malformed_provider_response"}:
+            return "workflow_model_output_invalid"
         return "workflow_provider_failed"
     if kind in {"map", "map_failure"}:
         return "workflow_map_failed"
@@ -69,9 +77,17 @@ def failure_code(failure):
         raise DurableExecutionDependencyError()
     if code == "budget_exhausted":
         return "workflow_budget_exhausted"
-    if code == "input_invalid":
+    if code in {"input_invalid", "invalid_input"}:
         return "requirement_failed"
-    return "workflow_contract_failed"
+    research_codes = {
+        "context_contract_error": "research_context_invalid",
+        "action_correction_exhausted": "research_correction_exhausted",
+        "judgment_patch_invalid": "research_judgment_invalid",
+        "judgment_required_missing": "research_recovery_exhausted",
+        "state_invariant_failed": "research_state_invalid",
+        "replay_mismatch": "workflow_replay_mismatch",
+    }
+    return research_codes.get(code, "workflow_contract_failed")
 
 
 class Nodes:
@@ -222,9 +238,16 @@ class Nodes:
             state = with_refs(state, value.last_consistent_candidate_set_ref, value.failure_artifact_ref)
             state = await self.receipt(state, cap, prior=control, prior_ref=ref, last_outcome="failed", terminal_code=failure_code(value.failure))
             return goto(state, "terminal")
-        usable = value.counts.unique_eligible_count >= 1
+        saved = (await cap.read_only_artifact_repository.get(
+            value.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
+        if (saved.schema_version != "4.0" or saved.run_id != state.run_id
+                or saved.record.record_type not in {"completed", "incomplete"}
+                or saved.record.counts.model_dump(mode="python") != value.counts.model_dump(mode="python")):
+            raise DurableExecutionStateError()
+        code = candidate_supply_status(saved)
+        usable = code is None
         state = await self.receipt(state, cap, prior=control, prior_ref=ref, candidate_set_ref=value.candidate_set_ref,
-            last_outcome="research_ready" if usable else "failed", terminal_code=None if usable else "research_no_candidates",
+            last_outcome="research_ready" if usable else "failed", terminal_code=code,
             supplemental_plan_call=control.supplement_count or None)
         return goto(state, "prepare_planning" if usable else "terminal")
 
@@ -272,7 +295,7 @@ class Nodes:
             planning_ref = found.ref
             saved = (await cap.read_only_artifact_repository.get(planning_ref, expected_model=ItineraryPlanningArtifact)).content
             if (planning_ref.operation_id != plan.terminal_successor_operation_id
-                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "3.0" or saved.schema_version != planning_ref.schema_version
+                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "4.0" or saved.schema_version != planning_ref.schema_version
                 or saved.request_digest != planning_request_digest(request)
                 or saved.record.record_type != "incomplete" or saved.record.stop_reasons != value.stop_reasons
                 or restore_gaps(saved) != value.gaps or saved.directories.candidate_set_refs[-1] != control.candidate_set_ref

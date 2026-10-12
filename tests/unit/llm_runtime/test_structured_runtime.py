@@ -113,6 +113,46 @@ def test_structured_retry_then_success():
     assert isinstance(outcome, StructuredInvocationSuccess)
 
 
+@pytest.mark.parametrize('mode', ['sync', 'async'])
+@pytest.mark.parametrize('transport', [None, 'timeout', 'transport_error'])
+@pytest.mark.parametrize('case,expected', [('json', 'structured_output_invalid'), ('schema', 'structured_output_invalid'),
+    ('null', 'structured_output_invalid'), ('length', 'output_truncated'), ('filter', 'content_filtered'),
+    ('metadata', 'malformed_provider_response'), ('model', 'unexpected_model')])
+async def test_structured_decode_failure_preserves_uncertain_technical_attempt(mode, transport, case, expected):
+    from dataclasses import replace
+    response = make_response()
+    if case == 'json':
+        response = replace(response, content='{')
+    elif case == 'schema':
+        response = replace(response, content='{}')
+    elif case == 'null':
+        response = replace(response, content=None)
+    elif case in {'length', 'filter'}:
+        response = replace(response, finish_reason='length' if case == 'length' else 'content_filter')
+    elif case == 'metadata':
+        response = replace(response, usage={})
+    else:
+        response = replace(response, model_name='unexpected-test-model')
+    script = [response] if transport is None else [ProviderFailure(code=transport, retryable=True,
+        provider_status_code=None, retry_after_seconds=None), response]
+    provider, sleeper = ScriptedProviderAdapter(script), RecordingSleeper()
+    runtime = DeepSeekRuntime(provider=provider, sleeper=sleeper)
+    operation = runtime.start_operation(ModelRole.CANDIDATE_RESEARCH)
+    prompt = PromptEnvelope(system_text='Return a city', user_text='test')
+    result = (operation.invoke_structured(prompt, CitySchema) if mode == 'sync'
+        else await operation.ainvoke_structured(prompt, CitySchema))
+    assert isinstance(result, LLMInvocationFailure) and result.error.code.value == expected
+    assert result.error.possible_duplicate is (transport is not None)
+    assert not result.error.retryable and not hasattr(result, 'value')
+    assert provider.call_count == (1 if transport is None else 2)
+    assert operation.semantic_invocations_consumed == 1
+    with pytest.raises(AttributeError):
+        operation.semantic_invocations_consumed = 0
+    assert len(sleeper.sleeps + sleeper.async_sleeps) == (0 if transport is None else 1)
+    operation.close()
+    await runtime.aclose()
+
+
 def test_structured_non_retryable_failure():
     runtime = make_runtime([ProviderFailure(code="authentication_failed", retryable=False, provider_status_code=401, retry_after_seconds=None)])
     op = runtime.start_operation(ModelRole.REQUIREMENT_EXTRACTION)

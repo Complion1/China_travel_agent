@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from tests.unit.candidate_research.test_qualification import legal_judgment
 from pydantic import BaseModel
 
 from app.candidate_research import CandidateResearchControlFailureCode
@@ -47,6 +48,8 @@ async def test_search_query_wording_does_not_replace_required_objective_interest
         return structured(batch.model_copy(update={"actions": actions}))
 
     operation.responses.append(action_response)
+    if not copy_interest:
+        operation.responses.append(structured(NoUsefulActionProposed(reason_code="prior_no_progress")))
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel_artifact)
     maps = FakeMapAdapter(tuple(BaiduMapTimeoutError(capability=MapCapability.PLACE_SEARCH) for _ in range(3)))
@@ -58,7 +61,7 @@ async def test_search_query_wording_does_not_replace_required_objective_interest
         assert result.failure.failure_type == "map_failure"
         assert len(maps.search_requests) == 3
     else:
-        assert result.failure.code is CandidateResearchControlFailureCode.ACTION_BATCH_INVALID
+        assert result.failure.code is CandidateResearchControlFailureCode.ACTION_CORRECTION_EXHAUSTED
         assert not maps.search_requests
 
 
@@ -143,7 +146,7 @@ async def test_public_search_no_result_records_attempt_and_still_invokes_judgmen
     operation.responses.extend(
         (
             action_response,
-            structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())),
+            lambda _: legal_judgment(operation),
             structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
             structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
         )
@@ -282,13 +285,13 @@ async def test_public_details_no_result_is_persisted_without_retrying_same_uid()
         details = next(item for item in prompt_objectives if item["kind"] == "details_maturity")
         lunch = next(item for item in prompt_objectives if item["kind"] == "meal_lunch")
         return structured(ProposedActionBatch(actions=(
-            ProposedDetailsAction(ordinal=0, objective_id=details["objective_id"], uid=details["candidate_uids"][0]),
-            ProposedSearchAction(ordinal=1, objective_id=lunch["objective_id"], query="lunch", area_mode=SearchAreaMode.CITY, meal_intent=MealIntent.LUNCH),
+            ProposedSearchAction(ordinal=0, objective_id=lunch["objective_id"], query="lunch", area_mode=SearchAreaMode.CITY, meal_intent=MealIntent.LUNCH),
+            ProposedDetailsAction(ordinal=1, objective_id=details["objective_id"], uid=details["candidate_uids"][0]),
         )))
 
-    operation.responses.extend((initial_actions, structured(JudgmentPatch(role_updates=role_updates, interest_updates=(), meal_updates=(), requirement_group_updates=())), details_action, structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())), structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
+    operation.responses.extend((initial_actions, lambda _: legal_judgment(operation, JudgmentPatch(role_updates=role_updates, interest_updates=(), meal_updates=(), requirement_group_updates=())), details_action, lambda _: legal_judgment(operation), structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
     repository = FakeRepository(); repository.seed(hotel_ref, hotel_artifact)
-    map_adapter = FakeMapAdapter((search_success("place-1"), search_success("place-2"), details_no_result(), search_no_result()))
+    map_adapter = FakeMapAdapter((search_success("place-1"), search_success("place-2"), search_no_result(), details_no_result()))
     service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=map_adapter, artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
     result = await service.research_initial(request)
     assert result.outcome_type == "incomplete"

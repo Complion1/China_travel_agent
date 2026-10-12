@@ -258,7 +258,7 @@ async def test_input_business_preconditions_fail_before_io(scenario, invalid):
             "delivery_status": DeliveryStatus.AWAITING_USER}, strict=True)
         expected = "input_not_ready"
     else:
-        ref = parsed(ArtifactRef, {**tree(ref), "schema_version": "4.0"})
+        ref = parsed(ArtifactRef, {**tree(ref), "schema_version": "99.0"})
         state = TravelSessionState.model_validate({**state.model_dump(mode="python"), "artifact_refs": (ref,)}, strict=True)
         expected = "artifact_contract_error"
     request = ResultFormattingRequest(schema_version='2.0', state=state, itinerary_ref=ref)

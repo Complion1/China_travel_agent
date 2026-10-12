@@ -11,9 +11,13 @@ from app.workflow_contracts import ArtifactRef
 
 from .models import (
     EvidenceHandle, JudgmentPatch, RequirementGroupJudgmentUpdate,
-    RoleJudgmentUpdate, InterestJudgmentUpdate, MealJudgmentUpdate,
+    RoleJudgmentUpdate, InterestJudgmentUpdate, MealJudgmentUpdate, RequirementVerdictException,
 )
 from .fingerprints import candidate_handle, evidence_handle
+
+
+class JudgmentEvidenceMismatch(ValueError):
+    """Known evidence attached to the wrong visible candidate is correctable."""
 
 
 def _fresh_patch(patch: JudgmentPatch) -> JudgmentPatch:
@@ -48,9 +52,24 @@ def validate_judgment_patch(
             raise ValueError("invalid candidate evidence directory")
         owned_evidence[handle] = owned
 
+    # Unknown references anywhere in the patch are fatal, even when an earlier
+    # entry has a correctable ownership error. Classify the whole batch first.
+    updates = (*fresh.role_updates, *fresh.interest_updates, *fresh.meal_updates)
+    for update in updates:
+        if update.candidate_handle not in candidates or any(item.handle_id not in evidence for item in update.evidence_handles):
+            raise ValueError("unknown judgment reference")
+    for group in fresh.requirement_group_updates:
+        handles = (*group.default_evidence_handles, *(h for item in group.exceptions for h in item.evidence_handles))
+        if (not set(group.evaluated_candidate_handles).issubset(candidates)
+                or any(item.candidate_handle not in candidates for item in group.exceptions)
+                or any(item.handle_id not in evidence for item in handles)):
+            raise ValueError("unknown judgment reference")
+
     def require_owned(candidate: str, handles: Sequence[EvidenceHandle]) -> None:
+        if any(item.handle_id not in evidence for item in handles):
+            raise ValueError("unknown evidence handle")
         if any(item.handle_id not in owned_evidence[candidate] for item in handles):
-            raise ValueError("evidence handle does not belong to candidate")
+            raise JudgmentEvidenceMismatch("evidence handle does not belong to candidate")
 
     seen: set[str] = set()
     for update in (*fresh.role_updates, *fresh.interest_updates, *fresh.meal_updates):
@@ -92,6 +111,57 @@ def evidence_ref_directory(refs: Sequence[ArtifactRef]) -> Mapping[str, Artifact
     return {f"e:{index}": ref for index, ref in enumerate(refs)}
 
 
+def merge_requirement_update(current: RequirementGroupJudgmentUpdate,
+                             incoming: RequirementGroupJudgmentUpdate) -> RequirementGroupJudgmentUpdate:
+    """Defaults are scoped to each update's evaluated set, never the union."""
+    if (current.requirement_group_id, current.requirement_kind) != (
+            incoming.requirement_group_id, incoming.requirement_kind):
+        raise ValueError("requirement group identity mismatch")
+    values = {}
+    for group in (current, incoming):
+        exceptions = {item.candidate_handle: item for item in group.exceptions}
+        for handle in group.evaluated_candidate_handles:
+            item = exceptions.get(handle)
+            values[handle] = (item.verdict, item.reason_code, item.evidence_handles) if item else (
+                group.default_verdict, group.default_reason_code, group.default_evidence_handles)
+    if not values:
+        return current
+    handles = tuple(sorted(values, key=lambda value: int(value[2:])))
+    default = values[handles[0]]
+    return RequirementGroupJudgmentUpdate(requirement_group_id=current.requirement_group_id,
+        requirement_kind=current.requirement_kind, evaluated_candidate_handles=handles,
+        default_verdict=default[0], default_reason_code=default[1], default_evidence_handles=default[2],
+        exceptions=tuple(RequirementVerdictException(candidate_handle=handle,
+            verdict=values[handle][0], reason_code=values[handle][1], evidence_handles=values[handle][2])
+            for handle in handles if values[handle] != default))
+
+
+def merge_requirement_group_state(current, incoming):
+    """Persisted and public patch merging share the same scoped reducer."""
+    from .artifacts import ArtifactRequirementGroupState, ArtifactRequirementVerdictOverrideState
+    if current.requirement_item_ids != incoming.requirement_item_ids:
+        raise ValueError("requirement items cannot change during research")
+    def public(group):
+        return RequirementGroupJudgmentUpdate(requirement_group_id=group.group_id,
+            requirement_kind=group.requirement_kind,
+            evaluated_candidate_handles=tuple(candidate_handle(index) for index in group.evaluated_candidate_ordinals),
+            default_verdict=group.default_verdict, default_reason_code=group.default_reason_code,
+            default_evidence_handles=tuple(EvidenceHandle(handle_id=evidence_handle(index)) for index in group.default_evidence_indexes),
+            exceptions=tuple(RequirementVerdictException(candidate_handle=candidate_handle(item.candidate_ordinal),
+                verdict=item.verdict, reason_code=item.reason_code,
+                evidence_handles=tuple(EvidenceHandle(handle_id=evidence_handle(index)) for index in item.evidence_indexes))
+                for item in group.exceptions))
+    merged = merge_requirement_update(public(current), public(incoming))
+    return ArtifactRequirementGroupState(group_id=current.group_id, requirement_kind=current.requirement_kind,
+        requirement_item_ids=current.requirement_item_ids,
+        evaluated_candidate_ordinals=tuple(int(handle[2:]) for handle in merged.evaluated_candidate_handles),
+        default_verdict=merged.default_verdict, default_reason_code=merged.default_reason_code,
+        default_evidence_indexes=tuple(int(handle.handle_id[2:]) for handle in merged.default_evidence_handles),
+        exceptions=tuple(ArtifactRequirementVerdictOverrideState(candidate_ordinal=int(item.candidate_handle[2:]),
+            verdict=item.verdict, reason_code=item.reason_code,
+            evidence_indexes=tuple(int(handle.handle_id[2:]) for handle in item.evidence_handles)) for item in merged.exceptions))
+
+
 def merge_judgment_patch(current: JudgmentPatch, incoming: JudgmentPatch) -> JudgmentPatch:
     base = _fresh_patch(current)
     patch = _fresh_patch(incoming)
@@ -110,12 +180,14 @@ def merge_judgment_patch(current: JudgmentPatch, incoming: JudgmentPatch) -> Jud
     role = merge_by_key(base.role_updates, patch.role_updates, lambda item: (item.candidate_handle, item.role))
     interest = merge_by_key(base.interest_updates, patch.interest_updates, lambda item: (item.candidate_handle, item.interest))
     meal = merge_by_key(base.meal_updates, patch.meal_updates, lambda item: (item.candidate_handle, item.meal_intent))
-    groups = merge_by_key(base.requirement_group_updates, patch.requirement_group_updates, lambda item: item.requirement_group_id)
+    groups = {item.requirement_group_id: item for item in base.requirement_group_updates}
+    for item in patch.requirement_group_updates:
+        groups[item.requirement_group_id] = merge_requirement_update(groups[item.requirement_group_id], item) if item.requirement_group_id in groups else item
     merged = JudgmentPatch(
         role_updates=role,
         interest_updates=interest,
         meal_updates=meal,
-        requirement_group_updates=groups,
+        requirement_group_updates=tuple(groups.values()),
     )
     return _fresh_patch(merged)
 

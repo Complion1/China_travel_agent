@@ -98,6 +98,7 @@ class CandidateResearchStopReason(str, Enum):
     NO_PROGRESS = "no_progress"
     NO_LEGAL_ACTION = "no_legal_action"
     USEFUL_SUPPLY_NOT_FOUND = "useful_supply_not_found"
+    SEMANTIC_BUDGET_INSUFFICIENT = "semantic_budget_insufficient"
 
 
 class RoleReasonCode(str, Enum):
@@ -143,6 +144,7 @@ class CandidateResearchControlFailureCode(str, Enum):
     PROMPT_RESOURCE_INVALID = "prompt_resource_invalid"
     ACTION_BATCH_INVALID = "action_batch_invalid"
     JUDGMENT_PATCH_INVALID = "judgment_patch_invalid"
+    JUDGMENT_REQUIRED_MISSING = "judgment_required_missing"
     ARTIFACT_TOO_LARGE = "artifact_too_large"
     ARTIFACT_CAPACITY = "artifact_capacity"
     ARTIFACT_ERROR = "artifact_error"
@@ -153,6 +155,9 @@ class CandidateResearchControlFailureCode(str, Enum):
     PERSISTENCE_ERROR = "persistence_error"
     DEPENDENCY_CONTRACT_ERROR = "dependency_contract_error"
     SERVICE_USAGE_ERROR = "service_usage_error"
+    ACTION_CORRECTION_EXHAUSTED = "action_correction_exhausted"
+    STATE_INVARIANT_FAILED = "state_invariant_failed"
+    CONTEXT_CONTRACT_ERROR = "context_contract_error"
 
 
 class _PublicModel(BaseModel):
@@ -234,19 +239,27 @@ class CandidateResearchInitialRequest(_PublicModel):
 
 
 class CandidateResearchSupplementalRequest(_PublicModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.0", "2.0"] = "2.0"
     predecessor_candidate_set_ref: ArtifactRef
     gaps: Annotated[tuple["CandidateResearchGap", ...], Field(min_length=1, max_length=128)]
     operation_plan: CandidateResearchOperationPlan
 
     @model_validator(mode="after")
     def _predecessor_ref(self) -> "CandidateResearchSupplementalRequest":
-        if self.predecessor_candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.predecessor_candidate_set_ref.schema_version != "1.0" or self.predecessor_candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
+        if self.predecessor_candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.predecessor_candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0"} or self.predecessor_candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
             raise ValueError("supplemental request must reference candidate set artifact")
         if self.predecessor_candidate_set_ref.operation_id.run_id != self.operation_plan.run_id:
             raise ValueError("predecessor ref run must match operation plan")
-        if any(ref.artifact_type != "candidate_research.place_observation" or ref.schema_version != "1.0" or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH or ref.operation_id.run_id != self.operation_plan.run_id for gap in self.gaps for ref in gap.evidence_refs):
-            raise ValueError("gap evidence refs must be same-run place observations")
+        for gap in self.gaps:
+            state_proof = (self.schema_version == "2.0" and gap.gap_type in {
+                "candidate_count_shortfall", "meal_count_shortfall", "must_visit_resolution_missing"}
+                and gap.evidence_refs == (self.predecessor_candidate_set_ref,)
+                and self.predecessor_candidate_set_ref.schema_version in {"2.0", "3.0", "4.0"})
+            if not state_proof and any(ref.artifact_type != "candidate_research.place_observation" or ref.schema_version != "1.0"
+                    or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH or ref.operation_id.run_id != self.operation_plan.run_id for ref in gap.evidence_refs):
+                raise ValueError("gap evidence must be owned observations or exact v2 predecessor state proof")
+            if gap.gap_type == "meal_count_shortfall" and not state_proof:
+                raise ValueError("meal count requires exact predecessor state proof")
         if any(len({ref.artifact_id for ref in gap.evidence_refs}) != len(gap.evidence_refs) for gap in self.gaps):
             raise ValueError("gap evidence refs must be unique per gap")
         return self
@@ -289,6 +302,22 @@ class MealCoverageMissingGap(_GapBase):
     meal_intent: MealIntent
     anchor: ResearchAnchorRef
     radius_km: Literal[1, 3, 5, 10]
+
+
+class MealCountShortfallGap(_GapBase):
+    schema_version: Literal["2.0"] = "2.0"
+    gap_type: Literal["meal_count_shortfall"] = "meal_count_shortfall"
+    meal_intent: MealIntent
+    current_count: Annotated[int, Field(ge=0)]
+    target_count: Annotated[int, Field(ge=1)]
+    anchor: ResearchAnchorRef
+    radius_km: Literal[1, 3, 5, 10]
+
+    @model_validator(mode="after")
+    def _count(self):
+        if self.current_count >= self.target_count:
+            raise ValueError("meal quota must increase admitted supply")
+        return self
 
 
 class MustVisitResolutionMissingGap(_GapBase):
@@ -341,7 +370,7 @@ class ReplacementCandidateNeededGap(_GapBase):
 
 CandidateResearchGap: TypeAlias = Annotated[
     CandidateCountShortfallGap | InterestCoverageMissingGap | AreaCoverageMissingGap
-    | MealCoverageMissingGap | MustVisitResolutionMissingGap | AvoidResolutionMissingGap | CandidateDetailsMissingGap
+    | MealCoverageMissingGap | MealCountShortfallGap | MustVisitResolutionMissingGap | AvoidResolutionMissingGap | CandidateDetailsMissingGap
     | ReplacementCandidateNeededGap,
     Field(discriminator="gap_type"),
 ]
@@ -519,6 +548,13 @@ class CandidateDetailsState(_PublicModel):
         return self
 
 
+class MealAssessment(_PublicModel):
+    meal_intent: MealIntent
+    verdict: MatchVerdict
+    reason_code: MealReasonCode
+    evidence_indexes: Annotated[tuple[Annotated[int, Field(ge=0, le=47)], ...], Field(min_length=1, max_length=8)]
+
+
 class CandidateRecord(_PublicModel):
     schema_version: Literal["1.0"]
     admission_ordinal: Annotated[int, Field(ge=0, le=127)]
@@ -573,6 +609,17 @@ class CandidateRecord(_PublicModel):
         return self
 
 
+class CandidateRecordV2(CandidateRecord):
+    schema_version: Literal["2.0"]
+    meal_assessments: Annotated[tuple[MealAssessment, ...], Field(min_length=2, max_length=2)]
+
+    @model_validator(mode="after")
+    def _purpose_evidence(self):
+        from .purpose import validate_meal_assessments
+        validate_meal_assessments(self)
+        return self
+
+
 class KnownLLMUsage(_PublicModel):
     prompt_tokens: Annotated[int, Field(ge=0)]
     completion_tokens: Annotated[int, Field(ge=0)]
@@ -609,7 +656,7 @@ class ResearchCountSummary(_PublicModel):
 
 
 class ResearchCoverageSummary(_PublicModel):
-    effective_interests: Annotated[tuple[InterestTag, ...], Field(min_length=2, max_length=4)]
+    effective_interests: Annotated[tuple[InterestTag, ...], Field(min_length=1, max_length=4)]
     covered_interests: Annotated[tuple[InterestTag, ...], Field(min_length=0, max_length=4)]
     covered_meals: Annotated[tuple[MealIntent, ...], Field(min_length=0, max_length=2)]
     must_item_count: Annotated[int, Field(ge=0, le=100)]
@@ -708,6 +755,14 @@ class MealCoverageMissingSummary(_SummaryGapBase):
     radius_km: Literal[1, 3, 5, 10]
 
 
+class MealCountShortfallSummary(MealCoverageMissingSummary):
+    schema_version: Literal["2.0"] = "2.0"
+    gap_type: Literal["meal_count_shortfall"] = "meal_count_shortfall"
+    current_count: Annotated[int, Field(ge=0)]
+    target_count: Annotated[int, Field(ge=1)]
+    source_candidate_set_ref: ArtifactRef
+
+
 class MustVisitResolutionMissingSummary(_SummaryGapBase):
     gap_type: Literal["must_visit_resolution_missing"] = "must_visit_resolution_missing"
     requirement_group_id: StableId
@@ -756,7 +811,7 @@ class ReplacementCandidateNeededSummary(_SummaryGapBase):
 
 ResearchGapSummary: TypeAlias = Annotated[
     CandidateCountShortfallSummary | InterestCoverageMissingSummary | AreaCoverageMissingSummary
-    | MealCoverageMissingSummary | MustVisitResolutionMissingSummary | AvoidResolutionMissingSummary | CandidateDetailsMissingSummary
+    | MealCoverageMissingSummary | MealCountShortfallSummary | MustVisitResolutionMissingSummary | AvoidResolutionMissingSummary | CandidateDetailsMissingSummary
     | ReplacementCandidateNeededSummary,
     Field(discriminator="gap_type"),
 ]
@@ -821,7 +876,7 @@ class CandidateResearchCompleted(_PublicModel):
 
     @model_validator(mode="after")
     def _completed_gate(self) -> "CandidateResearchCompleted":
-        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version != "1.0" or self.candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
+        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0"} or self.candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
             raise ValueError("candidate_set_ref must reference candidate research candidate set")
         _validate_outcome_summary_relationships(self.counts, self.coverage)
         if self.counts.attraction_count < self.counts.attraction_target or self.counts.restaurant_count < self.counts.restaurant_target:
@@ -847,7 +902,7 @@ class CandidateResearchIncomplete(_PublicModel):
     coverage: ResearchCoverageSummary
     budgets: ResearchBudgetSummary
     gaps: Annotated[tuple[ResearchGapSummary, ...], Field(min_length=1, max_length=128)]
-    stop_reasons: Annotated[tuple[CandidateResearchStopReason, ...], Field(min_length=1, max_length=6)]
+    stop_reasons: Annotated[tuple[CandidateResearchStopReason, ...], Field(min_length=1, max_length=7)]
 
     @field_validator("stop_reasons")
     @classmethod
@@ -860,7 +915,7 @@ class CandidateResearchIncomplete(_PublicModel):
 
     @model_validator(mode="after")
     def _incomplete_summary_relationships(self) -> "CandidateResearchIncomplete":
-        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version != "1.0" or self.candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
+        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0"} or self.candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
             raise ValueError("candidate_set_ref must reference candidate research candidate set")
         _validate_outcome_summary_relationships(self.counts, self.coverage)
         return self
@@ -902,7 +957,7 @@ class CandidateResearchFailed(_PublicModel):
             ):
                 raise ValueError("map failure flags invalid")
         for ref in (self.last_consistent_candidate_set_ref, self.failure_artifact_ref):
-            if ref is not None and (ref.schema_version != "1.0" or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH):
+            if ref is not None and (ref.schema_version not in ({"1.0", "2.0", "3.0", "4.0"} if ref.artifact_type == "candidate_research.candidate_set" else {"1.0", "2.0", "3.0"} if ref.artifact_type == "candidate_research.model_judgment" else {"1.0", "2.0"} if ref.artifact_type == "candidate_research.model_action" else {"1.0"}) or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH):
                 raise ValueError("failure refs must use schema 1.0")
         failure_refs = [
             ref for ref in (self.last_consistent_candidate_set_ref, self.failure_artifact_ref)

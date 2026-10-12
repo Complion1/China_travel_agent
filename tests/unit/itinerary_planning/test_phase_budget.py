@@ -78,9 +78,17 @@ async def test_transport_five_requires_first_real_submit_only():
 
 
 @pytest.mark.asyncio
-async def test_last_repair_actual_tools_only_submit_and_five_is_total():
+async def test_last_repair_actual_tools_only_submit_and_five_is_total(monkeypatch):
     submits = [batch('submit_itinerary',invalid_submit(shift=i*30),str(i)) for i in range(5)]
     service, request, _, operation, _ = _fixture(*submits)
+    # Isolate the allocation gate with five distinct, progressively resolved hard obligations.
+    from app.itinerary_planning.service import _BusinessRejected
+    async def progressing_rejection(run, args, action_ref):
+        issues = tuple(dict(target=f"2026-09-03:main:lunch:{i}", rule="purpose_not_admitted", field="draft.days.visits",
+            candidate_handle=None,actual=[],expected="lunch",evidence_handles=[],allowed_actions=["replace_candidate"])
+            for i in range(6-run.submit_repair_used))
+        raise _BusinessRejected("qualification_rejected", issues=issues)
+    monkeypatch.setattr(service,"_submit",progressing_rejection)
     result = await service.plan_initial(request)
     assert result.stop_reasons == (PlanningStopReason.ITERATION_LIMIT_REACHED,)
     assert result.budgets.submit_repair_used == 5 and result.budgets.preparation_used == 1

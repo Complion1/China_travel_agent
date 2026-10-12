@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from pydantic import TypeAdapter
 
 from app.requirements.dialogue import render_clarification, render_confirmation_summary
+from app.requirements.interest_policy import interest_selection_error, pace_selection_error
 from app.requirements.evidence import verify_evidence
 from app.requirements.extraction_contract import (
     EvidenceVerified,
@@ -149,7 +150,7 @@ class RequirementDomainService:
         result = self._merger.merge(state.requirement, patch,
             verified_paths=(item.field_path.value for item in verified))
         state.requirement = result.requirement
-        metadata_paths = self._metadata_paths(state, patch)
+        metadata_paths = self._metadata_paths(state, patch) | set(result.changed_fields)
         state.issues = self._issues_after_merge(state, before, patch, result)
         update_metadata_for_patch(
             state.metadata,
@@ -190,6 +191,15 @@ class RequirementDomainService:
         working = state.model_copy(deep=True)
         missing = self._merger.detect_missing_fields(working.requirement)
         unresolved = [*working.issues, *self._merger.detect_conflicts(working.requirement)]
+        interest_error = interest_selection_error(working.requirement.preferences)
+        if interest_error:
+            unresolved.append(RequirementIssue(code=interest_error,
+                field_path=RequirementFieldPath.INTERESTS,
+                message="请选择1～4项不同兴趣，或单独选择由Agent决定"))
+        pace_error = pace_selection_error(working.requirement.preferences)
+        if pace_error:
+            unresolved.append(RequirementIssue(code=pace_error,
+                field_path=RequirementFieldPath.PACE, message="请选择节奏，或由Agent决定"))
         if working.confirmation_status != "awaiting_confirmation" or missing or unresolved:
             issue = RequirementIssue(
                 code=RequirementErrorCode.CONFIRMATION_NOT_READY.value,
@@ -239,7 +249,7 @@ class RequirementDomainService:
         before = working.requirement.model_copy(deep=True)
         result = self._merger.merge(working.requirement, patch)
         working.requirement = result.requirement
-        metadata_paths = self._metadata_paths(working, patch)
+        metadata_paths = self._metadata_paths(working, patch) | set(result.changed_fields)
         working.issues = self._issues_after_merge(working, before, patch, result)
         update_metadata_for_patch(
             working.metadata,
@@ -252,12 +262,13 @@ class RequirementDomainService:
         return self._decide_outcome(working, before, result)
 
     def _issues_after_merge(self, state, before, patch, result):
-        touched = set(iter_patch_leaf_paths(patch)) | set(result.derived_fields)
+        touched = set(iter_patch_leaf_paths(patch)) | set(result.derived_fields) | set(result.changed_fields)
         prior_validation = {(issue.code, issue.field_path)
             for issue in self._merger.detect_conflicts(before)}
         previous = [*state.issues, *(issue for meta in state.metadata.metadata.values() for issue in meta.issues)]
         remaining = [issue for issue in previous
             if issue.field_path.value not in touched
+            and issue.code not in {"interests_missing", "interests_invalid", "interest_selection_conflict", "pace_missing", "pace_invalid", "pace_selection_conflict"}
             and issue.code not in _HUB_ISSUE_CODES
             and issue.code != RequirementErrorCode.CONFIRMATION_NOT_READY.value
             and (issue.code, issue.field_path) not in prior_validation]
@@ -268,7 +279,9 @@ class RequirementDomainService:
         # Revalidate both endpoints so a repaired mismatch cannot leave its
         # unpatched counterpart marked INVALID in the clarification UI.
         prior_hub_paths = {path.value for path, meta in state.metadata.metadata.items()
-            if any(issue.code in _HUB_ISSUE_CODES for issue in meta.issues)}
+            if any(issue.code in _HUB_ISSUE_CODES or issue.code in {
+                "interests_missing", "interests_invalid", "interest_selection_conflict", "pace_missing", "pace_invalid", "pace_selection_conflict"
+            } for issue in meta.issues)}
         return set(iter_patch_leaf_paths(patch)) | prior_hub_paths
 
     async def _extract_with_one_repair(
@@ -545,14 +558,18 @@ class RequirementDomainService:
         result: MergeResult,
     ) -> RequirementDomainTransition:
         missing = self._merger.detect_missing_fields(state.requirement)
-        needs_interests = (
-            state.requirement.preferences.interests is None
-            and not state.requirement.preferences.agent_decides_interests
-        )
-        needs_pace = (
-            state.requirement.preferences.pace is None
-            and not state.requirement.preferences.agent_decides_pace
-        )
+        interest_error = interest_selection_error(state.requirement.preferences)
+        needs_interests = interest_error is not None
+        if interest_error:
+            state.issues = _unique_issues([*state.issues, RequirementIssue(
+                code=interest_error, field_path=RequirementFieldPath.INTERESTS,
+                message="请选择1～4项不同兴趣，或单独选择由Agent决定")])
+        pace_error = pace_selection_error(state.requirement.preferences)
+        needs_pace = pace_error is not None
+        if pace_error:
+            state.issues = _unique_issues([*state.issues, RequirementIssue(
+                code=pace_error, field_path=RequirementFieldPath.PACE,
+                message="请选择一种行程节奏，或单独选择由Agent决定")])
         if missing or state.issues or needs_interests or needs_pace:
             state.confirmation_status = "collecting"
             return self._need_clarification(

@@ -9,10 +9,10 @@ from importlib.resources import files
 from .errors import CandidateResearchConfigurationError
 
 
-ACTION_PROMPT_VERSION = "action-v1"
-OBSERVATION_PROMPT_VERSION = "observation-v1"
-ACTION_PROMPT_RESOURCE = "action_v1.txt"
-OBSERVATION_PROMPT_RESOURCE = "observation_v1.txt"
+ACTION_PROMPT_VERSION = "action-v2"
+OBSERVATION_PROMPT_VERSION = "observation-v4"
+ACTION_PROMPT_RESOURCE = "action_v2.txt"
+OBSERVATION_PROMPT_RESOURCE = "observation_v4.txt"
 
 
 def _read_prompt(resource_name: str, expected_sha256: str) -> str:
@@ -43,8 +43,8 @@ def _read_prompt(resource_name: str, expected_sha256: str) -> str:
 
 
 # Values are intentionally literals: changing a resource without changing code fails closed.
-ACTION_PROMPT_SHA256 = "42543126633587e77067807dafb9e10baa9a8f6ac3857bc8c8c007d0dc54c131"
-OBSERVATION_PROMPT_SHA256 = "db587f2cbf3d8faecc6b8d8fcffba0a670525e26ca32a1f73551f0c8faacdbcc"
+ACTION_PROMPT_SHA256 = "07df0a47f531f2b2d48ca956b912611f5b61b31bb174c370ed43faee2440c5eb"
+OBSERVATION_PROMPT_SHA256 = "4c00fe74f0e47390e9bddfa3d93251cca732a44de9376b485eb2eb11ec7d54cb"
 ACTION_PROMPT_CONTENT_DIGEST = "sha256:" + ACTION_PROMPT_SHA256
 OBSERVATION_PROMPT_CONTENT_DIGEST = "sha256:" + OBSERVATION_PROMPT_SHA256
 

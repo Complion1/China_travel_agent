@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
+from tests.unit.candidate_research.test_qualification import legal_judgment
 
 from app.candidate_research.service import CandidateResearchService
 from app.candidate_research import (
@@ -105,7 +106,7 @@ async def _initial_with_predecessor() -> tuple[CandidateResearchService, Candida
         import json
         objective_id = json.loads(operation.prompts[-1].user_text)["objectives"][0]["objective_id"]
         return structured(ProposedActionBatch(actions=(ProposedSearchAction(ordinal=0, objective_id=objective_id, query="museum", area_mode=SearchAreaMode.CITY),)))
-    operation.responses.extend((action, structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())), structured(NoUsefulActionProposed(reason_code="prior_no_progress")), structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
+    operation.responses.extend((action, lambda _: legal_judgment(operation), structured(NoUsefulActionProposed(reason_code="prior_no_progress")), structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
     repository = FakeRepository(); repository.seed(hotel_ref, hotel_artifact)
     service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=FakeMapAdapter((search_no_result(),)), artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
     await service.research_initial(initial)
@@ -193,30 +194,15 @@ async def test_public_supplemental_must_coverage_is_restored_resolved_and_replay
             )
         )
 
-    def ignored_initial_action(_count: int):
-        objective = json.loads(operation.prompts[-1].user_text)["objectives"][1]
-        if objective["kind"] == "initial_hotel_restaurant_nearby":
-            action = ProposedSearchAction(
-                ordinal=0,
-                objective_id=objective["objective_id"],
-                query="ignored-nearby",
-                area_mode=SearchAreaMode.NEARBY,
-                anchor=HotelAnchorRef(),
-                radius_km=3,
-            )
-        else:
-            action = ProposedSearchAction(
-                ordinal=0,
-                objective_id=objective["objective_id"],
-                query="ignored",
-                area_mode=SearchAreaMode.CITY,
-            )
-        return structured(ProposedActionBatch(actions=(action,)))
+    def cached_initial_action(_count: int):
+        objective = json.loads(operation.prompts[-1].user_text)["objectives"][0]
+        return structured(ProposedActionBatch(actions=(ProposedSearchAction(
+            ordinal=0, objective_id=objective["objective_id"], query="West Lake", area_mode=SearchAreaMode.CITY),)))
 
     operation.responses.extend(
         (
             initial_action,
-            structured(
+            lambda _: legal_judgment(operation,
                 JudgmentPatch(
                     role_updates=(
                         RoleJudgmentUpdate(
@@ -232,7 +218,7 @@ async def test_public_supplemental_must_coverage_is_restored_resolved_and_replay
                     requirement_group_updates=(),
                 )
             ),
-            ignored_initial_action,
+            cached_initial_action,
             structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
         )
     )
@@ -294,6 +280,7 @@ async def test_public_supplemental_must_coverage_is_restored_resolved_and_replay
         )
 
     def supplemental_search(_count: int):
+        assert json.loads(operation.prompts[-1].user_text)["requirements"][0]["confirmed_name"] == "West Lake"
         objective = json.loads(operation.prompts[-1].user_text)["objectives"][0]
         return structured(
             ProposedActionBatch(
@@ -310,7 +297,8 @@ async def test_public_supplemental_must_coverage_is_restored_resolved_and_replay
 
     def resolving_judgment(_count: int):
         group = json.loads(operation.prompts[-1].user_text)["requirements"][0]
-        return structured(
+        assert group["confirmed_name"] == "West Lake"
+        return legal_judgment(operation,
             JudgmentPatch(
                 role_updates=(),
                 interest_updates=(),
@@ -336,38 +324,23 @@ async def test_public_supplemental_must_coverage_is_restored_resolved_and_replay
             )
         )
 
-    def ignored_supplemental_action(_count: int):
-        objective = json.loads(operation.prompts[-1].user_text)["objectives"][1]
-        if objective["kind"] == "initial_hotel_restaurant_nearby":
-            action = ProposedSearchAction(
-                ordinal=0,
-                objective_id=objective["objective_id"],
-                query="ignored-supplemental-nearby",
-                area_mode=SearchAreaMode.NEARBY,
-                anchor=HotelAnchorRef(),
-                radius_km=3,
-            )
-        else:
-            action = ProposedSearchAction(
-                ordinal=0,
-                objective_id=objective["objective_id"],
-                query="ignored-supplemental",
-                area_mode=SearchAreaMode.CITY,
-                interest=InterestTag(objective["interest"]) if objective.get("interest") is not None else None,
-                meal_intent=MealIntent(objective["meal_intent"]) if objective.get("meal_intent") is not None else None,
-            )
-        return structured(ProposedActionBatch(actions=(action,)))
+    def cached_supplemental_action(_count: int):
+        objective = json.loads(operation.prompts[-1].user_text)["objectives"][0]
+        return structured(ProposedActionBatch(actions=(ProposedSearchAction(
+            ordinal=0, objective_id=objective["objective_id"], query="west-lake-follow-up", area_mode=SearchAreaMode.CITY),)))
 
     operation.responses.extend(
         (
             supplemental_details,
-            structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())),
+            lambda _: legal_judgment(operation),
             supplemental_search,
             resolving_judgment,
-            ignored_supplemental_action,
+            cached_supplemental_action,
         )
     )
-    map_adapter.responses.extend((details_success("must-place"), search_success("must-place-alternative")))
+    later_search = search_success("must-place-alternative")
+    later_search = later_search.model_copy(update={"places": (*search_success("must-place").places, *later_search.places)})
+    map_adapter.responses.extend((details_success("must-place"), later_search))
     supplemental = CandidateResearchSupplementalRequest(
         predecessor_candidate_set_ref=predecessor_ref,
         gaps=(gap,),
@@ -459,10 +432,10 @@ async def _avoid_predecessor():
 
     def initial_action(_count: int):
         objective = json.loads(operation.prompts[-1].user_text)["objectives"][0]
-        query = "target" if _count in {1, 3} else "extra"
+        query = "夜市" if _count in {1, 3} else "extra"
         return structured(ProposedActionBatch(actions=(ProposedSearchAction(ordinal=0, objective_id=objective["objective_id"], query=query, area_mode=SearchAreaMode.CITY),)))
 
-    empty_patch = structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=()))
+    empty_patch = lambda _: legal_judgment(operation)
     operation.responses.extend((initial_action, empty_patch, initial_action, initial_action, empty_patch, initial_action, structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel_artifact)
@@ -485,7 +458,7 @@ async def test_public_supplemental_avoid_target_resolution_is_satisfied_and_repl
         ProposedDetailsAction(ordinal=0, objective_id=json.loads(operation.prompts[-1].user_text)["objectives"][0]["objective_id"], uid="target-1"),
         ProposedDetailsAction(ordinal=1, objective_id=json.loads(operation.prompts[-1].user_text)["objectives"][0]["objective_id"], uid="extra-1"),
     )))
-    operation.responses.extend((objective_action, structured(JudgmentPatch(
+    operation.responses.extend((objective_action, lambda _: legal_judgment(operation, JudgmentPatch(
         role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=(RequirementGroupJudgmentUpdate(
             requirement_group_id=gap.requirement_group_id,
             requirement_kind="avoid",
@@ -531,7 +504,7 @@ async def test_public_supplemental_avoid_new_unresolved_candidate_keeps_gap_pend
             query="new",
             area_mode=SearchAreaMode.CITY,
         ),))),
-        structured(JudgmentPatch(
+        lambda _: legal_judgment(operation, JudgmentPatch(
             role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=(RequirementGroupJudgmentUpdate(
                 requirement_group_id=gap.requirement_group_id,
                 requirement_kind="avoid",
@@ -546,7 +519,10 @@ async def test_public_supplemental_avoid_new_unresolved_candidate_keeps_gap_pend
             ),),
         )),
     ))
-    map_adapter.responses.append(search_success("new-1"))
+    refreshed_search = search_success("new-1")
+    refreshed_search = refreshed_search.model_copy(update={"places": (*search_success("target-1").places,
+        *search_success("extra-1").places, *refreshed_search.places)})
+    map_adapter.responses.append(refreshed_search)
     plan = CandidateResearchOperationPlan(run_id=run_id, iteration_slots=slots, terminal_successor_operation_id=OperationId(run_id=run_id, phase=WorkflowPhase.CANDIDATE_RESEARCH, logical_step="supplemental_new_terminal"))
     request = CandidateResearchSupplementalRequest.model_validate_json(json.dumps({
         "predecessor_candidate_set_ref": predecessor_ref.model_dump(mode="json", exclude_none=False),
@@ -596,7 +572,7 @@ async def test_public_supplemental_candidate_count_gap_uses_current_head_and_evi
             query="initial-candidate-count",
             area_mode=SearchAreaMode.CITY,
         ),))),
-        structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())),
+        lambda _: legal_judgment(operation),
         structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
     ))
     repository = FakeRepository(); repository.seed(hotel_ref, hotel_artifact)
@@ -621,7 +597,7 @@ async def test_public_supplemental_candidate_count_gap_uses_current_head_and_evi
             query="supplemental-candidate-count",
             area_mode=SearchAreaMode.CITY,
         ),))),
-        structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())),
+        lambda _: legal_judgment(operation),
         structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
     ))
     map_adapter.responses.append(search_success("supplemental-place"))
@@ -635,3 +611,67 @@ async def test_public_supplemental_candidate_count_gap_uses_current_head_and_evi
     result = await service.research_supplemental(request)
     assert result.outcome_type in {"incomplete", "failed"}
     assert map_adapter.call_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_replacement_supplement_checks_new_uid_purpose_and_replays_without_baseline_loss():
+    from app.candidate_research import ReplacementCandidateNeededGap
+    from tests.unit.candidate_research.test_service_initial import _request
+    run_id = uuid4()
+    initial, hotel_ref, hotel_artifact, _ = _request(run_id, place_width=1)
+    model = FakeModelOperation()
+    def search(_count):
+        objective = json.loads(model.prompts[-1].user_text)["objectives"][0]
+        return structured(ProposedActionBatch(actions=(ProposedSearchAction(ordinal=0, objective_id=objective["objective_id"],
+            query="replacement-search" if _count <= 5 else "replacement-follow-up", area_mode=SearchAreaMode.CITY),)))
+    def supported(ordinal, evidence, role=ResearchRole.ATTRACTION):
+        return structured(JudgmentPatch(role_updates=(RoleJudgmentUpdate(candidate_handle=f"c:{ordinal}", role=role,
+            verdict=RoleVerdict.SUPPORTED, reason_code=RoleReasonCode.PROVIDER_CATEGORY_SUPPORTS,
+            evidence_handles=(EvidenceHandle(handle_id=f"e:{evidence}"),)),), interest_updates=(), meal_updates=(), requirement_group_updates=()))
+    def no_result_action(_count):
+        objective = json.loads(model.prompts[-1].user_text)["objectives"][0]
+        if objective["kind"] == "details_maturity":
+            action = ProposedDetailsAction(ordinal=0, objective_id=objective["objective_id"], uid=objective["candidate_uids"][0])
+        elif objective["kind"] == "initial_hotel_restaurant_nearby":
+            action = ProposedSearchAction(ordinal=0, objective_id=objective["objective_id"], query="ignored", area_mode=SearchAreaMode.NEARBY,
+                anchor=HotelAnchorRef(), radius_km=3)
+        else:
+            action = ProposedSearchAction(ordinal=0, objective_id=objective["objective_id"], query="ignored", area_mode=SearchAreaMode.CITY,
+                interest=InterestTag(objective["interest"]) if objective.get("interest") else None,
+                meal_intent=MealIntent(objective["meal_intent"]) if objective.get("meal_intent") else None)
+        return structured(ProposedActionBatch(actions=(action,)))
+    no_action = structured(NoUsefulActionProposed(reason_code="prior_no_progress"))
+    empty = lambda _: legal_judgment(model)
+    model.responses.extend((search, lambda _: legal_judgment(model, supported(0, 0).value), no_result_action, empty, no_action))
+    repository = FakeRepository(); repository.seed(hotel_ref, hotel_artifact)
+    adapter = FakeMapAdapter((search_success("old-place"), search_no_result()))
+    budget = FakeBudgetManager(run_id)
+    service = CandidateResearchService(runtime=FakeRuntime(model), map_adapter=adapter, artifact_repository=repository, budget_manager=budget)
+    predecessor_result = await service.research_initial(initial)
+    assert predecessor_result.outcome_type == "incomplete", predecessor_result
+    predecessor = (await repository.get(predecessor_result.candidate_set_ref, expected_model=CandidateResearchArtifact)).content.record.state
+    gap = ReplacementCandidateNeededGap(gap_id="gap:new-attraction", evidence_refs=(predecessor.observation_refs[0],),
+        rejected_uid="old-place", role=ResearchRole.ATTRACTION)
+    remaining = predecessor.budgets.iteration_limit - predecessor.budgets.iterations_consumed
+    request = CandidateResearchSupplementalRequest(predecessor_candidate_set_ref=predecessor_result.candidate_set_ref, gaps=(gap,),
+        operation_plan=CandidateResearchOperationPlan(run_id=run_id, iteration_slots=_slots(run_id, count=remaining, prefix="replacement"),
+            terminal_successor_operation_id=OperationId(run_id=run_id, phase=WorkflowPhase.CANDIDATE_RESEARCH, logical_step="replacement_terminal")))
+    model.responses.extend((search, lambda _: legal_judgment(model, supported(1, 2).value), no_result_action, empty, no_action))
+    adapter.responses.extend((search_success("new-place"), search_no_result()))
+    result = await service.research_supplemental(request)
+    assert result.outcome_type == "incomplete", result.failure.model_dump(mode="json") if result.outcome_type == "failed" else result.outcome_type
+    terminal = (await repository.get(result.candidate_set_ref, expected_model=CandidateResearchArtifact)).content.record.state
+    assert not any(item.gap_type == "replacement_candidate_needed" for item in terminal.pending_gaps)
+    run = service._runs[run_id]
+    assert run.supplemental_baseline_uids == frozenset({"old-place"})
+    assert service._gap_satisfied(run, gap)
+    assert not service._gap_satisfied(terminal, gap)
+    new = next(item for item in terminal.candidates if item.core.uid == "new-place")
+    wrong_role = new.model_copy(update={"roles": tuple(role.model_copy(update={"verdict": RoleVerdict.UNRESOLVED,
+        "reason_code": RoleReasonCode.EVIDENCE_INSUFFICIENT}) if role.role is ResearchRole.ATTRACTION else role for role in new.roles)})
+    run.state = terminal.model_copy(update={"candidates": tuple(wrong_role if item.core.uid == new.core.uid else item for item in terminal.candidates)})
+    assert not service._gap_satisfied(run, gap)
+    run.state = terminal
+    counts = (model.call_count, adapter.call_count, budget.consume_count, len(repository.put_requests))
+    assert await service.research_supplemental(request) == result
+    assert counts == (model.call_count, adapter.call_count, budget.consume_count, len(repository.put_requests))

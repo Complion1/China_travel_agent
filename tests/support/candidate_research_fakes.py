@@ -89,6 +89,7 @@ class FakeModelOperation:
         self.closed = False
         self.close_count = 0
         self.call_count = 0
+        self._admitted_count = 0
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.block = False
@@ -105,12 +106,19 @@ class FakeModelOperation:
         if not self.responses:
             raise RuntimeError("no fake response")
         step = self.responses.pop(0)
+        self._admitted_count += 1
         value = step(self.call_count) if callable(step) else step
         if isinstance(value, BaseException):
             raise value
         if not isinstance(value, (StructuredInvocationSuccess, LLMInvocationFailure)):
             raise RuntimeError("fake response is not a structured invocation outcome")
+        if isinstance(value, LLMInvocationFailure) and value.error.code.value in {'schema_unsupported', 'input_too_large', 'quota_exhausted'}:
+            self._admitted_count -= 1
         return value
+
+    @property
+    def semantic_invocations_consumed(self) -> int:
+        return self._admitted_count
 
     def close(self) -> None:
         self.close_count += 1

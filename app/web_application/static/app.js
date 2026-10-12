@@ -25,7 +25,15 @@
   async function session(){const data=await api("/api/session");csrf=data.csrf_token;}
   const phases={requirements:"确认需求",hotel_selection:"选择酒店",candidate_research:"查找候选",itinerary_planning:"规划行程",validation:"核验行程",budget_evaluation:"检查行程预算",output_formatting:"整理攻略"};
   const activities={idle:"准备中",executing:"正在执行",awaiting_user:"等待你的选择",recovery_required:"需要明确恢复",cancelling:"正在取消",blocked:"当前任务无法安全继续",incompatible:"任务版本不兼容",terminal:"已结束"};
-  const terminal={workflow_completed:"攻略已完成",workflow_degraded:"攻略已完成，部分信息不足",cancelled_by_user:"已取消",hotel_declined:"已放弃酒店选择",workflow_provider_failed:"规划失败，模型调用或输出校验未通过",requirement_failed:"旅行需求未通过校验"};
+  const terminal={workflow_completed:"攻略已完成",workflow_degraded:"攻略已完成，部分信息不足",cancelled_by_user:"已取消",hotel_declined:"已放弃酒店选择",workflow_provider_failed:"规划失败，模型服务调用未成功",workflow_model_output_invalid:"规划失败，模型输出未通过格式或完整性校验",research_context_invalid:"研究失败，已确认需求的内部目录不完整",research_correction_exhausted:"研究失败，候选查询动作经定向纠错仍未满足要求",research_judgment_invalid:"研究失败，候选判断的引用或用途证据不符合要求",research_state_invalid:"研究失败，候选增量更新未通过一致性检查",workflow_replay_mismatch:"任务记录与当前请求不一致，无法安全继续",requirement_failed:"旅行需求未通过校验"};
+  Object.assign(terminal, {
+    research_no_candidates: "研究失败，地图查询未找到候选地点",
+    research_judgments_unfinished: "研究失败，必要候选资格判断尚未完成",
+    research_evidence_insufficient: "研究失败，现有证据不足以确认候选用途",
+    research_candidates_unsuitable: "研究失败，已核验候选不符合用途或避开要求",
+    research_recovery_exhausted: "研究失败，经允许的修正仍未补齐必要判断",
+    research_budget_exhausted: "研究失败，研究或模型调用额度已用尽"
+  });
   function inputIssues(view){
     const parent=$("input-issues");if(!parent)return;
     parent.replaceChildren();const issues=view.input_issues||[];parent.hidden=!issues.length;

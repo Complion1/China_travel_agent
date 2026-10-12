@@ -10,7 +10,7 @@ from app.candidate_research.artifacts import (
     CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS, ActionModelOutcomeSnapshot,
     ArtifactInvocationMetadataSnapshot, ArtifactKnownLLMUsageSnapshot,
     ActionDispositionSnapshot, CandidateResearchModelActionArtifact,
-    CandidateResearchModelJudgmentArtifact, ModelJudgmentAcceptedRecord,
+    CandidateResearchLegacyModelJudgmentArtifact as CandidateResearchModelJudgmentArtifact, ModelJudgmentAcceptedRecord,
     ModelJudgmentControllerRejectedRecord, JudgmentPatchSnapshot,
     ModelActionAcceptedRecord, ModelActionPolicyRejectedRecord, NoUsefulActionProposedSnapshot,
     ProposedActionBatchSnapshot, ProposedSearchActionSnapshot, _artifact_write_request,
@@ -24,7 +24,7 @@ from app.candidate_research.artifacts import (
     ArtifactResearchAnchorSnapshot, ArtifactRequirementGroupJudgmentUpdateSnapshot,
     ArtifactRequirementVerdictExceptionSnapshot,
     FailedCandidateSetRecord, ArtifactMapResearchFailureSnapshot,
-    CompletedCandidateSetRecord, CandidateResearchArtifact, InProgressCandidateSetRecord,
+    CompletedCandidateSetRecord, CandidateResearchLegacyArtifact as CandidateResearchArtifact, InProgressCandidateSetRecord,
     ArtifactCandidateDetailsMissingSummary, ArtifactRequirementGroupState,
     ArtifactAvoidResolutionMissingSummary, SearchCoverageRecord,
 )
@@ -154,7 +154,7 @@ def _action_artifact():
 
 def test_registrations_and_type_graph_are_strict():
     assert tuple(item.artifact_type for item in CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS) == (
-        "candidate_research.model_action", "candidate_research.model_judgment", "candidate_research.place_observation", "candidate_research.candidate_set",
+        "candidate_research.model_action", "candidate_research.model_action", "candidate_research.model_judgment", "candidate_research.model_judgment", "candidate_research.model_judgment", "candidate_research.place_observation", "candidate_research.candidate_set", "candidate_research.candidate_set", "candidate_research.candidate_set", "candidate_research.candidate_set",
     )
     ArtifactSchemaRegistry(CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS)
     assert ActionModelOutcomeSnapshot is not NoUsefulActionProposedSnapshot
@@ -591,7 +591,7 @@ def test_artifact_local_control_failure_evidence_ref_rejects_wrong_version_phase
         include_last_consistent_ref=True,
     )
     if invalid_ref_field == "schema_version":
-        payload["failure_artifact_ref"]["schema_version"] = "2.0"
+        payload["failure_artifact_ref"]["schema_version"] = "99.0"
     elif invalid_ref_field == "phase":
         payload["failure_artifact_ref"]["operation_id"]["phase"] = "hotel_selection"
     else:

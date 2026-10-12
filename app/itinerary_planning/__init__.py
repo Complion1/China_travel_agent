@@ -64,12 +64,16 @@ from .models import (
     TransportSemantic,
     VisitKind,
     PlanDirectionsArgs,
+    PurposeVisitIntent,
+    ProposedItineraryPatch,
 )
 from .protocols import ItineraryPlanningPort
 from .service import ItineraryPlanningService
 
 
 __all__ = (
+    "PurposeVisitIntent",
+    "ProposedItineraryPatch",
     "ITINERARY_PLANNING_SCHEMA_VERSION",
     "ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY",
     "ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY",

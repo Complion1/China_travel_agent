@@ -51,6 +51,13 @@ def map_provenance(capability: MapCapability) -> MapProvenance:
     )
 
 
+def query_intents(day, handles):
+    """Explicit attraction intents for existing route-only fixtures; never production inference."""
+    from app.itinerary_planning.models import PurposeVisitIntent, VisitKind
+    return tuple(PurposeVisitIntent(date=day, candidate_handle=handle, visit_kind=VisitKind.ATTRACTION,
+        is_backup=False) for handle in dict.fromkeys(handles) if handle.startswith("candidate-handle-"))
+
+
 def directions_success(
     *,
     distance_m: int = 1200,

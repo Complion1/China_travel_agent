@@ -54,7 +54,11 @@ from app.requirements.models import (
 from app.requirements.service import RequirementDomainService
 from app.requirements.normalization import validate_requirement_hubs
 
+from .interest_policy import interest_selection_error, pace_selection_error
+
 __all__ = [
+    "interest_selection_error",
+    "pace_selection_error",
     "Clock",
     "ConfirmedTravelRequirement",
     "EvidenceReceipt",

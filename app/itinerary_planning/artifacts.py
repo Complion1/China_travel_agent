@@ -547,6 +547,19 @@ class MealCoverageTargetSnapshot(_ArtifactModel):
     radius_km: Literal[1, 3, 5, 10]
 
 
+class MealCountTargetSnapshot(MealCoverageTargetSnapshot):
+    schema_version: Literal["2.0"]
+    target_type: Literal["meal_count"]
+    current_count: Annotated[int, Field(ge=0)]
+    target_count: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def _count(self):
+        if self.current_count >= self.target_count:
+            raise ValueError("meal quota already satisfied")
+        return self
+
+
 class MustResolutionTargetSnapshot(_ArtifactModel):
     schema_version: Literal["1.0"]
     target_type: Literal["must_resolution"]
@@ -584,7 +597,7 @@ class ReplacementTargetSnapshot(_ArtifactModel):
 
 
 CandidateSupplementTargetSnapshot: TypeAlias = Annotated[
-    CandidateCountTargetSnapshot | AreaCoverageTargetSnapshot | MealCoverageTargetSnapshot
+    CandidateCountTargetSnapshot | AreaCoverageTargetSnapshot | MealCoverageTargetSnapshot | MealCountTargetSnapshot
     | MustResolutionTargetSnapshot | AvoidResolutionTargetSnapshot | CandidateDetailsTargetSnapshot
     | ReplacementTargetSnapshot,
     Field(discriminator="target_type"),
@@ -694,6 +707,7 @@ class BackupUnavailableGapSummarySnapshot(_ArtifactGapSummaryBase):
 
 
 class CandidateSupplyGapSummarySnapshot(_ArtifactGapSummaryBase):
+    schema_version: Literal["1.0", "2.0"]
     summary_type: Literal["candidate_supply"]
     date: date | None
     target: CandidateSupplementTargetSnapshot
@@ -762,7 +776,7 @@ class _PlanningBudgetSummarySnapshotV2(_ArtifactModel):
 
 
 class PlanningBudgetSummarySnapshot(_PlanningBudgetSummarySnapshotV2):
-    schema_version: Literal["3.0"]
+    schema_version: Literal["3.0", "4.0"]
     model_invocation_limit: Literal[19]
     model_invocations_consumed: Annotated[int, Field(ge=0, le=19)]
     normal_invocation_limit: Literal[17]
@@ -897,7 +911,7 @@ class _PlanningStateSnapshotV2(_ArtifactModel):
 
     @model_validator(mode="after")
     def _counts(self):
-        keys = ("model_invocations_consumed", "preparation_used", "transport_used", "submit_repair_used", "supplement_request_used") + (("format_repair_used",) if self.schema_version == "3.0" else ())
+        keys = ("model_invocations_consumed", "preparation_used", "transport_used", "submit_repair_used", "supplement_request_used") + (("format_repair_used",) if self.schema_version in {"3.0", "4.0"} else ())
         if any(getattr(self, key) != getattr(self.budgets, key) for key in keys):
             raise ValueError("state and budget counts differ")
         if self.budgets.budget_snapshot_complete and sum(getattr(self, key) for key in keys[1:]) != self.model_invocations_consumed:
@@ -912,7 +926,17 @@ class PlanningStateSnapshot(_PlanningStateSnapshotV2):
     format_repair_used: Annotated[int, Field(ge=0, le=2)]
 
 
-PlanningState = Annotated[PlanningStateSnapshot | _PlanningStateSnapshotV2, Field(discriminator="schema_version")]
+class _PlanningStateSnapshotV4(PlanningStateSnapshot):
+    schema_version: Literal["4.0"]
+    correction_targets: Annotated[tuple[Annotated[str, StringConstraints(min_length=1, max_length=1024)], ...], Field(max_length=1024)]
+    correction_plan_fingerprints: Annotated[tuple[ArtifactDigest, ...], Field(max_length=19)]
+    correction_evidence_fingerprint: ArtifactDigest | None
+    correction_fact_fingerprints: Annotated[tuple[tuple[ArtifactDigest, ArtifactDigest], ...], Field(max_length=1024)]
+    correction_no_progress: Annotated[int, Field(ge=0, le=2)]
+    last_proposal_fingerprint: ArtifactDigest | None
+
+
+PlanningState = Annotated[_PlanningStateSnapshotV4 | PlanningStateSnapshot | _PlanningStateSnapshotV2, Field(discriminator="schema_version")]
 
 
 class InProgressItineraryRecord(_ArtifactModel):
@@ -992,12 +1016,12 @@ ItineraryRecord: TypeAlias = Annotated[
 
 
 class ItineraryPlanningModelActionArtifact(_ArtifactModel):
-    schema_version: Literal["5.0", "6.0"]
+    schema_version: Literal["5.0", "6.0", "7.0"]
     request_digest: ArtifactDigest
     invocation_index: Annotated[int, Field(ge=0, le=18)]
     request_stage: Literal["preparation", "transport", "submit_repair"]
     budget_category: Literal["preparation", "transport", "submit_repair", "supplement_request", "format_repair"]
-    prompt_version: Literal["planning-v5", "planning-v6"]
+    prompt_version: Literal["planning-v5", "planning-v6", "planning-v7"]
     prompt_hash: ArtifactDigest
     action_kind: Literal["tool_calls", "final_text", "llm_failure"]
     call_summaries: Annotated[tuple[ModelCallSummary, ...], Field(min_length=0, max_length=71)]
@@ -1009,6 +1033,8 @@ class ItineraryPlanningModelActionArtifact(_ArtifactModel):
         if self.schema_version == "5.0" and (self.invocation_index > 16 or self.prompt_version != "planning-v5" or self.budget_category == "format_repair"):
             raise ValueError("legacy model action bounds/version mismatch")
         if self.schema_version == "6.0" and self.prompt_version != "planning-v6":
+            raise ValueError("model action prompt version mismatch")
+        if self.schema_version == "7.0" and self.prompt_version != "planning-v7":
             raise ValueError("model action prompt version mismatch")
         if self.action_kind == "tool_calls" and (not self.call_summaries or self.invocation_metadata is None):
             raise ValueError("tool-call action requires calls and metadata")
@@ -1034,7 +1060,7 @@ class ItineraryPlanningHubGeocodeObservationArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _observation(self) -> ItineraryPlanningHubGeocodeObservationArtifact:
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0"}:
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0", "7.0"}:
             raise ValueError("observation must reference a model action")
         if self.observation_status == "success":
             if self.success_candidate is None or self.ambiguous_candidates or self.provenance is None or self.provenance.capability is not MapCapability.GEOCODING or not self.provenance.verified or self.map_failure is not None:
@@ -1069,7 +1095,7 @@ class ItineraryPlanningRouteMatrixObservationArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _observation(self) -> ItineraryPlanningRouteMatrixObservationArtifact:
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0"}:
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0", "7.0"}:
             raise ValueError("observation must reference a model action")
         actual = tuple((cell.origin_index, cell.destination_index) for cell in self.cells)
         if self.observation_status == "success":
@@ -1127,7 +1153,7 @@ class ItineraryPlanningDirectionsObservationArtifact(_ArtifactModel):
     def _observation(self) -> ItineraryPlanningDirectionsObservationArtifact:
         if (self.route_mode is not TravelMode.TRANSIT or self.transport_semantic is not TransportSemantic.PUBLIC_TRANSIT) and any(isinstance(item, TransitRouteAlternativeSummarySnapshot) for item in self.alternatives):
             raise ValueError("instructions are only retained for transit")
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0"}:
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0", "7.0"}:
             raise ValueError("observation must reference a model action")
         if tuple(item.alternative_index for item in self.alternatives) != tuple(range(len(self.alternatives))):
             raise ValueError("directions alternatives must keep provider order")
@@ -1146,7 +1172,7 @@ class ItineraryPlanningDirectionsObservationArtifact(_ArtifactModel):
 
 
 class ArtifactRefDirectories(_ArtifactModel):
-    schema_version: Literal["1.0", "2.0"]
+    schema_version: Literal["1.0", "2.0", "3.0"]
     hotel_selection_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=1, max_length=1)]
     candidate_set_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=1, max_length=6)]
     model_action_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=0, max_length=19)]
@@ -1184,8 +1210,9 @@ class ArtifactRefDirectories(_ArtifactModel):
                 raise ValueError(f"{name} refs must be unique")
             artifact_type, phase = expected[name]
             for ref in refs:
-                expected_schema_version = ("5.0" if self.schema_version == "1.0" else "6.0") if name == "model_action" else "1.0"
-                if ref.schema_version != expected_schema_version or ref.artifact_type != artifact_type or ref.operation_id.phase is not phase or ref.operation_id.run_id != run_id:
+                expected_schema_version = ("5.0" if self.schema_version == "1.0" else "7.0" if self.schema_version == "3.0" else "6.0") if name == "model_action" else "1.0"
+                candidate_versions = {"2.0", "3.0", "4.0"} if self.schema_version == "3.0" else {"1.0"}
+                if ref.schema_version not in (candidate_versions if name == "candidate_set" else {expected_schema_version}) or ref.artifact_type != artifact_type or ref.operation_id.phase is not phase or ref.operation_id.run_id != run_id:
                     raise ValueError(f"{name} ref type/version/run mismatch")
             all_refs.extend(refs)
         if len({ref.artifact_id for ref in all_refs}) != len(all_refs):
@@ -1198,7 +1225,7 @@ def _refs_for_directory(directories: ArtifactRefDirectories, directory: str) -> 
 
 
 def _validate_ref(ref: ArtifactRef, *, artifact_type: str, run_id) -> None:
-    versions = {"5.0", "6.0"} if artifact_type == "itinerary_planning.model_action" else {"2.0", "3.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0"}
+    versions = {"5.0", "6.0", "7.0"} if artifact_type == "itinerary_planning.model_action" else {"2.0", "3.0", "4.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0"}
     if ref.schema_version not in versions or ref.artifact_type != artifact_type or ref.operation_id.run_id != run_id:
         raise ValueError("artifact reference mismatch")
 
@@ -1222,7 +1249,7 @@ def _validate_indexes(value: object, directories: ArtifactRefDirectories) -> Non
 
 
 class ItineraryPlanningArtifact(_ArtifactModel):
-    schema_version: Literal["2.0", "3.0"]
+    schema_version: Literal["2.0", "3.0", "4.0"]
     request_digest: ArtifactDigest
     parent_planning_ref: ArtifactRef | None
     directories: ArtifactRefDirectories
@@ -1230,12 +1257,16 @@ class ItineraryPlanningArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _artifact(self) -> ItineraryPlanningArtifact:
-        if self.directories.schema_version != ("1.0" if self.schema_version == "2.0" else "2.0"):
+        if self.directories.schema_version != ("1.0" if self.schema_version == "2.0" else "3.0" if self.schema_version == "4.0" else "2.0"):
             raise ValueError("itinerary directory version mismatch")
         state = getattr(self.record, "state", None)
         budgets = state.budgets if state is not None else getattr(self.record, "budgets", None)
         if state is not None and state.schema_version != self.schema_version:
             raise ValueError("itinerary state version mismatch")
+        if self.schema_version != "4.0" and any(
+                isinstance(gap, CandidateSupplyGapSummarySnapshot) and gap.schema_version == "2.0"
+                for gap in getattr(self.record, "gaps", ())):
+            raise ValueError("new supply proof requires itinerary v4")
         if budgets is not None and budgets.schema_version != self.schema_version:
             raise ValueError("itinerary budget version mismatch")
         failure = getattr(self.record, "failure", None)
@@ -1604,6 +1635,7 @@ def _to_target_snapshot(value: object) -> CandidateSupplementTargetSnapshot:
 
 
 def _from_target_snapshot(value: CandidateSupplementTargetSnapshot):
+    from .models import MealCountTarget
     data = dict(cast(BaseModel, value).model_dump(mode="python"))
     if hasattr(value, "anchor") and value.anchor is not None:
         data["anchor"] = _from_location_snapshot(cast(PlanningLocationRefSnapshot, value.anchor))
@@ -1611,6 +1643,7 @@ def _from_target_snapshot(value: CandidateSupplementTargetSnapshot):
         "candidate_count": CandidateCountTarget, "area_coverage": AreaCoverageTarget, "meal_coverage": MealCoverageTarget,
         "must_resolution": MustResolutionTarget, "avoid_resolution": AvoidResolutionTarget, "candidate_details": CandidateDetailsTarget,
         "replacement": ReplacementTarget,
+        "meal_count": MealCountTarget,
     }[value.target_type]
     return _fresh_public(target_model.model_validate(data, strict=True), target_model)
 
@@ -1704,11 +1737,13 @@ def _from_failure_snapshot(value: PlanningFailureSnapshot) -> PlanningFailure:
 ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS: tuple[ArtifactSchemaRegistration, ...] = (
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="5.0", model=ItineraryPlanningModelActionArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="6.0", model=ItineraryPlanningModelActionArtifact),
+    ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="7.0", model=ItineraryPlanningModelActionArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.hub_geocode_observation", schema_version="1.0", model=ItineraryPlanningHubGeocodeObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.route_matrix_observation", schema_version="1.0", model=ItineraryPlanningRouteMatrixObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.directions_observation", schema_version="1.0", model=ItineraryPlanningDirectionsObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.itinerary", schema_version="2.0", model=ItineraryPlanningArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.itinerary", schema_version="3.0", model=ItineraryPlanningArtifact),
+    ArtifactSchemaRegistration(artifact_type="itinerary_planning.itinerary", schema_version="4.0", model=ItineraryPlanningArtifact),
 )
 
 

@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from app.candidate_research import (
     CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS,
-    CandidateResearchArtifact,
+    CandidateResearchLegacyArtifact as CandidateResearchArtifact,
     CandidateResearchPlaceObservationArtifact,
 )
 from app.hotel_selection import (

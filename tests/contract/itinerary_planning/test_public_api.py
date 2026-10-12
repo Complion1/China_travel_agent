@@ -2,6 +2,7 @@ import app.itinerary_planning as planning
 
 
 EXPECTED = (
+    "PurposeVisitIntent", "ProposedItineraryPatch",
     "ITINERARY_PLANNING_SCHEMA_VERSION", "ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY", "ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY", "ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS",
     "PlanningDayKind", "VisitKind", "BusinessHoursState", "PlanningTool", "PlanningStopReason", "TransportSemantic", "PlanningFailureCode",
     "PlanningInvocationOperationIds", "ItineraryPlanningOperationPlan", "ItineraryPlanningInitialRequest", "ItineraryPlanningResumeRequest",
@@ -21,7 +22,7 @@ def test_facade_is_the_exact_final_module_09_projection() -> None:
     assert planning.ItineraryPlanningService.__name__ == "ItineraryPlanningService"
     assert not hasattr(planning, "models")
     assert not hasattr(planning, "artifacts")
-    assert planning.ITINERARY_PLANNING_SCHEMA_VERSION == "3.0"
+    assert planning.ITINERARY_PLANNING_SCHEMA_VERSION == "4.0"
 
 
 def test_facade_does_not_leak_artifact_locals_or_conversion_helpers() -> None:

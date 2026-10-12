@@ -45,6 +45,7 @@ from app.candidate_research.artifacts import (
     SearchCoverageState,
 )
 from app.candidate_research.service import _filter_search_coverage
+from tests.unit.candidate_research.test_qualification import legal_judgment
 from app.requirements import ConfirmedTravelRequirement, FieldMetadataRegistry, InterestTag, TravelPreferences, TravelRequirement, TravelTimeWindow
 from app.workflow_contracts import OperationId, WorkflowPhase
 from app.baidu_map import BaiduCoordinate, BaiduMapTimeoutError, MapCapability, PlaceDetails, PlaceDetailsSuccess, PlaceSearchSuccess, PlaceSummary
@@ -191,6 +192,7 @@ def _action_batch_from_prompt(operation: FakeModelOperation, count: int) -> Prop
 
 
 @pytest.mark.parametrize("interests", (
+    (InterestTag.CULTURE,),
     (InterestTag.CULTURE, InterestTag.NATURE),
     (InterestTag.NATURE, InterestTag.CULTURE),
     (InterestTag.FOOD, InterestTag.NATURE, InterestTag.CULTURE),
@@ -226,7 +228,7 @@ async def test_public_initial_normalizes_interest_order_without_changing_confirm
 
 
 @pytest.mark.parametrize("interests", (
-    (InterestTag.CULTURE,),
+    (),
     (InterestTag.CULTURE, InterestTag.CULTURE),
     (*tuple(InterestTag), InterestTag.CULTURE),
 ))
@@ -315,8 +317,8 @@ async def test_public_initial_executes_eight_actions_as_non_overlapping_three_th
     operation.responses.extend(
         (
             lambda _count: structured(_action_batch_from_prompt(operation, 8)),
-            structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())),
-            structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
+            lambda _: legal_judgment(operation),
+            structured(NoUsefulActionProposed(reason_code="insufficient_remaining_budget")),
             structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
         )
     )
@@ -325,13 +327,13 @@ async def test_public_initial_executes_eight_actions_as_non_overlapping_three_th
     map_adapter = FakeMapAdapter(tuple(lambda call: search_success(f"place-{call}") for _ in range(8)))
     map_adapter.block = True
     map_adapter.release_after = 3
-    service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=map_adapter, artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
+    service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=map_adapter, artifact_repository=repository, budget_manager=FakeBudgetManager(run_id, place_limit=8))
     result = await service.research_initial(request)
     assert result.outcome_type == "incomplete"
     assert map_adapter.call_count == 8
     assert map_adapter.max_active_calls == 3
     assert len([item for item in repository.put_requests if item.artifact_type == "candidate_research.place_observation"]) == 8
-    assert operation.call_count == 3
+    assert operation.call_count == 4
 
 
 def _multi_place_search(uids: tuple[str, ...], *, category: str) -> PlaceSearchSuccess:
@@ -372,9 +374,10 @@ def _matching_details(uid: str, *, category: str = "museum") -> PlaceDetailsSucc
 
 
 @pytest.mark.parametrize("extra_irrelevant_conflict", (False, True))
+@pytest.mark.parametrize("meal_from_earlier_evidence", (False, True))
 @pytest.mark.asyncio
 async def test_public_initial_completes_full_candidate_loop_and_replays_terminal_without_providers(
-    extra_irrelevant_conflict: bool,
+    extra_irrelevant_conflict: bool, meal_from_earlier_evidence: bool,
 ) -> None:
     """Drive every initial objective once, then mature the derived eligible set."""
     run_id = uuid4()
@@ -422,8 +425,10 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
             InterestJudgmentUpdate(candidate_handle="c:1", interest=InterestTag.NATURE, verdict=MatchVerdict.CONFIRMED, reason_code=InterestReasonCode.TARGETED_SEARCH, evidence_handles=(EvidenceHandle(handle_id="e:0"),)),
         ),
         meal_updates=(
-            MealJudgmentUpdate(candidate_handle="c:6", meal_intent=MealIntent.LUNCH, verdict=MatchVerdict.CONFIRMED, reason_code=MealReasonCode.TARGETED_MEAL_SEARCH, evidence_handles=(EvidenceHandle(handle_id="e:1"),)),
-            MealJudgmentUpdate(candidate_handle="c:7", meal_intent=MealIntent.DINNER, verdict=MatchVerdict.CONFIRMED, reason_code=MealReasonCode.TARGETED_MEAL_SEARCH, evidence_handles=(EvidenceHandle(handle_id="e:1"),)),
+            MealJudgmentUpdate(candidate_handle="c:6", meal_intent=MealIntent.LUNCH, verdict=MatchVerdict.CONFIRMED, reason_code=MealReasonCode.TARGETED_MEAL_SEARCH, evidence_handles=(EvidenceHandle(handle_id="e:2"),)),
+            MealJudgmentUpdate(candidate_handle="c:7", meal_intent=MealIntent.DINNER, verdict=MatchVerdict.CONFIRMED, reason_code=MealReasonCode.TARGETED_MEAL_SEARCH, evidence_handles=(EvidenceHandle(handle_id="e:3"),)),
+            MealJudgmentUpdate(candidate_handle="c:8", meal_intent=MealIntent.LUNCH, verdict=MatchVerdict.CONFIRMED, reason_code=MealReasonCode.TARGETED_MEAL_SEARCH, evidence_handles=(EvidenceHandle(handle_id="e:2"),)),
+            MealJudgmentUpdate(candidate_handle="c:9", meal_intent=MealIntent.DINNER, verdict=MatchVerdict.CONFIRMED, reason_code=MealReasonCode.TARGETED_MEAL_SEARCH, evidence_handles=(EvidenceHandle(handle_id="e:3"),)),
         ),
         requirement_group_updates=(),
     )
@@ -431,14 +436,16 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
     def details_actions(_count: int):
         payload = json.loads(operation.prompts[-1].user_text)
         objective = next(item for item in payload["objectives"] if item["kind"] == "details_maturity")
-        return structured(ProposedActionBatch(actions=tuple(
-            ProposedDetailsAction(ordinal=index, objective_id=objective["objective_id"], uid=uid)
+        actions = (ProposedDetailsAction(ordinal=0,objective_id=payload["objectives"][0]["objective_id"],uid="r0"),) if meal_from_earlier_evidence else ()
+        return structured(ProposedActionBatch(actions=(*actions, *tuple(
+            ProposedDetailsAction(ordinal=index+len(actions), objective_id=objective["objective_id"], uid=uid)
             for index, uid in enumerate(objective["candidate_uids"][:4])
-        )))
+        ))))
 
-    operation.responses.extend((initial_actions, structured(patch), details_actions, structured(JudgmentPatch(
-        role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=(),
-    ))))
+    first_patch = patch.model_copy(update={"meal_updates":patch.meal_updates[1:]}) if meal_from_earlier_evidence else patch
+    operation.responses.extend((initial_actions, lambda _: legal_judgment(operation, first_patch), details_actions,
+        lambda _: legal_judgment(operation, JudgmentPatch(role_updates=(), interest_updates=(),
+            meal_updates=patch.meal_updates[:1] if meal_from_earlier_evidence else (), requirement_group_updates=()))))
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel_artifact)
     extra_candidate_search = _multi_place_search(("a0", "x0"), category="museum")
@@ -455,12 +462,13 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
     map_adapter = FakeMapAdapter((
         _multi_place_search(("a0", "a1", "a2", "a3", "a4", "a5"), category="museum"),
         _multi_place_search(("r0", "r1", "r2", "r3"), category="restaurant"),
-        _multi_place_search(("r0",), category="restaurant"),
-        _multi_place_search(("r1",), category="restaurant"),
+        _multi_place_search(("r0", "r2"), category="restaurant"),
+        _multi_place_search(("r1", "r3"), category="restaurant"),
         extra_candidate_search if extra_irrelevant_conflict else _multi_place_search(("a0",), category="museum"),
         _multi_place_search(("a1",), category="museum"),
         conflicting_extra_search if extra_irrelevant_conflict else _multi_place_search(("a2",), category="museum"),
         _multi_place_search(("r2",), category="restaurant"),
+        *((_matching_details("r0",category="restaurant"),) if meal_from_earlier_evidence else ()),
         _matching_details("a0"), _matching_details("a1"), _matching_details("a2"), _matching_details("a3"),
     ))
     budget = FakeBudgetManager(run_id)
@@ -482,11 +490,10 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
     )
     assert judgment_context["candidates"][0]["evidence_handles"]
     second_judgment_context = json.loads(operation.prompts[3].user_text)
+    assert set(second_judgment_context["current_evidence_handles"]).issubset(
+        item["handle"] for item in second_judgment_context["evidence"])
     assert second_judgment_context["current_evidence_handles"] == [
-        item["handle"] for item in second_judgment_context["evidence"]
-    ]
-    assert second_judgment_context["current_evidence_handles"] == [
-        "e:8", "e:9", "e:10", "e:11"
+        *(f"e:{index}" for index in range(8,13 if meal_from_earlier_evidence else 12))
     ]
     assert not set(second_judgment_context["current_evidence_handles"]) & set(
         judgment_context["current_evidence_handles"]
@@ -497,13 +504,16 @@ async def test_public_initial_completes_full_candidate_loop_and_replays_terminal
     assert result.counts.admitted_slots == 10 + int(extra_irrelevant_conflict)
     assert result.coverage.covered_interests == (InterestTag.CULTURE, InterestTag.NATURE)
     assert result.coverage.covered_meals == (MealIntent.LUNCH, MealIntent.DINNER)
+    if meal_from_earlier_evidence:
+        assert "e:2" not in second_judgment_context["current_evidence_handles"]
     assert result.coverage.resolved_must_item_count == result.coverage.must_item_count == 0
-    assert result.coverage.details_success_count == result.coverage.details_target == 4
+    assert result.coverage.details_success_count == 4 + int(meal_from_earlier_evidence)
+    assert result.coverage.details_target == 4
     assert all(
         gap.gap_type != "candidate_details_missing"
         for gap in service._gaps(service._runs[run_id], request)
     )
-    assert map_adapter.call_count == 12
+    assert map_adapter.call_count == 12 + int(meal_from_earlier_evidence)
     assert operation.call_count == 4
     assert {item.artifact_type for item in repository.put_requests} >= {
         "candidate_research.model_action",
@@ -550,11 +560,13 @@ async def test_public_initial_action_validation_rejects_each_structural_shape(mu
         return structured(ProposedActionBatch(actions=(action,)))
 
     operation.responses.append(response)
+    if mutation in {"wrong_area", "extra_interest"}:
+        operation.responses.append(response)
     repository = FakeRepository(); repository.seed(hotel_ref, hotel_artifact)
     maps = FakeMapAdapter()
     service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=maps, artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
     result = await service.research_initial(request)
-    assert result.failure.code.value == "action_batch_invalid"
+    assert result.failure.code.value == ("action_correction_exhausted" if mutation in {"wrong_area", "extra_interest"} else "action_batch_invalid")
     assert maps.call_count == 0
 
 
@@ -569,7 +581,7 @@ async def test_public_initial_rejects_same_batch_duplicate_before_map_calls() ->
         second = first.model_copy(update={"ordinal": 1})
         return structured(ProposedActionBatch(actions=(first, second)))
 
-    operation.responses.append(response)
+    operation.responses.extend((response, response))
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel_artifact)
     maps = FakeMapAdapter()
@@ -582,7 +594,7 @@ async def test_public_initial_rejects_same_batch_duplicate_before_map_calls() ->
 
     result = await service.research_initial(request)
 
-    assert result.failure.code.value == "action_batch_invalid"
+    assert result.failure.code.value == "action_correction_exhausted"
     assert maps.call_count == 0
 
 
@@ -605,7 +617,8 @@ async def test_public_initial_policy_rejection_persists_and_progresses_to_termin
     repository = FakeRepository(); repository.seed(hotel_ref, hotel_artifact)
     service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=FakeMapAdapter(), artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
     result = await service.research_initial(request)
-    assert result.outcome_type == "incomplete"
+    assert result.outcome_type == "failed"
+    assert result.failure.code.value == "action_correction_exhausted"
     action_records = [item.content["result"] for item in repository.put_requests if item.artifact_type == "candidate_research.model_action"]
     assert action_records and action_records[0]["record_type"] == "policy_rejected"
 
@@ -631,6 +644,8 @@ async def test_public_initial_no_useful_action_is_checked_against_public_policy(
     run_id = uuid4()
     request, hotel_ref, hotel_artifact, _ = _request(run_id, place_width=1)
     responses = [structured(NoUsefulActionProposed(reason_code=reason))]
+    if reason == "prior_no_progress":
+        responses.append(structured(NoUsefulActionProposed(reason_code=reason)))
     if reason == "insufficient_remaining_budget":
         responses.append(structured(NoUsefulActionProposed(reason_code="prior_no_progress")))
     operation = FakeModelOperation(responses)
@@ -639,7 +654,7 @@ async def test_public_initial_no_useful_action_is_checked_against_public_policy(
     service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=FakeMapAdapter(), artifact_repository=repository, budget_manager=budget)
     result = await service.research_initial(request)
     if reason == "prior_no_progress":
-        assert result.failure.code.value == "action_batch_invalid"
+        assert result.failure.code.value == "action_correction_exhausted"
     else:
         assert result.outcome_type == "incomplete"
 
@@ -674,12 +689,13 @@ async def test_public_initial_requirement_group_judgment_updates_derived_state(r
 
     def judgment_response(_count: int):
         group = json.loads(operation.prompts[-1].user_text)["requirements"][0]
+        assert group["confirmed_name"] == ("West Lake" if requirement_kind == "must_visit" else "Night Market")
         role = RoleJudgmentUpdate(candidate_handle="c:0", role=ResearchRole.ATTRACTION, verdict=RoleVerdict.SUPPORTED, reason_code=RoleReasonCode.PROVIDER_CATEGORY_SUPPORTS, evidence_handles=(EvidenceHandle(handle_id="e:0"),))
         if requirement_kind == "must_visit":
             update = RequirementGroupJudgmentUpdate(requirement_group_id=group["requirement_group_id"], requirement_kind="must_visit", evaluated_candidate_handles=("c:0",), default_verdict=MatchVerdict.CONFIRMED, default_reason_code=RequirementReasonCode.EXACT_NAME_MATCH, default_evidence_handles=(EvidenceHandle(handle_id="e:0"),), exceptions=())
         else:
             update = RequirementGroupJudgmentUpdate(requirement_group_id=group["requirement_group_id"], requirement_kind="avoid", evaluated_candidate_handles=("c:0",), default_verdict=MatchVerdict.NO_MATCH, default_reason_code=RequirementReasonCode.EVIDENCE_INSUFFICIENT, default_evidence_handles=(EvidenceHandle(handle_id="e:0"),), exceptions=(RequirementVerdictException(candidate_handle="c:0", verdict=MatchVerdict.CONFIRMED, reason_code=RequirementReasonCode.EXACT_NAME_MATCH, evidence_handles=(EvidenceHandle(handle_id="e:0"),)),))
-        return structured(JudgmentPatch(role_updates=(role,), interest_updates=(), meal_updates=(), requirement_group_updates=(update,)))
+        return legal_judgment(operation, JudgmentPatch(role_updates=(role,), interest_updates=(), meal_updates=(), requirement_group_updates=(update,)))
 
     def ignored_action(_count: int):
         payload = json.loads(operation.prompts[-1].user_text)
@@ -697,7 +713,7 @@ async def test_public_initial_requirement_group_judgment_updates_derived_state(r
     result = await service.research_initial(request)
     assert result.outcome_type in {"incomplete", "failed"}
     if result.outcome_type == "failed":
-        assert result.failure.code.value == "action_batch_invalid"
+        assert result.failure.code.value == "action_correction_exhausted"
         assert result.failure.code.value != "replay_mismatch"
         state_ref = result.last_consistent_candidate_set_ref
     else:
@@ -788,7 +804,7 @@ async def test_public_initial_multiple_must_groups_and_items_are_counted_once_pe
                 exceptions=(),
             ),
         )
-        return structured(
+        return legal_judgment(operation,
             JudgmentPatch(
                 role_updates=roles,
                 interest_updates=(),
@@ -843,10 +859,11 @@ async def test_public_initial_multiple_must_groups_and_items_are_counted_once_pe
 
     result = await service.research_initial(request)
 
-    assert result.outcome_type == "incomplete"
-    state = repository.contents[result.candidate_set_ref.artifact_id]["record"]["state"]
-    assert state["coverage"]["must_item_count"] == result.coverage.must_item_count == 3
-    assert state["coverage"]["resolved_must_item_count"] == result.coverage.resolved_must_item_count == 2
+    assert result.outcome_type == "failed"
+    assert result.failure.code.value == "action_correction_exhausted"
+    state = repository.contents[result.last_consistent_candidate_set_ref.artifact_id]["record"]["state"]
+    assert state["coverage"]["must_item_count"] == 3
+    assert state["coverage"]["resolved_must_item_count"] == 2
     assert [candidate["state"] for candidate in state["candidates"]] == ["eligible", "eligible"]
     resolved_group = next(group for group in state["requirement_group_states"] if len(group["requirement_item_ids"]) == 2)
     unresolved_group = next(group for group in state["requirement_group_states"] if len(group["requirement_item_ids"]) == 1)

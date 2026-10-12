@@ -31,6 +31,28 @@ def isolated_settings():
     return pg
 
 
+def configure_pending_candidate_supplement(provider, maps):
+    """Keep a purpose-qualified, unqueried details target in the real directory."""
+    from app.candidate_research import NoUsefulActionProposed, ProposedActionBatch, ProposedDetailsAction
+    from tests.support.candidate_research_fakes import structured
+    assert provider.research.call_count == 0
+    # 公共合法夹具已经用自身定向午餐证据确认 r2，判断仍由实际工作单生成。
+    assert any(item.candidate_handle == "c:8" and item.meal_intent.value == "lunch"
+               and item.verdict.value == "confirmed"
+               and tuple(value.handle_id for value in item.evidence_handles) == ("e:2",)
+               for item in provider.research.base_patch.meal_updates)
+    def no_progress_details(_):
+        objectives=json.loads(provider.research.prompts[-1].user_text)["objectives"]
+        objective=next(item for item in objectives if item["kind"]=="details_maturity")
+        return structured(ProposedActionBatch(actions=(ProposedDetailsAction(
+            ordinal=0,objective_id=objective["objective_id"],uid="r3"),)))
+    # Retain the three visit details and their original evidence positions,
+    # leave qualified r2 pending, then make one real empty details query.
+    provider.research.responses[4:4]=[no_progress_details,provider.research.responses[3],
+        structured(NoUsefulActionProposed(reason_code="prior_no_progress"))]
+    maps.research.responses.append(maps.research.responses[-1])
+
+
 async def serve(port):
     pg=isolated_settings()
     ip=socket.gethostbyname(socket.gethostname())
@@ -150,18 +172,7 @@ async def serve(port):
             if type(payload["supplement"]) is not bool: raise RuntimeError("invalid supplement fixture")
             provider.planning.supplement = payload["supplement"]
             if payload["supplement"]:
-                from app.candidate_research import NoUsefulActionProposed,ProposedActionBatch,ProposedDetailsAction
-                from tests.support.candidate_research_fakes import structured
-                def no_progress_details(_):
-                    objectives=json.loads(provider.research.prompts[-1].user_text)["objectives"]
-                    objective=next(item for item in objectives if item["kind"]=="details_maturity")
-                    return structured(ProposedActionBatch(actions=(ProposedDetailsAction(
-                        ordinal=0,objective_id=objective["objective_id"],uid="r3"),)))
-                # Retain the three visit details and their original evidence
-                # positions, leave r2 pending, then make one real empty query.
-                provider.research.responses[4:4]=[no_progress_details,provider.research.responses[3],
-                    structured(NoUsefulActionProposed(reason_code="prior_no_progress"))]
-                maps.research.responses.append(maps.research.responses[-1])
+                configure_pending_candidate_supplement(provider, maps)
         if "advance_seconds" in payload:
             value=payload["advance_seconds"]
             if type(value) is not int or not 0<=value<=172800: raise RuntimeError("invalid fixture clock")

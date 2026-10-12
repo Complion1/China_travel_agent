@@ -66,6 +66,8 @@ async def test_real_runtime_delivers_fifth_transport_result_to_submit_only_call(
                 "date": self.context["sightseeing_start_date"],
                 "mode": tuple(MatrixTravelMode)[(index-1) // 2].value,
                 "location_handles": list(self.handles if index % 2 else self.handles[::-1]),
+                "visit_intents": [{"date":self.context["sightseeing_start_date"],"candidate_handle":handle,
+                    "visit_kind":"attraction","is_backup":False} for handle in self.handles if handle.startswith("candidate-handle-")],
             }),)
             return ProviderResponse(content="结束" if not calls else None, tool_calls=calls,
                 finish_reason="stop" if not calls else "tool_calls", model_name="deepseek-v4-flash",
@@ -154,21 +156,29 @@ async def test_real_candidate_research_incomplete_unchanged_uid_resumes_exact_re
         ToolCallsReady(calls=(call,), metadata=_metadata()),
         ToolTurnCompleted(final_text="继续", metadata=_metadata()),
     )
+    # This recovery contract exercises an explicit count/details request on a partial day.
+    # Full-day meal shortages have their own entry-admission regression tests.
+    window = planning_request.confirmed.requirement.time_window
+    window = window.model_copy(update={"arrival": window.arrival.model_copy(update={"local_datetime": "2026-09-03 08:00"})})
+    planning_request = planning_request.model_copy(update={"confirmed": planning_request.confirmed.model_copy(update={
+        "requirement": planning_request.confirmed.requirement.model_copy(update={"time_window": window})})})
     run_id = planning_request.operation_plan.run_id
     initial, _, _, _ = _request(run_id)
     initial = initial.model_copy(update={"confirmed": planning_request.confirmed, "hotel_selection_ref": planning_request.hotel_selection_ref})
     operation = upstream.FakeModelOperation()
+    from tests.unit.candidate_research.test_qualification import legal_judgment
     operation.responses.extend((
         lambda _: upstream.structured(research.ProposedActionBatch(actions=(_first_objective_action(operation),))),
-        upstream.structured(research.JudgmentPatch(
+        lambda _: legal_judgment(operation, research.JudgmentPatch(
             role_updates=(research.RoleJudgmentUpdate(candidate_handle="c:0", role=research.ResearchRole.ATTRACTION,
                 verdict=research.RoleVerdict.SUPPORTED, reason_code=research.RoleReasonCode.PROVIDER_CATEGORY_SUPPORTS,
                 evidence_handles=(research.EvidenceHandle(handle_id="e:0"),)),),
             interest_updates=(), meal_updates=(), requirement_group_updates=())),
-        lambda _: upstream.structured(research.ProposedActionBatch(actions=(_action_batch_from_prompt(operation, 2).actions[1].model_copy(update={"ordinal": 0}),))),
+        lambda _: upstream.structured(research.ProposedActionBatch(actions=(_first_objective_action(operation),))),
+        upstream.structured(research.JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())),
         upstream.structured(research.NoUsefulActionProposed(reason_code="prior_no_progress")),
     ))
-    map_adapter = upstream.FakeMapAdapter((upstream.search_success("actual-uid"),))
+    map_adapter = upstream.FakeMapAdapter((upstream.search_success("actual-uid"), upstream.search_no_result()))
     research_service = research.CandidateResearchService(runtime=upstream.FakeRuntime(operation),
         map_adapter=map_adapter,
         artifact_repository=repository, budget_manager=upstream.FakeBudgetManager(run_id))
@@ -192,8 +202,8 @@ async def test_real_candidate_research_incomplete_unchanged_uid_resumes_exact_re
         operation.responses.extend((
             lambda _: upstream.structured(research.ProposedActionBatch(actions=(research.ProposedDetailsAction(ordinal=0,
                 objective_id=json.loads(operation.prompts[-1].user_text)["objectives"][0]["objective_id"], uid="actual-uid"),))),
-            upstream.structured(research.JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())),
-            lambda _: upstream.structured(research.ProposedActionBatch(actions=(_action_batch_from_prompt(operation, 2).actions[1].model_copy(update={"ordinal": 0}),))),
+            lambda _: legal_judgment(operation),
+            lambda _: upstream.structured(research.ProposedActionBatch(actions=(_first_objective_action(operation),))),
         ))
         map_adapter.responses.append(upstream.details_success("actual-uid"))
     operation.responses.append(upstream.structured(research.NoUsefulActionProposed(reason_code="prior_no_progress")))

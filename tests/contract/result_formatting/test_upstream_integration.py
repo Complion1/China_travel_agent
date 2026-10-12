@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.candidate_research import CandidateResearchArtifact
+from app.candidate_research import CandidateResearchLegacyArtifact as CandidateResearchArtifact
 from app.itinerary_planning import ItineraryPlanningModelActionArtifact
 from app.requirements import ConfirmedTravelRequirement
 from app.result_formatting.projection import project_result

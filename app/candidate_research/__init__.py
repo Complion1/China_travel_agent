@@ -3,6 +3,9 @@
 from .artifacts import (
     CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS,
     CandidateResearchArtifact,
+    CandidateResearchLegacyArtifact,
+    CandidateResearchV3Artifact,
+    CandidateResearchLegacyModelJudgmentArtifact,
     CandidateResearchModelActionArtifact,
     CandidateResearchModelJudgmentArtifact,
     CandidateResearchPlaceObservationArtifact,
@@ -33,6 +36,8 @@ from .models import (
     CandidateResearchStopReason,
     CandidateResearchSupplementalRequest,
     CandidateRecord,
+    CandidateRecordV2,
+    MealAssessment,
     CandidateState,
     ControlResearchFailure,
     EvidenceHandle,
@@ -45,6 +50,7 @@ from .models import (
     LLMResearchFailure,
     MapResearchFailure,
     MealCoverageMissingGap,
+    MealCountShortfallGap,
     MealIntent,
     MealJudgmentUpdate,
     MealReasonCode,
@@ -86,7 +92,16 @@ for _module_name in ("artifacts", "errors", "models", "protocols", "service"):
 del _module_name
 
 
+from .purpose import candidate_admitted_purposes, candidate_supply_status
+from .qualification import validate_qualification_sources
+
 __all__ = (
+    "MealCountShortfallGap",
+    "candidate_admitted_purposes",
+    "candidate_supply_status",
+    "validate_qualification_sources",
+    "CandidateResearchV3Artifact", "CandidateResearchLegacyModelJudgmentArtifact",
+    "CandidateRecordV2", "MealAssessment",
     "CANDIDATE_RESEARCH_SCHEMA_VERSION",
     "CANDIDATE_RESEARCH_ITERATION_BUDGET_KEY",
     "CANDIDATE_RESEARCH_PLACE_CALL_BUDGET_KEY",
@@ -107,6 +122,6 @@ __all__ = (
     "LLMResearchFailure", "MapResearchFailure", "ControlResearchFailure", "CandidateResearchFailure",
     "CandidateResearchCompleted", "CandidateResearchIncomplete", "CandidateResearchFailed", "CandidateResearchOutcome",
     "CandidateResearchModelActionArtifact", "CandidateResearchModelJudgmentArtifact",
-    "CandidateResearchPlaceObservationArtifact", "CandidateResearchArtifact", "CandidateResearchError",
+    "CandidateResearchPlaceObservationArtifact", "CandidateResearchArtifact", "CandidateResearchLegacyArtifact", "CandidateResearchError",
     "CandidateResearchConfigurationError", "CandidateResearchUsageError", "CandidateResearchPort", "CandidateResearchService",
 )

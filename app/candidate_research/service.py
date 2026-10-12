@@ -19,6 +19,8 @@ from typing import Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from app.requirements import interest_selection_error
+from .context import RequirementContext, RequirementContextError, project_requirements
 
 from app.baidu_map import (
     BaiduMapAdapter,
@@ -77,6 +79,8 @@ from .artifacts import (
     ArtifactCandidateCoreSnapshot,
     ArtifactCandidateDetailsStateSnapshot,
     ArtifactCandidateRecordSnapshot,
+    ArtifactCandidateRecordV2Snapshot,
+    ArtifactMealAssessmentSnapshot,
     ArtifactCandidateCountShortfallSummary,
     ArtifactCandidateDetailsMissingSummary,
     ArtifactControlResearchFailureSnapshot,
@@ -91,6 +95,7 @@ from .artifacts import (
     ArtifactMapResearchFailureSnapshot,
     ArtifactMealJudgmentUpdateResolved,
     ArtifactMealCoverageMissingSummary,
+    ArtifactMealCountShortfallSummary,
     ArtifactPlaceDetailsSnapshot,
     ArtifactPlaceSummarySnapshot,
     ArtifactProvenanceSnapshot,
@@ -112,10 +117,12 @@ from .artifacts import (
     CandidateResearchModelJudgmentArtifact,
     CandidateResearchPlaceObservationArtifact,
     CandidateSetStateSnapshot,
-    CompletedCandidateSetRecord,
-    FailedCandidateSetRecord,
-    IncompleteCandidateSetRecord,
-    InProgressCandidateSetRecord,
+    QualifiedCandidateSetStateSnapshot,
+    _candidate_set_state_complete,
+    QualifiedCompletedCandidateSetRecord as CompletedCandidateSetRecord,
+    QualifiedFailedCandidateSetRecord as FailedCandidateSetRecord,
+    QualifiedIncompleteCandidateSetRecord as IncompleteCandidateSetRecord,
+    QualifiedInProgressCandidateSetRecord as InProgressCandidateSetRecord,
     JudgmentPatchSnapshot,
     JudgmentPatchModelSnapshot,
     ModelActionAcceptedRecord,
@@ -125,6 +132,10 @@ from .artifacts import (
     ModelJudgmentAcceptedRecord,
     ModelJudgmentControllerRejectedRecord,
     ModelJudgmentLLMFailureRecord,
+    ModelActionRecoveredRecord,
+    ModelJudgmentRecoveredRecord,
+    OutputRecoveryAttempt,
+    unwrap_model_record,
     NoUsefulActionProposedSnapshot,
     PlaceDetailsNoResultObservation,
     PlaceDetailsSuccessObservation,
@@ -143,9 +154,11 @@ from .artifacts import (
     _artifact_write_request,
 )
 from .errors import CandidateResearchConfigurationError
+from .purpose import candidate_admitted_purposes
 from .fingerprints import (
     action_fingerprint,
     candidate_handle,
+    candidate_core_equal,
     content_digest,
     details_action_fingerprint,
     invocation_request_digest,
@@ -155,7 +168,7 @@ from .fingerprints import (
     supplemental_gap_fingerprint,
     search_action_fingerprint,
 )
-from .judgments import evidence_handle_indexes, validate_judgment_patch
+from .judgments import JudgmentEvidenceMismatch, evidence_handle_indexes, validate_judgment_patch
 from .models import (
     ActionModelOutcome,
     CandidateResearchCompleted,
@@ -211,9 +224,21 @@ from .prompt_loader import (
     load_observation_prompt,
 )
 from .prompting import build_action_prompt, build_observation_prompt
+from .qualification import (
+    AssessmentReceipt, JudgmentJob, CandidateEvidenceWindow, QualificationState, ResearchStep,
+    JudgmentRequiredMissing,
+    evidence_digest, validate_required_judgments, record_assessments,
+    candidate_observation, observation_context,
+    validate_job_coverage, supplied_judgments,
+    build_judgment_context, job_has_pending_judgments,
+    judgment_key, qualification_resolution_keys,
+)
 
 
 class _ModelOperationPort(Protocol):
+    @property
+    def semantic_invocations_consumed(self) -> int: ...
+
     async def ainvoke_structured(self, prompt: PromptEnvelope, schema: type[BaseModel]): ...
 
     def close(self) -> None: ...
@@ -279,12 +304,18 @@ class _Run:
     provider_attempts: int = 0
     provider_attempts_complete: bool = True
     usage_complete: bool = True
+    resolved_progress: set[str] = field(default_factory=set)
     usage: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     closed: bool = False
     predecessor_ref: ArtifactRef | None = None
     last_consistent_ref: ArtifactRef | None = None
     indeterminate: bool = False
     requirement_specs: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+    requirement_context: tuple[RequirementContext, ...] = ()
+    corrections: tuple = ()
+    rejected_operations: set[OperationId] = field(default_factory=set)
+    named_searches: set[str] = field(default_factory=set)
+    objective_history: dict = field(default_factory=dict)
     objective_directory: dict[str, ResearchObjective] = field(default_factory=dict)
     gap_fingerprints: set[str] = field(default_factory=set)
     supply_search_results: dict[str, tuple[bool, bool]] = field(default_factory=dict)
@@ -293,6 +324,21 @@ class _Run:
     supplemental_baseline_uids: frozenset[str] = frozenset()
     replayed_place_refs: dict[OperationId, ArtifactRef] = field(default_factory=dict)
     action_interaction: InteractionCallIdentity | None = None
+    output_recoveries_used: int = 0
+    action_recoveries: tuple[OutputRecoveryAttempt, ...] = ()
+    judgment_recoveries: tuple[OutputRecoveryAttempt, ...] = ()
+    judgment_recoverable: bool = False
+    judgment_recovery_code: str = "judgment_evidence_mismatch"
+    assessments: tuple[AssessmentReceipt, ...] = ()
+    steps: tuple[ResearchStep, ...] = ()
+    judgment_job: JudgmentJob | None = None
+    judgment_payload: dict | None = None
+    active_iteration: int | None = None
+    active_action_ref: ArtifactRef | None = None
+    active_judgment_ref: ArtifactRef | None = None
+    active_observation_start: int = 0
+    active_step_kind: str = "search_and_judge"
+    observation_cache: dict[ArtifactRef, CandidateResearchPlaceObservationArtifact] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,7 +351,9 @@ class _MapResult:
 
 @dataclass(frozen=True, slots=True)
 class _PolicyReplay:
-    """Marker for a persisted policy rejection that must replay as no-progress."""
+    """Persisted rejection re-enters the same bounded correction reducer."""
+    output: object
+    rule: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +363,10 @@ class _JudgmentReplayIndeterminate:
 
 class _OperationReplayIndeterminate(RuntimeError):
     """Internal signal for same-operation artifacts whose content conflicts."""
+
+
+class _ResearchReplayMismatch(ValueError):
+    """A supplied predecessor or replay identity disagrees with recorded facts."""
 
 
 def _json_model(model: BaseModel) -> dict[str, object]:
@@ -409,9 +461,9 @@ class CandidateResearchService:
         try:
             terminal = await self._terminal_replay(request, digest)
         except ArtifactRepositoryError:
-            return self._zero_failed(CandidateResearchControlFailureCode.ARTIFACT_ERROR)
+            return await self._read_failure(request, CandidateResearchControlFailureCode.ARTIFACT_ERROR)
         except (RuntimeError, TypeError, ValueError):
-            return self._zero_failed(CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+            return await self._read_failure(request, CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
         if terminal is not None:
             return terminal
         existing_run = self._runs.get(request.operation_plan.run_id)
@@ -454,32 +506,42 @@ class CandidateResearchService:
             if not future.done():
                 future.set_result(result)
             return result
+        except _ResearchReplayMismatch:
+            result = await self._active_failed(request, CandidateResearchControlFailureCode.REPLAY_MISMATCH)
+            if not future.done():
+                future.set_result(result)
+            return result
+        except RequirementContextError:
+            result = await self._active_failed(request, CandidateResearchControlFailureCode.CONTEXT_CONTRACT_ERROR)
+            if not future.done():
+                future.set_result(result)
+            return result
         except (ValidationError, ValueError):
             existing_state = self._runs.get(request.operation_plan.run_id)
-            code = CandidateResearchControlFailureCode.REPLAY_MISMATCH if existing_state is not None else CandidateResearchControlFailureCode.INVALID_INPUT
-            result = self._zero_failed(code)
+            code = CandidateResearchControlFailureCode.STATE_INVARIANT_FAILED if existing_state is not None else CandidateResearchControlFailureCode.INVALID_INPUT
+            result = await self._active_failed(request, code)
             if not future.done():
                 future.set_result(result)
             return result
         except ArtifactRepositoryError:
-            result = self._zero_failed(CandidateResearchControlFailureCode.ARTIFACT_ERROR)
+            result = await self._active_failed(request, CandidateResearchControlFailureCode.ARTIFACT_ERROR)
             if not future.done():
                 future.set_result(result)
             return result
         except ExecutionBudgetError:
-            result = self._zero_failed(CandidateResearchControlFailureCode.BUDGET_ERROR)
+            result = await self._active_failed(request, CandidateResearchControlFailureCode.BUDGET_ERROR)
             if not future.done():
                 future.set_result(result)
             return result
         except (RuntimeError, TypeError, AttributeError):
-            result = self._zero_failed(CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+            result = await self._active_failed(request, CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
             if not future.done():
                 future.set_result(result)
             return result
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
                 raise
-            result = self._zero_failed(CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+            result = await self._active_failed(request, CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
             if not future.done():
                 future.set_result(result)
             return result
@@ -499,7 +561,7 @@ class CandidateResearchService:
             raise RuntimeError("terminal artifact lookup contract violation")
         if (
             lookup.ref.artifact_type != "candidate_research.candidate_set"
-            or lookup.ref.schema_version != "1.0"
+            or lookup.ref.schema_version != "4.0"
             or lookup.ref.operation_id != request.operation_plan.terminal_successor_operation_id
         ):
             return await self._indeterminate(request.operation_plan.run_id)
@@ -535,12 +597,13 @@ class CandidateResearchService:
             load_action_prompt()
             load_observation_prompt()
         except CandidateResearchConfigurationError:
-            return self._zero_failed(CandidateResearchControlFailureCode.PROMPT_RESOURCE_INVALID)
+            return await self._active_failed(request, CandidateResearchControlFailureCode.PROMPT_RESOURCE_INVALID)
         if mode is ResearchMode.SUPPLEMENTAL and request.operation_plan.run_id not in self._runs:
-            return self._zero_failed(CandidateResearchControlFailureCode.RUN_CONTEXT_MISSING)
+            return await self._active_failed(request, CandidateResearchControlFailureCode.RUN_CONTEXT_MISSING)
         if request.operation_plan.run_id in self._closed_run_ids and request.operation_plan.run_id not in self._runs:
-            return self._zero_failed(CandidateResearchControlFailureCode.RUN_CONTEXT_MISSING)
+            return await self._active_failed(request, CandidateResearchControlFailureCode.RUN_CONTEXT_MISSING)
         run = await self._load_or_create_run(request, mode, digest)
+        project_requirements(run.requirement_specs, run.requirement_context)
         slots = request.operation_plan.iteration_slots
         if run.closed:
             return await self._indeterminate(run.run_id)
@@ -551,14 +614,14 @@ class CandidateResearchService:
             try:
                 remaining_snapshot = await self._budget.get_snapshot(key=self._iteration_key())
             except ExecutionBudgetError:
-                return self._zero_failed(CandidateResearchControlFailureCode.BUDGET_ERROR)
+                return await self._active_failed(request, CandidateResearchControlFailureCode.BUDGET_ERROR)
             if not self._valid_budget_snapshot(remaining_snapshot, run.run_id, self._iteration_key()):
-                return self._zero_failed(CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+                return await self._active_failed(request, CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
             if len(slots) != remaining_snapshot.remaining:
-                return self._zero_failed(CandidateResearchControlFailureCode.OPERATION_PLAN_INVALID)
+                return await self._active_failed(request, CandidateResearchControlFailureCode.OPERATION_PLAN_INVALID)
             if all(self._gap_satisfied(run, gap) for gap in request.gaps):
                 return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="no_op")
-        if self._is_complete(run.state, request):
+        if self._is_complete(run, request):
             transition = "no_op" if mode is ResearchMode.SUPPLEMENTAL else "normal"
             return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind=transition)
         if mode is ResearchMode.SUPPLEMENTAL:
@@ -567,24 +630,105 @@ class CandidateResearchService:
             try:
                 remaining = (await self._budget.get_snapshot(key=self._iteration_key())).remaining
             except ExecutionBudgetError:
-                return self._zero_failed(CandidateResearchControlFailureCode.BUDGET_ERROR)
+                return await self._active_failed(request, CandidateResearchControlFailureCode.BUDGET_ERROR)
             if len(slots) != remaining:
-                return self._zero_failed(CandidateResearchControlFailureCode.OPERATION_PLAN_INVALID)
+                return await self._active_failed(request, CandidateResearchControlFailureCode.OPERATION_PLAN_INVALID)
         objectives = self._objectives(run, request)
         for local_slot, slot in enumerate(slots):
-            if self._is_complete(run.state, request):
+            if self._is_complete(run, request):
                 transition = "no_op" if mode is ResearchMode.SUPPLEMENTAL else "normal"
                 return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind=transition)
-            if not objectives:
+            pending = await self._pending_judgment(run, slot)
+            if pending is not None and run.semantic_invocations < 12:
+                result = await self._judge_existing(run, request, slot, local_slot, pending)
+            elif not objectives or run.semantic_invocations >= 11:
                 return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
-            result = await self._iteration(run, request, slot, local_slot, objectives)
+            else:
+                result = await self._iteration(run, request, slot, local_slot, objectives)
             if result is not None:
                 return result
-            if self._is_complete(run.state, request):
+            if self._is_complete(run, request):
                 transition = "no_op" if mode is ResearchMode.SUPPLEMENTAL else "normal"
                 return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind=transition)
             objectives = self._objectives(run, request)
+            executable_judgment = run.semantic_invocations < 12 and await self._pending_judgment(run) is not None
+            if run.state.iteration_no_progress_streak >= 2 and not executable_judgment and not (
+                objectives and self._pending_correction(run, objectives[0]) is not None
+            ):
+                return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
         return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
+
+    async def _pending_judgment(self, run, slot=None):
+        if slot is not None:
+            action = await self._repository.lookup(operation_id=slot.action_operation_id)
+            if isinstance(action, ArtifactFound):
+                return None
+            judgment = await self._repository.lookup(operation_id=slot.judgment_operation_id)
+            if isinstance(judgment, ArtifactFound):
+                read = await self._repository.get(judgment.ref, expected_model=CandidateResearchModelJudgmentArtifact)
+                if read.ref != judgment.ref or _digest(_json_model(read.content)) != judgment.ref.content_hash:
+                    raise _OperationReplayIndeterminate()
+                if read.content.job.step_kind == "judge_existing":
+                    payload = await self._judgment_context(run, tuple(run.observation_refs),
+                        current_iteration_index=read.content.iteration_index, saved_job=read.content.job)
+                    return read.content.job, payload
+                return None
+        if not run.state.candidates:
+            return None
+        payload = await self._judgment_context(run, tuple(run.observation_refs),
+            current_iteration_index=min(5, run.state.budgets.iterations_consumed), step_kind="judge_existing")
+        return (run.judgment_job, payload) if run.judgment_job.required else None
+
+    async def _judge_existing(self, run, request, slot, local_slot, prepared):
+        existing = await self._repository.lookup(operation_id=slot.judgment_operation_id)
+        iteration = await self._consume_iteration(run, slot.judgment_operation_id)
+        if iteration == -2:
+            if not isinstance(existing, ArtifactFound):
+                return await self._indeterminate(run.run_id)
+            iteration = prepared[0].iteration_index
+        elif isinstance(existing, ArtifactFound):
+            return await self._indeterminate(run.run_id)
+        if iteration is None:
+            return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
+        if iteration < 0:
+            code = {-1: CandidateResearchControlFailureCode.BUDGET_ERROR,
+                    -3: CandidateResearchControlFailureCode.REPLAY_MISMATCH}.get(
+                        iteration, CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+            return await self._failed(run, request, ControlResearchFailure(code=code), None)
+        self._start_step(run, iteration, "judge_existing")
+        before_state, before_assessments = run.state, run.assessments
+        job, payload = prepared
+        prepared = job.model_copy(update={"iteration_index": iteration}), payload
+        result = await self._execute_judgment(run, request, slot, iteration, before_state, prepared)
+        if result is not None:
+            return result
+        before_keys = {judgment_key(item) for item in before_assessments}
+        required_keys = {judgment_key(item) for item in prepared[0].required}
+        progressed = bool(({judgment_key(item) for item in run.assessments} - before_keys) & required_keys)
+        run.resolved_progress.update(qualification_resolution_keys(before_state))
+        newly_resolved = qualification_resolution_keys(run.state) - run.resolved_progress
+        run.resolved_progress.update(newly_resolved)
+        progressed = progressed or bool(newly_resolved)
+        run.state = self._refresh_state(run.state,
+            no_progress=0 if progressed else min(2, run.state.iteration_no_progress_streak + 1))
+        if local_slot < len(request.operation_plan.iteration_slots) - 1:
+            await self._write_in_progress(run, request, slot)
+        return None
+
+    async def _execute_judgment(self, run, request, slot, iteration, rollback_state, prepared=None):
+        result = await self._judgment(run, request, slot, iteration, prepared)
+        if isinstance(result, _JudgmentReplayIndeterminate):
+            return await self._indeterminate(run.run_id)
+        if result is None:
+            return None
+        run.state = QualifiedCandidateSetStateSnapshot(**{**_python_model(rollback_state),
+                                                 "observation_refs": tuple(run.observation_refs)})
+        auditable = isinstance(result, LLMResearchFailure) or result.code in {
+            CandidateResearchControlFailureCode.JUDGMENT_PATCH_INVALID,
+            CandidateResearchControlFailureCode.JUDGMENT_REQUIRED_MISSING,
+            CandidateResearchControlFailureCode.STATE_INVARIANT_FAILED}
+        ref = await self._write_judgment_failure(run, request, slot, iteration, result) if auditable else None
+        return await self._failed(run, request, result, ref)
 
     async def _load_or_create_run(
         self,
@@ -599,9 +743,12 @@ class CandidateResearchService:
                 return current
             if mode is ResearchMode.SUPPLEMENTAL and isinstance(request, CandidateResearchSupplementalRequest) and request.predecessor_candidate_set_ref.operation_id.run_id == run_id:
                 if current.last_consistent_ref is not None and request.predecessor_candidate_set_ref != current.last_consistent_ref:
-                    raise ValueError("supplemental predecessor is not current head")
-                predecessor_state = await self._read_predecessor_state(request.predecessor_candidate_set_ref, run_id)
-                self._validate_supplemental_evidence(request, predecessor_state)
+                    raise _ResearchReplayMismatch("supplemental predecessor is not current head")
+                try:
+                    predecessor_state = await self._read_predecessor_state(request.predecessor_candidate_set_ref, run_id)
+                    self._validate_supplemental_evidence(request, predecessor_state, current.requirement_specs)
+                except ValueError as error:
+                    raise _ResearchReplayMismatch("predecessor contract mismatch") from error
                 for gap in request.gaps:
                     fingerprint = supplemental_gap_fingerprint(
                         current.confirmed_digest,
@@ -609,7 +756,7 @@ class CandidateResearchService:
                         gap,
                     )
                     if fingerprint in current.gap_fingerprints:
-                        raise ValueError("supplemental gap fingerprint already consumed")
+                        raise _ResearchReplayMismatch("supplemental gap fingerprint already consumed")
                     current.gap_fingerprints.add(fingerprint)
                 current.request_digest = digest
                 current.mode = ResearchMode.SUPPLEMENTAL
@@ -618,18 +765,20 @@ class CandidateResearchService:
                 current.last_consistent_ref = request.predecessor_candidate_set_ref
                 current.supplemental_baseline_uids = frozenset(item.core.uid for item in predecessor_state.candidates)
                 return current
-            raise ValueError("run request conflict")
+            raise _ResearchReplayMismatch("run request conflict")
         if mode is ResearchMode.INITIAL:
             confirmed = request.confirmed
             preferences = confirmed.requirement.preferences
             supplied = preferences.interests
-            if supplied is None:
+            if interest_selection_error(preferences) is not None:
+                raise ValueError("invalid interest selection")
+            if not supplied:
                 if not preferences.agent_decides_interests:
                     raise ValueError("effective interests are not determined")
                 effective = tuple(InterestTag)
             else:
                 effective = tuple(supplied)
-                if not 2 <= len(effective) <= 4 or len(set(effective)) != len(effective):
+                if not 1 <= len(effective) <= 4 or len(set(effective)) != len(effective):
                     raise ValueError("invalid interests")
                 effective = tuple(sorted(effective, key=lambda item: list(InterestTag).index(item)))
             hotel_ref = request.hotel_selection_ref
@@ -657,15 +806,22 @@ class CandidateResearchService:
                 raise ValueError("hotel selection must be selected")
             hotel = selected.content.decision.selected_candidate
             state = self._empty_state(request, hotel_ref, effective, confirmed.confirmation_summary_digest)
+            specs = self._requirement_specs(confirmed, self._safe_digest(confirmed.confirmation_summary_digest, confirmed))
+            names = tuple(dict.fromkeys(preferences.must_visit_places)) + tuple(dict.fromkeys(preferences.avoid_places))
+            if len(names) != len(specs):
+                raise ValueError("requirement context incomplete")
+            directory = tuple(RequirementContext(kind, group_id, item_ids, name)
+                              for (kind, group_id, item_ids), name in zip(specs, names, strict=True))
+            project_requirements(specs, directory)
             operation = self._runtime.start_operation(ModelRole.CANDIDATE_RESEARCH)
             run = _Run(
                 run_id=run_id, request_digest=digest, mode=mode, hotel_ref=hotel_ref,
                 confirmed_digest=self._safe_digest(confirmed.confirmation_summary_digest, confirmed),
                 destination=destination.strip(), effective_interests=effective,
-                interests_frozen=supplied is not None or not preferences.agent_decides_interests,
-                agent_decides_interests=preferences.agent_decides_interests and supplied is None,
+                interests_frozen=bool(supplied) or not preferences.agent_decides_interests,
+                agent_decides_interests=preferences.agent_decides_interests and not supplied,
                 operation=operation, state=state,
-                requirement_specs=self._requirement_specs(confirmed, self._safe_digest(confirmed.confirmation_summary_digest, confirmed)),
+                requirement_specs=specs, requirement_context=directory,
             )
             run.fingerprint_trees["hotel"] = hotel
             self._runs[run_id] = run
@@ -695,6 +851,12 @@ class CandidateResearchService:
             run.usage[name] = getattr(state.budgets.known_usage, name)
         run.action_refs.extend(state.model_action_refs)
         run.judgment_refs.extend(state.model_judgment_refs)
+        for refs, model in ((state.model_action_refs, CandidateResearchModelActionArtifact),
+                            (state.model_judgment_refs, CandidateResearchModelJudgmentArtifact)):
+            for ref in refs:
+                record = (await self._repository.get(ref, expected_model=model)).content.result
+                if record.record_type == "recovered":
+                    run.output_recoveries_used = max(run.output_recoveries_used, record.attempts[-1].recovery_number)
         for ref in state.observation_refs:
             run.observation_refs.append(ref)
             try:
@@ -720,7 +882,7 @@ class CandidateResearchService:
     async def _read_candidate_set(self, ref: ArtifactRef, run_id: UUID):
         if (
             ref.artifact_type != "candidate_research.candidate_set"
-            or ref.schema_version != "1.0"
+            or ref.schema_version != "4.0"
             or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH
             or ref.operation_id.run_id != run_id
         ):
@@ -743,6 +905,7 @@ class CandidateResearchService:
             raise ValueError("predecessor is not a candidate set")
         state = read.content.record.state
         await self._validate_state_refs(state, run_id, require_verified_observations=True)
+        await self._validate_qualification_history(read.content)
         return state
 
     async def _validate_state_refs(
@@ -765,7 +928,7 @@ class CandidateResearchService:
             for item_ref in refs:
                 if (
                     item_ref.artifact_type != expected_type
-                    or item_ref.schema_version != "1.0"
+                    or item_ref.schema_version != ({"candidate_research.model_action": "2.0", "candidate_research.model_judgment": "3.0"}.get(expected_type, "1.0"))
                     or item_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH
                     or item_ref.operation_id.run_id != run_id
                 ):
@@ -782,11 +945,12 @@ class CandidateResearchService:
                     or _digest(_json_model(content)) != item_ref.content_hash
                 ):
                     raise ValueError("state artifact integrity mismatch")
-                if isinstance(content, CandidateResearchModelActionArtifact) and isinstance(content.result, ModelActionAcceptedRecord):
+                model_record = unwrap_model_record(content.result)
+                if isinstance(content, CandidateResearchModelActionArtifact) and isinstance(model_record, ModelActionAcceptedRecord):
                     if any(
                         disposition.reused_observation_ref is not None
                         and disposition.reused_observation_ref not in observation_refs
-                        for disposition in content.result.action_dispositions
+                        for disposition in model_record.action_dispositions
                     ):
                         raise ValueError("action reused observation is outside state directory")
                 if isinstance(content, CandidateResearchModelJudgmentArtifact) and any(
@@ -810,6 +974,21 @@ class CandidateResearchService:
         if action_refs & judgment_refs or action_refs & observation_refs or judgment_refs & observation_refs:
             raise ValueError("state artifact directories overlap")
 
+    async def _validate_qualification_history(self, artifact: CandidateResearchArtifact) -> None:
+        """研究重放与下游格式化使用同一只读来源核验。"""
+        from .qualification import validate_qualification_sources
+        state = getattr(artifact.record, "state", None)
+        if state is None:
+            return
+        sources = {}
+        for refs, model in (
+            (state.observation_refs, CandidateResearchPlaceObservationArtifact),
+            (state.model_action_refs, CandidateResearchModelActionArtifact),
+            (state.model_judgment_refs, CandidateResearchModelJudgmentArtifact),
+        ):
+            for ref in refs:
+                sources[ref.artifact_id] = await self._repository.get(ref, expected_model=model)
+        validate_qualification_sources(artifact, sources)
     async def _validate_terminal_refs(self, artifact: CandidateResearchArtifact) -> None:
         """Re-read terminal-linked artifacts so replay cannot trust stale refs."""
         record = artifact.record
@@ -819,17 +998,19 @@ class CandidateResearchService:
             # directories (initial mode) plus newly produced supplemental refs;
             # the artifact mode alone cannot be imposed on every nested entry.
             await self._validate_state_refs(state, artifact.run_id)
+            await self._validate_qualification_history(artifact)
         if artifact.predecessor_ref is not None:
             predecessor = await self._read_candidate_set(artifact.predecessor_ref, artifact.run_id)
             predecessor_state = getattr(predecessor.content.record, "state", None)
             if predecessor_state is None:
                 raise ValueError("terminal predecessor has no state")
             await self._validate_state_refs(predecessor_state, artifact.run_id)
+            await self._validate_qualification_history(predecessor.content)
 
         async def verify(ref: ArtifactRef, expected_type: str, expected_model: type[BaseModel]) -> BaseModel:
             if (
                 ref.artifact_type != expected_type
-                or ref.schema_version != "1.0"
+                or ref.schema_version != ("4.0" if expected_type == "candidate_research.candidate_set" else {"candidate_research.model_action": "2.0", "candidate_research.model_judgment": "3.0"}.get(expected_type, "1.0"))
                 or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH
                 or ref.operation_id.run_id != artifact.run_id
             ):
@@ -905,10 +1086,35 @@ class CandidateResearchService:
     def _validate_supplemental_evidence(
         request: CandidateResearchSupplementalRequest,
         state: CandidateSetStateSnapshot,
+        requirement_specs: tuple = (),
     ) -> None:
         observation_refs = set(state.observation_refs)
         by_ref = {ref: index for index, ref in enumerate(state.observation_refs)}
         for gap in request.gaps:
+            if gap.evidence_refs == (request.predecessor_candidate_set_ref,) and request.schema_version == "2.0":
+                if gap.gap_type in {"candidate_count_shortfall", "meal_count_shortfall"}:
+                    purposes = tuple(candidate_admitted_purposes(item) for item in state.candidates)
+                    if gap.gap_type == "meal_count_shortfall":
+                        count = sum(gap.meal_intent.value in value for value in purposes)
+                    elif gap.role is ResearchRole.ATTRACTION:
+                        count = sum("attraction" in value for value in purposes)
+                    else:
+                        count = sum(any(meal in value for meal in ("lunch", "dinner")) for value in purposes)
+                    if gap.current_count != count or gap.target_count <= count:
+                        raise ValueError("state quota does not match admitted predecessor supply")
+                elif gap.gap_type == "must_visit_resolution_missing":
+                    group = next((item for item in state.requirement_group_states if item.group_id == gap.requirement_group_id), None)
+                    # With no candidates there is no judgment group to inspect.
+                    # The same-process frozen request directory still owns identity.
+                    empty_known_group = (group is None and not state.candidates
+                        and ("must_visit", gap.requirement_group_id, gap.requirement_item_ids) in requirement_specs)
+                    if not empty_known_group and (group is None or group.requirement_kind != "must_visit" or group.requirement_item_ids != gap.requirement_item_ids):
+                        raise ValueError("state must gap target mismatch")
+                    if CandidateResearchService._gap_satisfied(state, gap):
+                        raise ValueError("state must gap is already resolved")
+                else:
+                    raise ValueError("unsupported state proof target")
+                continue
             if any(ref not in observation_refs for ref in gap.evidence_refs):
                 raise ValueError("supplemental evidence ref is not in predecessor directory")
             summary = CandidateResearchService._gap_summary(gap, tuple())
@@ -981,7 +1187,7 @@ class CandidateResearchService:
             resolved_must_item_count=0, details_success_count=0, details_target=0,
             initial_city_attraction_search_done=False, initial_hotel_restaurant_nearby_done=False,
         )
-        return CandidateSetStateSnapshot(
+        return QualifiedCandidateSetStateSnapshot(
             confirmed_requirement_digest=self._safe_digest(confirmed_digest, request.confirmed),
             hotel_selection_ref=hotel_ref, effective_interests=interests,
             model_action_refs=(), model_judgment_refs=(), observation_refs=(), candidates=(),
@@ -1018,7 +1224,7 @@ class CandidateResearchService:
                     hotel_selection_content_hash=run.hotel_ref.content_hash, predecessor_candidate_set_content_hash=run.predecessor_ref.content_hash if run.predecessor_ref is not None else None, directory=directory,
                 )
                 objectives.append(ResearchObjective(
-                    objective_id=oid, kind=kind, gap_id=gap.gap_id, requirement_group_id=getattr(gap, "requirement_group_id", None),
+                    objective_id=oid, kind=kind, gap_id=gap.gap_id, gap_type=gap.gap_type, rejected_uid=getattr(gap, "rejected_uid", None), requirement_group_id=getattr(gap, "requirement_group_id", None),
                     role=getattr(gap, "role", None), interest=getattr(gap, "interest", None), meal_intent=getattr(gap, "meal_intent", None),
                     anchor=getattr(gap, "anchor", None), radius_km=getattr(gap, "radius_km", None), candidate_uids=tuple(getattr(gap, "candidate_uids", ())),
                 ))
@@ -1031,6 +1237,8 @@ class CandidateResearchService:
             if group is not None:
                 unresolved: list[str] = []
                 for candidate in run.state.candidates:
+                    if requirement_kind == "avoid" and candidate.state in {CandidateState.EXCLUDED, CandidateState.CONFLICTED}:
+                        continue
                     if candidate.admission_ordinal not in group.evaluated_candidate_ordinals:
                         continue
                     matches = candidate.must_matches if requirement_kind == "must_visit" else candidate.avoid_matches
@@ -1038,10 +1246,18 @@ class CandidateResearchService:
                     verdict = match.verdict if match is not None else group.default_verdict
                     if verdict in {MatchVerdict.AMBIGUOUS, MatchVerdict.UNRESOLVED}:
                         unresolved.append(candidate.core.uid)
-                unresolved_uids = tuple(unresolved)
+                if requirement_kind == "must_visit":
+                    blocked = tuple(candidate.core.uid for candidate in run.state.candidates
+                        if candidate.state not in {CandidateState.EXCLUDED, CandidateState.CONFLICTED}
+                        and not candidate_admitted_purposes(candidate)
+                        and any(match.requirement_group_id == group_id and match.verdict is MatchVerdict.CONFIRMED
+                                for match in candidate.must_matches))
+                    unresolved_uids = tuple(dict.fromkeys((*blocked, *unresolved)))
+                else:
+                    unresolved_uids = tuple(unresolved)
             if requirement_kind == "must_visit":
                 satisfied = group is not None and any(
-                    candidate.state is CandidateState.ELIGIBLE
+                    candidate_admitted_purposes(candidate)
                     and any(match.requirement_group_id == group_id and match.verdict is MatchVerdict.CONFIRMED for match in candidate.must_matches)
                     for candidate in run.state.candidates
                 )
@@ -1049,7 +1265,7 @@ class CandidateResearchService:
                     continue
                 kind = ResearchObjectiveKind.MUST_VISIT_RESOLUTION
             else:
-                if not unresolved_uids:
+                if not unresolved_uids or not self._supply_qualification_needed(run.state):
                     continue
                 kind = ResearchObjectiveKind.AVOID_RESOLUTION
             oid = objective_fingerprint(
@@ -1082,11 +1298,15 @@ class CandidateResearchService:
             objectives.append(self._objective(run, ResearchObjectiveKind.ATTRACTION_COUNT, role=ResearchRole.ATTRACTION))
         if run.state.counts.restaurant_count < run.state.counts.restaurant_target:
             objectives.append(self._objective(run, ResearchObjectiveKind.RESTAURANT_COUNT, role=ResearchRole.RESTAURANT))
-        missing_details = tuple(item.core.uid for item in run.state.candidates if item.state is CandidateState.ELIGIBLE and item.details.status == "not_requested")
+        missing_details = tuple(item.core.uid for item in run.state.candidates
+            if candidate_admitted_purposes(item) and item.details.status == "not_requested")
         if missing_details:
             objectives.append(self._objective(run, ResearchObjectiveKind.DETAILS_MATURITY, candidate_uids=missing_details[:128]))
-        ordered = deterministic_objectives(objectives)
+        ordered = deterministic_objectives(item for item in objectives if self._allowed_objective_actions(run, item))
+        if ordered and self._pending_correction(run, ordered[0]) is not None:
+            ordered = ordered[:1]
         run.objective_directory = {item.objective_id: item for item in ordered}
+        run.objective_history.update(run.objective_directory)
         return ordered
 
     def _objective(self, run: _Run, kind: ResearchObjectiveKind, **values: object) -> ResearchObjective:
@@ -1172,7 +1392,10 @@ class CandidateResearchService:
             )
         if iteration_index is None:
             return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
-        if run.semantic_invocations >= 12:
+        self._start_step(run, iteration_index, "search_and_judge")
+        if replay_ref is not None:
+            run.active_action_ref = replay_ref
+        if action_outcome is None and run.semantic_invocations >= 12:
             return await self._failed(
                 run,
                 request,
@@ -1183,13 +1406,11 @@ class CandidateResearchService:
             prompt = build_action_prompt(self._action_context(run, objectives))
             action_outcome = await self._invoke_action(run, prompt)
         if isinstance(action_outcome, tuple) and isinstance(action_outcome[0], _PolicyReplay):
-            run.state = self._state_with(run, no_progress=min(2, run.state.iteration_no_progress_streak + 1))
-            if run.state.iteration_no_progress_streak >= 2:
-                return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
-            await persist_intermediate_if_needed()
-            return None
+            replay = action_outcome[0]
+            return await self._reject_action(run, request, slot, iteration_index, local_slot,
+                objectives, replay.output, action_outcome[1], replay.rule, replay_ref=replay_ref)
         if isinstance(action_outcome, LLMResearchFailure):
-            action_ref = await self._write_action_artifact(run, request, slot, iteration_index, action_outcome, None)
+            action_ref = replay_ref or await self._write_action_artifact(run, request, slot, iteration_index, action_outcome, None)
             return await self._failed(run, request, action_outcome, action_ref)
         if isinstance(action_outcome, ControlResearchFailure):
             if replay_ref is not None:
@@ -1215,11 +1436,10 @@ class CandidateResearchService:
                     action_ref,
                 )
         if isinstance(output, NoUsefulActionProposed):
-            if not await self._no_useful_action_is_legal(run, output, objectives):
-                action_record = ModelActionControllerRejectedRecord(record_type="controller_rejected", output=self._action_output_snapshot(output), metadata=metadata, code="action_batch_invalid")
-                action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
-                self._remember_action_ref(run, action_ref)
-                return await self._failed(run, request, ControlResearchFailure(code=CandidateResearchControlFailureCode.ACTION_BATCH_INVALID), action_ref)
+            if objectives and (not await self._no_useful_action_is_legal(run, output, objectives)
+                    or self._pending_correction(run, objectives[0]) is not None):
+                return await self._reject_action(run, request, slot, iteration_index, local_slot,
+                    objectives, output, metadata, "no_useful_action_invalid")
             action_record = ModelActionAcceptedRecord(record_type="accepted", output=self._action_output_snapshot(output), metadata=metadata, action_dispositions=())
             action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
             self._remember_action_ref(run, action_ref)
@@ -1228,8 +1448,13 @@ class CandidateResearchService:
                 return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
             await persist_intermediate_if_needed()
             return None
-        actions = output.actions
+        from .correction import bind_first_named_search
+        actions = bind_first_named_search(output.actions, objectives, run.requirement_context, run.named_searches)
+        output = ProposedActionBatch(actions=tuple(actions), effective_interests=output.effective_interests)
         validation = self._validate_actions(run, actions, objectives, slot)
+        if validation in {"objective_parameters", "duplicate", "details_already_requested"} and objectives:
+            return await self._reject_action(run, request, slot, iteration_index, local_slot,
+                objectives, output, metadata, validation)
         if validation is not None:
             action_record = ModelActionControllerRejectedRecord(record_type="controller_rejected", output=self._action_output_snapshot(output), metadata=metadata, code="action_batch_invalid")
             action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
@@ -1237,15 +1462,14 @@ class CandidateResearchService:
             failure = ControlResearchFailure(code=CandidateResearchControlFailureCode.ACTION_BATCH_INVALID)
             return await self._failed(run, request, failure, action_ref)
         highest = objectives[0].objective_id if objectives else None
-        if highest is not None and not any(item.objective_id == highest for item in actions):
-            action_record = ModelActionPolicyRejectedRecord(record_type="policy_rejected", output=self._action_output_snapshot(output), metadata=metadata, reason_code="highest_priority_objective_ignored")
-            action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
-            self._remember_action_ref(run, action_ref)
-            run.state = self._state_with(run, no_progress=min(2, run.state.iteration_no_progress_streak + 1))
-            if run.state.iteration_no_progress_streak >= 2:
-                return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
-            await persist_intermediate_if_needed()
-            return None
+        if highest is not None and actions[0].objective_id != highest:
+            return await self._reject_action(run, request, slot, iteration_index, local_slot,
+                objectives, output, metadata, "highest_priority_objective_ignored")
+        if objectives:
+            from dataclasses import replace
+            from .correction import target_fingerprint
+            target = target_fingerprint(objectives[0])
+            run.corrections = tuple(replace(item, active=False) if item.target == target else item for item in run.corrections)
         dispositions: list[ActionDispositionSnapshot] = []
         fresh_actions: list[ProposedAction] = []
         for action in actions:
@@ -1253,6 +1477,9 @@ class CandidateResearchService:
             previous = run.fingerprints.get(fp)
             if previous is not None:
                 dispositions.append(ActionDispositionSnapshot(action_ordinal=action.ordinal, action_fingerprint=fp, disposition="duplicate_action", reused_observation_ref=previous))
+                objective = run.objective_directory[action.objective_id]
+                if isinstance(action, ProposedSearchAction) and objective.requirement_group_id:
+                    run.named_searches.add(objective.requirement_group_id)
             else:
                 fresh_actions.append(action)
                 dispositions.append(ActionDispositionSnapshot(action_ordinal=action.ordinal, action_fingerprint=fp, disposition="accepted", reused_observation_ref=None))
@@ -1273,6 +1500,15 @@ class CandidateResearchService:
                 ),
                 action_ref,
             )
+        if run.semantic_invocations >= 12:
+            dispositions = tuple(ActionDispositionSnapshot(action_ordinal=action.ordinal,
+                action_fingerprint=action_fingerprint(action, run.destination),
+                disposition="not_admitted_budget_exhausted", reused_observation_ref=None) for action in actions)
+            action_record = ModelActionAcceptedRecord(record_type="accepted", output=self._action_output_snapshot(output),
+                                                      metadata=metadata, action_dispositions=dispositions)
+            action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
+            self._remember_action_ref(run, action_ref)
+            return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
         allowed_fresh = fresh_actions[:remaining_place]
         allowed_ids = {id(item) for item in allowed_fresh}
         for position, action in enumerate(actions):
@@ -1309,6 +1545,10 @@ class CandidateResearchService:
             return await self._failed(run, request, ControlResearchFailure(code=CandidateResearchControlFailureCode.BUDGET_ERROR), action_ref)
         if reservation[0] == 0:
             return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
+        for action in place_actions:
+            objective = run.objective_directory[action.objective_id]
+            if isinstance(action, ProposedSearchAction) and objective.requirement_group_id:
+                run.named_searches.add(objective.requirement_group_id)
         replayed_results: dict[OperationId, _MapResult] = {}
         fresh_place_actions: list[ProposedAction] = []
         for action, operation_id in zip(place_actions, slot.place_observation_operation_ids):
@@ -1351,7 +1591,7 @@ class CandidateResearchService:
                 already_in_state = obs in run.state.observation_refs
                 if obs not in run.observation_refs:
                     run.observation_refs.append(obs)
-                run.state = CandidateSetStateSnapshot(**{**_python_model(run.state), "observation_refs": tuple(run.observation_refs)})
+                run.state = QualifiedCandidateSetStateSnapshot(**{**_python_model(run.state), "observation_refs": tuple(run.observation_refs)})
                 run.fingerprints[action_fingerprint(mapped.action, run.destination)] = obs
                 new_observation = new_observation or (not already_in_state and isinstance(mapped.outcome, (PlaceSearchSuccess, PlaceSearchNoResult, PlaceDetailsSuccess, PlaceDetailsNoResult)))
                 if failure is not None and primary_failure is None:
@@ -1413,7 +1653,7 @@ class CandidateResearchService:
             already_in_state = obs in run.state.observation_refs
             if obs not in run.observation_refs:
                 run.observation_refs.append(obs)
-            run.state = CandidateSetStateSnapshot(**{**_python_model(run.state), "observation_refs": tuple(run.observation_refs)})
+            run.state = QualifiedCandidateSetStateSnapshot(**{**_python_model(run.state), "observation_refs": tuple(run.observation_refs)})
             run.fingerprints[action_fingerprint(action, run.destination)] = obs
             new_observation = new_observation or (not already_in_state and isinstance(mapped.outcome, (PlaceSearchSuccess, PlaceSearchNoResult, PlaceDetailsSuccess, PlaceDetailsNoResult)))
             if failure is not None and primary_failure is None:
@@ -1440,27 +1680,81 @@ class CandidateResearchService:
             # candidate state must not advance when any sibling is technical
             # failure or unverified.  Keep the new observation directory so
             # the failed terminal remains replayable.
-            run.state = CandidateSetStateSnapshot(**{**_python_model(pre_wave_state), "observation_refs": tuple(run.observation_refs)})
+            run.state = QualifiedCandidateSetStateSnapshot(**{**_python_model(pre_wave_state), "observation_refs": tuple(run.observation_refs)})
             failure_ref = primary_failure_ref
             return await self._failed(run, request, primary_failure, failure_ref)
         if new_observation:
-            judgment = await self._judgment(run, request, slot, iteration_index)
-            if isinstance(judgment, _JudgmentReplayIndeterminate):
-                return await self._indeterminate(run.run_id)
-            if isinstance(judgment, LLMResearchFailure):
-                run.state = CandidateSetStateSnapshot(**{**_python_model(pre_wave_state), "observation_refs": tuple(run.observation_refs)})
-                ref = await self._write_judgment_failure(run, request, slot, iteration_index, judgment)
-                return await self._failed(run, request, judgment, ref)
-            if isinstance(judgment, ControlResearchFailure):
-                run.state = CandidateSetStateSnapshot(**{**_python_model(pre_wave_state), "observation_refs": tuple(run.observation_refs)})
-                if judgment.code is not CandidateResearchControlFailureCode.JUDGMENT_PATCH_INVALID:
-                    return await self._failed(run, request, judgment, None)
-                ref = await self._write_judgment_failure(run, request, slot, iteration_index, judgment)
-                return await self._failed(run, request, judgment, ref)
-        progressed = self._state_progressed(pre_iteration_state, run.state)
+            failure = await self._execute_judgment(run, request, slot, iteration_index, pre_wave_state)
+            if failure is not None:
+                return failure
+        progressed = self._state_progressed(pre_iteration_state, run.state, objectives[0] if objectives else None, run.objective_history, run.resolved_progress)
         run.state = self._refresh_state(run.state, no_progress=0 if progressed else min(2, run.state.iteration_no_progress_streak + 1))
         if local_slot < len(request.operation_plan.iteration_slots) - 1:
             await self._write_in_progress(run, request, slot)
+        return None
+
+    @staticmethod
+    def _correction_snapshot(run):
+        from dataclasses import asdict
+        from .artifacts import ArtifactActionCorrectionState
+        return tuple(ArtifactActionCorrectionState(**asdict(item)) for item in run.corrections)
+
+    @staticmethod
+    def _start_step(run, iteration_index, kind):
+        run.active_iteration = iteration_index
+        run.active_step_kind = kind
+        run.active_action_ref = None
+        run.active_judgment_ref = None
+        run.active_observation_start = len(run.observation_refs)
+
+    @staticmethod
+    def _qualification_snapshot(run):
+        if run.active_iteration is not None:
+            step = ResearchStep(step_kind=run.active_step_kind, iteration_index=run.active_iteration,
+                action_ref=run.active_action_ref, judgment_ref=run.active_judgment_ref,
+                observation_refs=tuple(run.observation_refs[run.active_observation_start:]))
+            previous = {item.iteration_index: item for item in run.steps}
+            prior = previous.get(step.iteration_index)
+            if prior is not None:
+                if step.step_kind != prior.step_kind:
+                    raise ValueError("research step kind cannot change during replay")
+                step = ResearchStep(**{**step.model_dump(mode="python"),
+                    "action_ref": step.action_ref or prior.action_ref,
+                    "judgment_ref": step.judgment_ref or prior.judgment_ref,
+                    "observation_refs": tuple(dict.fromkeys((*prior.observation_refs, *step.observation_refs)))})
+            previous[step.iteration_index] = step
+            run.steps = tuple(previous[index] for index in sorted(previous))
+        return QualificationState(assessments=run.assessments, steps=run.steps)
+
+    @staticmethod
+    def _pending_correction(run, objective):
+        from .correction import target_fingerprint, evidence_fingerprint
+        target, evidence = target_fingerprint(objective), evidence_fingerprint(run.state, objective, run.objective_history)
+        return next((item for item in reversed(run.corrections)
+                     if item.active and item.target == target and item.evidence == evidence), None)
+
+    async def _reject_action(self, run, request, slot, iteration_index, local_slot,
+                             objectives, output, metadata, rule, *, replay_ref=None):
+        from .correction import record_rejection
+        output = TypeAdapter(ActionModelOutcome).validate_json(output.model_dump_json(), strict=True)
+        if slot.action_operation_id not in run.rejected_operations:
+            run.corrections = record_rejection(run.corrections, run.state, objectives[0],
+                getattr(output, "actions", ()), run.destination, rule, run.objective_history)
+            run.rejected_operations.add(slot.action_operation_id)
+        if replay_ref is None:
+            record = ModelActionPolicyRejectedRecord(record_type="policy_rejected",
+                output=self._action_output_snapshot(output), metadata=metadata, reason_code=rule)
+            ref = await self._write_model_action(run, request, slot, iteration_index, record)
+        else:
+            ref = replay_ref
+        self._remember_action_ref(run, ref)
+        correction = self._pending_correction(run, objectives[0])
+        run.state = self._state_with(run, no_progress=min(2, run.state.iteration_no_progress_streak + 1))
+        if (correction.attempts >= 2 or local_slot == len(request.operation_plan.iteration_slots) - 1
+                or run.semantic_invocations >= 12):
+            return await self._failed(run, request,
+                ControlResearchFailure(code=CandidateResearchControlFailureCode.ACTION_CORRECTION_EXHAUSTED), ref)
+        await self._write_in_progress(run, request, slot)
         return None
 
     @staticmethod
@@ -1468,7 +1762,9 @@ class CandidateResearchService:
         """Build the typed, normalized Action context without raw payloads."""
         requirements = []
         groups = {group.group_id: group for group in run.state.requirement_group_states}
-        for kind, group_id, item_ids in run.requirement_specs:
+        for requirement in project_requirements(run.requirement_specs, run.requirement_context):
+            kind = requirement["requirement_kind"]
+            group_id = requirement["requirement_group_id"]
             group = groups.get(group_id)
             unresolved = []
             if group is not None:
@@ -1481,9 +1777,7 @@ class CandidateResearchService:
                     if verdict in {MatchVerdict.AMBIGUOUS, MatchVerdict.UNRESOLVED}:
                         unresolved.append({"handle": candidate_handle(candidate.admission_ordinal), "uid": candidate.core.uid})
             requirements.append({
-                "requirement_kind": kind,
-                "requirement_group_id": group_id,
-                "requirement_item_ids": item_ids,
+                **requirement,
                 "unresolved_candidates": tuple(unresolved),
             })
         candidates = []
@@ -1502,17 +1796,31 @@ class CandidateResearchService:
                 "details_status": candidate.details.status,
             })
         return {
+            "correction": (CandidateResearchService._pending_correction(run, objectives[0]).project(objectives[0], CandidateResearchService._allowed_objective_actions(run, objectives[0]))
+                if objectives and CandidateResearchService._pending_correction(run, objectives[0]) is not None else None),
+            "required_objective_id": objectives[0].objective_id if objectives else None,
             "destination": run.destination,
             "effective_interests": tuple(item.value for item in run.effective_interests),
             "interests_locked": run.interests_frozen,
             "agent_may_select_interests": run.agent_decides_interests,
-            "objectives": tuple(_json_model(item) for item in objectives),
+            "objectives": tuple({**_json_model(item),
+                "allowed_actions": CandidateResearchService._allowed_objective_actions(run, item),
+                "detail_uids": CandidateResearchService._objective_detail_uids(run, item)} for item in objectives),
             "requirements": tuple(requirements),
             "candidates": tuple(candidates),
         }
 
     @staticmethod
-    def _state_progressed(before: CandidateSetStateSnapshot, after: CandidateSetStateSnapshot) -> bool:
+    def _state_progressed(before: CandidateSetStateSnapshot, after: CandidateSetStateSnapshot, objective=None, history=None, resolved_progress=None) -> bool:
+        if objective is not None:
+            from .correction import evidence_fingerprint, resolution_keys
+            # Relevant new facts can justify another action; unrelated pool growth
+            # and alternating conclusions over unchanged facts cannot.
+            seen = resolved_progress if resolved_progress is not None else set()
+            seen.update(resolution_keys(before, objective))
+            newly_resolved = resolution_keys(after, objective) - seen
+            seen.update(newly_resolved)
+            return bool(newly_resolved) or evidence_fingerprint(before, objective, history) != evidence_fingerprint(after, objective, history)
         before_eligible = {item.core.uid for item in before.candidates if item.state is CandidateState.ELIGIBLE}
         after_eligible = {item.core.uid for item in after.candidates if item.state is CandidateState.ELIGIBLE}
         return bool(
@@ -1562,7 +1870,7 @@ class CandidateResearchService:
                 "covered_interests": tuple(item for item in run.state.coverage.covered_interests if item in effective),
             }
         )
-        run.state = CandidateSetStateSnapshot(**{**_python_model(run.state), "effective_interests": effective, "coverage": coverage})
+        run.state = QualifiedCandidateSetStateSnapshot(**{**_python_model(run.state), "effective_interests": effective, "coverage": coverage})
         run.interests_frozen = True
 
     async def _no_useful_action_is_legal(
@@ -1575,19 +1883,50 @@ class CandidateResearchService:
             return run.state.iteration_no_progress_streak >= 1
         if output.reason_code == "insufficient_remaining_budget":
             remaining = await self._place_remaining(run)
-            return remaining == 0 or not any(objective.kind in {ResearchObjectiveKind.ATTRACTION_COUNT, ResearchObjectiveKind.RESTAURANT_COUNT, ResearchObjectiveKind.DETAILS_MATURITY, ResearchObjectiveKind.INITIAL_CITY_ATTRACTION, ResearchObjectiveKind.INITIAL_HOTEL_RESTAURANT_NEARBY, ResearchObjectiveKind.MEAL_LUNCH, ResearchObjectiveKind.MEAL_DINNER, ResearchObjectiveKind.INTEREST_COVERAGE} for objective in objectives)
+            return remaining == 0
         if output.reason_code == "no_legal_action":
-            if not objectives:
-                return False
-            for objective in objectives:
-                if objective.kind in {ResearchObjectiveKind.INITIAL_CITY_ATTRACTION, ResearchObjectiveKind.INITIAL_HOTEL_RESTAURANT_NEARBY, ResearchObjectiveKind.MEAL_LUNCH, ResearchObjectiveKind.MEAL_DINNER, ResearchObjectiveKind.INTEREST_COVERAGE}:
-                    return False
-                if objective.kind in {ResearchObjectiveKind.ATTRACTION_COUNT, ResearchObjectiveKind.RESTAURANT_COUNT} and run.state.counts.admitted_slots < 128:
-                    return False
-                if objective.kind is ResearchObjectiveKind.DETAILS_MATURITY and any(item.details.status == "not_requested" for item in run.state.candidates if item.state is CandidateState.ELIGIBLE):
-                    return False
-            return True
+            return bool(objectives) and not any(self._allowed_objective_actions(run, item) for item in objectives)
         return False
+
+    @staticmethod
+    def _objective_detail_uids(run, objective):
+        blocked = {item.core.uid for item in run.state.candidates
+            if item.state not in {CandidateState.EXCLUDED, CandidateState.CONFLICTED}
+            and not candidate_admitted_purposes(item) and any(match.requirement_group_id == objective.requirement_group_id
+                and match.verdict is MatchVerdict.CONFIRMED for match in item.must_matches)}
+        if (objective.requirement_group_id is not None
+                and objective.requirement_group_id not in run.named_searches and not blocked):
+            return ()
+        if objective.kind in {ResearchObjectiveKind.INITIAL_CITY_ATTRACTION, ResearchObjectiveKind.INITIAL_HOTEL_RESTAURANT_NEARBY}:
+            return ()
+        candidates = tuple(item for item in run.state.candidates
+            if (not objective.candidate_uids or item.core.uid in objective.candidate_uids)
+            and item.details.status == "not_requested")
+        if objective.requirement_group_id:
+            candidates = tuple(item for item in candidates if any(
+                match.requirement_group_id == objective.requirement_group_id
+                and (match.verdict in {MatchVerdict.UNRESOLVED, MatchVerdict.AMBIGUOUS}
+                     or item.core.uid in blocked)
+                for match in (*item.must_matches, *item.avoid_matches)))
+        if objective.kind is ResearchObjectiveKind.DETAILS_MATURITY:
+            candidates = tuple(item for item in candidates if item.state is CandidateState.ELIGIBLE)
+        return tuple(item.core.uid for item in candidates)
+
+    @staticmethod
+    def _allowed_objective_actions(run, objective):
+        detail_only = objective.kind is ResearchObjectiveKind.DETAILS_MATURITY or objective.gap_type == "candidate_details_missing"
+        if objective.requirement_group_id and any(item.details.status == "not_requested"
+                and item.state not in {CandidateState.EXCLUDED, CandidateState.CONFLICTED}
+                and not candidate_admitted_purposes(item) and any(match.requirement_group_id == objective.requirement_group_id
+                    and match.verdict is MatchVerdict.CONFIRMED for match in item.must_matches)
+                for item in run.state.candidates):
+            detail_only = True
+        allowed = ["get_place_details"] if CandidateResearchService._objective_detail_uids(run, objective) else []
+        anchor_valid = (getattr(objective.anchor, "anchor_type", None) != "candidate"
+            or any(item.core.uid == objective.anchor.uid for item in run.state.candidates))
+        if not detail_only and anchor_valid:
+            allowed.insert(0, "search_places")
+        return tuple(allowed)
 
     async def _consume_iteration(self, run: _Run, operation_id: OperationId) -> int | None:
         try:
@@ -1621,7 +1960,7 @@ class CandidateResearchService:
         if not isinstance(lookup, ArtifactFound):
             raise RuntimeError("action artifact lookup contract violation")
         ref = lookup.ref
-        if ref.artifact_type != "candidate_research.model_action" or ref.schema_version != "1.0" or ref.operation_id != operation_id or ref.operation_id.run_id != run.run_id:
+        if ref.artifact_type != "candidate_research.model_action" or ref.schema_version != "2.0" or ref.operation_id != operation_id or ref.operation_id.run_id != run.run_id:
             return None
         try:
             read = await self._repository.get(ref, expected_model=CandidateResearchModelActionArtifact)
@@ -1636,16 +1975,19 @@ class CandidateResearchService:
             or _digest(_json_model(artifact)) != ref.content_hash
         ):
             return None
-        record = artifact.result
+        record = unwrap_model_record(artifact.result)
+        run.action_recoveries = artifact.result.attempts if artifact.result.record_type == "recovered" else ()
         if ref not in run.action_refs:
+            self._account_replayed_recoveries(run, artifact.result)
             self._account_replayed_metadata(run, artifact.invocation_index, getattr(record, "metadata", None))
+            self._account_replayed_failure(run, record)
         if isinstance(record, ModelActionLLMFailureRecord):
             error = self._public_llm_error(record.error)
             return artifact.iteration_index, LLMResearchFailure(invocation_kind=ResearchInvocationKind.ACTION, error=error), ref
         if isinstance(record, ModelActionControllerRejectedRecord):
             return artifact.iteration_index, ControlResearchFailure(code=CandidateResearchControlFailureCode.ACTION_BATCH_INVALID), ref
         if isinstance(record, ModelActionPolicyRejectedRecord):
-            return artifact.iteration_index, (_PolicyReplay(), record.metadata), ref
+            return artifact.iteration_index, (_PolicyReplay(record.output, record.reason_code), record.metadata), ref
         try:
             output = TypeAdapter(ActionModelOutcome).validate_json(
                 json.dumps(_python_model(record.output), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
@@ -1728,10 +2070,89 @@ class CandidateResearchService:
             applied += 1
         return 1, applied
 
+    @staticmethod
+    def _reserve_output_recovery(run, failure, *, judgment=False):
+        code = None
+        metadata = None
+        if (isinstance(failure, LLMResearchFailure) and not failure.error.possible_duplicate
+                and failure.error.code in {LLMErrorCode.STRUCTURED_OUTPUT_INVALID, LLMErrorCode.OUTPUT_TRUNCATED}):
+            code = failure.error.code.value
+        elif (judgment and run.judgment_recoverable and isinstance(failure, ControlResearchFailure)
+                and failure.code in {CandidateResearchControlFailureCode.JUDGMENT_PATCH_INVALID,
+                                     CandidateResearchControlFailureCode.JUDGMENT_REQUIRED_MISSING}
+                and run.last_judgment_metadata is not None and not run.last_judgment_metadata.possible_duplicate):
+            code, metadata = run.judgment_recovery_code, run.last_judgment_metadata
+        if code is None or run.output_recoveries_used >= 2 or run.semantic_invocations >= 12:
+            return None
+        run.output_recoveries_used += 1
+        return OutputRecoveryAttempt(recovery_number=run.output_recoveries_used,
+            invocation_index=run.semantic_invocations - 1, code=code, metadata=metadata)
+
+    @staticmethod
+    def _account_replayed_recoveries(run, record):
+        if record.record_type != "recovered":
+            return
+        for attempt in record.attempts:
+            run.output_recoveries_used = max(run.output_recoveries_used, attempt.recovery_number)
+            CandidateResearchService._account_replayed_metadata(run, attempt.invocation_index, attempt.metadata)
+            if attempt.metadata is None:
+                run.provider_attempts_complete = False
+                run.usage_complete = False
+
+    @staticmethod
+    def _account_replayed_failure(run, record):
+        if (isinstance(record, (ModelActionLLMFailureRecord, ModelJudgmentLLMFailureRecord))
+                and CandidateResearchService._semantic_cost(record.error.code)):
+            # The final failure has no public metadata, just like earlier
+            # failed attempts. Replaying it cannot make unknown costs complete.
+            run.provider_attempts_complete = False
+            run.usage_complete = False
+
+    @staticmethod
+    def _account_cancelled_invocation(run, admitted_before):
+        admitted_after = getattr(run.operation, "semantic_invocations_consumed", None)
+        if (type(admitted_before) is int and type(admitted_after) is int
+                and admitted_after - admitted_before in (0, 1)):
+            delta = admitted_after - admitted_before
+            run.semantic_invocations += delta
+            if delta == 0:
+                return
+        else:
+            run.indeterminate = True
+            if run.semantic_invocations == 0:
+                return
+        # A cancelled request has no public final metadata; do not invent usage.
+        run.provider_attempts_complete = False
+        run.usage_complete = False
+
+    @staticmethod
+    def _recovered_record(record, attempts, *, judgment=False):
+        if not attempts:
+            return record
+        model = ModelJudgmentRecoveredRecord if judgment else ModelActionRecoveredRecord
+        return model(record_type="recovered", attempts=attempts, final=record)
+
     async def _invoke_action(self, run: _Run, prompt: PromptEnvelope) -> tuple[object, ArtifactInvocationMetadataSnapshot] | LLMResearchFailure | ControlResearchFailure:
+        from .correction import recovery_prompt
+        original = prompt
+        run.action_recoveries = ()
+        while True:
+            result = await self._invoke_action_once(run, prompt)
+            attempt = self._reserve_output_recovery(run, result)
+            if attempt is None:
+                return result
+            run.action_recoveries += (attempt,)
+            prompt = recovery_prompt(original, code=attempt.code, recovery_number=attempt.recovery_number)
+
+    async def _invoke_action_once(self, run: _Run, prompt: PromptEnvelope) -> tuple[object, ArtifactInvocationMetadataSnapshot] | LLMResearchFailure | ControlResearchFailure:
+        admitted_before = getattr(run.operation, "semantic_invocations_consumed", None)
         try:
             with interaction_call("research_action") as identity:
-                result = await run.operation.ainvoke_structured(prompt, _ActionModelEnvelope)
+                from .correction import bound_action_schema
+                highest = next(iter(run.objective_directory.values()), None)
+                result = await run.operation.ainvoke_structured(prompt, bound_action_schema(_ActionModelEnvelope, highest,
+                    self._allowed_objective_actions(run, highest) if highest else (),
+                    self._objective_detail_uids(run, highest) if highest else ()))
             run.action_interaction = identity
         except (RuntimeError, TypeError, ValueError, AttributeError):
             run.semantic_invocations += 1
@@ -1740,6 +2161,7 @@ class CandidateResearchService:
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
+                self._account_cancelled_invocation(run, admitted_before)
                 raise
             run.semantic_invocations += 1
             run.provider_attempts_complete = False
@@ -1826,6 +2248,8 @@ class CandidateResearchService:
             objective = by_id.get(action.objective_id)
             if objective is None:
                 return "objective"
+            if action.action_type not in self._allowed_objective_actions(run, objective):
+                return "objective_parameters"
             if isinstance(action, ProposedSearchAction):
                 if action.area_mode is SearchAreaMode.CITY:
                     if action.anchor is not None or action.radius_km is not None:
@@ -1852,7 +2276,7 @@ class CandidateResearchService:
             else:
                 if action.uid not in known_uids:
                     return "uid"
-                if objective.kind is not ResearchObjectiveKind.DETAILS_MATURITY and objective.candidate_uids and action.uid not in objective.candidate_uids:
+                if action.uid not in self._objective_detail_uids(run, objective):
                     return "objective_parameters"
                 candidate = next(item for item in run.state.candidates if item.core.uid == action.uid)
                 if candidate.details.status != "not_requested":
@@ -2174,13 +2598,49 @@ class CandidateResearchService:
         for name in ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"):
             run.usage[name] = run.usage.get(name, 0) + getattr(metadata.usage, name)
 
-    async def _judgment(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int) -> LLMResearchFailure | ControlResearchFailure | _JudgmentReplayIndeterminate | None:
+    async def _judgment(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int, prepared=None) -> LLMResearchFailure | ControlResearchFailure | _JudgmentReplayIndeterminate | None:
+        run.judgment_recoveries = ()
+        existing = await self._repository.lookup(operation_id=slot.judgment_operation_id)
+        saved_job = None
+        if isinstance(existing, ArtifactFound):
+            try:
+                saved = await self._repository.get(existing.ref, expected_model=CandidateResearchModelJudgmentArtifact)
+                if saved.ref != existing.ref or _digest(_json_model(saved.content)) != existing.ref.content_hash:
+                    return _JudgmentReplayIndeterminate()
+                saved_job = saved.content.job
+            except ArtifactRepositoryError:
+                return _JudgmentReplayIndeterminate()
+        try:
+            if prepared is not None and saved_job is None:
+                run.judgment_job, run.judgment_payload = prepared
+            else:
+                run.judgment_payload = await self._judgment_context(run, tuple(run.observation_refs), current_iteration_index=iteration_index, saved_job=saved_job)
+        except ArtifactRepositoryError:
+            return ControlResearchFailure(code=CandidateResearchControlFailureCode.ARTIFACT_ERROR)
+        if not isinstance(existing, ArtifactAbsent):
+            # A persisted outcome is final for this operation, including failure.
+            return await self._judgment_once(run, request, slot, iteration_index)
+        if run.judgment_job.candidate_ordinals and not job_has_pending_judgments(run.judgment_job, run.state.candidates):
+            return None
+        feedback = None
+        while True:
+            run.judgment_recoverable = False
+            result = await self._judgment_once(run, request, slot, iteration_index, feedback)
+            attempt = self._reserve_output_recovery(run, result, judgment=True)
+            if attempt is None:
+                return result
+            run.judgment_recoveries += (attempt,)
+            feedback = attempt
+
+    async def _judgment_once(self, run, request, slot, iteration_index, recovery_feedback=None):
+        prompt_payload = run.judgment_payload
+        if prompt_payload is None or run.judgment_job is None:
+            return ControlResearchFailure(code=CandidateResearchControlFailureCode.CONTEXT_CONTRACT_ERROR)
+        visible_candidates = tuple(item["handle"] for item in prompt_payload["candidates"])
         def candidate_evidence_directory() -> dict[str, tuple[str, ...]]:
             return {
-                candidate_handle(item.admission_ordinal): tuple(
-                    f"e:{index}" for index in item.observation_indexes
-                )
-                for item in run.state.candidates
+                candidate["handle"]: tuple(candidate["evidence_handles"])
+                for candidate in prompt_payload["candidates"]
             }
 
         existing = await self._repository.lookup(operation_id=slot.judgment_operation_id)
@@ -2188,7 +2648,7 @@ class CandidateResearchService:
             ref = existing.ref
             if (
                 ref.artifact_type != "candidate_research.model_judgment"
-                or ref.schema_version != "1.0"
+                or ref.schema_version != "3.0"
                 or ref.operation_id != slot.judgment_operation_id
                 or ref.operation_id.run_id != run.run_id
             ):
@@ -2203,12 +2663,17 @@ class CandidateResearchService:
                 or artifact.run_id != run.run_id
                 or artifact.mode is not run.mode
                 or artifact.iteration_index != iteration_index
+                or artifact.job != run.judgment_job
+                or tuple(artifact.evidence_refs) != tuple(run.observation_refs)
                 or _digest(_json_model(artifact)) != ref.content_hash
             ):
                 return _JudgmentReplayIndeterminate()
-            record = artifact.result
+            record = unwrap_model_record(artifact.result)
+            run.judgment_recoveries = artifact.result.attempts if artifact.result.record_type == "recovered" else ()
             if ref not in run.judgment_refs:
+                self._account_replayed_recoveries(run, artifact.result)
                 self._account_replayed_metadata(run, artifact.invocation_index, getattr(record, "metadata", None))
+                self._account_replayed_failure(run, record)
             self._remember_judgment_ref(run, ref)
             if isinstance(record, ModelJudgmentLLMFailureRecord):
                 return LLMResearchFailure(invocation_kind=ResearchInvocationKind.JUDGMENT, error=self._public_llm_error(record.error))
@@ -2221,37 +2686,40 @@ class CandidateResearchService:
                 except (ValidationError, TypeError, ValueError):
                     return _JudgmentReplayIndeterminate()
                 run.last_judgment_metadata = record.metadata
-                return ControlResearchFailure(code=CandidateResearchControlFailureCode.JUDGMENT_PATCH_INVALID)
+                return ControlResearchFailure(code=CandidateResearchControlFailureCode(record.code))
             if not isinstance(record, ModelJudgmentAcceptedRecord):
                 return _JudgmentReplayIndeterminate()
             try:
                 patch = self._public_judgment_patch(record.patch)
-                visible_candidates = tuple(candidate_handle(item.admission_ordinal) for item in run.state.candidates)
-                visible_evidence = tuple(f"e:{index}" for index in range(len(run.observation_refs)))
+                visible_evidence = tuple(item["handle"] for item in prompt_payload["evidence"])
                 patch = validate_judgment_patch(
                     patch=patch,
                     candidate_handles=visible_candidates,
                     evidence_handles=visible_evidence,
                     candidate_evidence_handles=candidate_evidence_directory(),
                 )
+                validate_required_judgments(run.judgment_job, run.state.candidates, patch)
+                proposed_state = self._apply_patch(run.state, patch)
+                proposed_assessments = record_assessments(run.assessments, run.judgment_job, patch)
+                QualificationState(assessments=proposed_assessments, steps=self._qualification_snapshot(run).steps)
             except (ValidationError, TypeError, ValueError):
                 return _JudgmentReplayIndeterminate()
             run.last_judgment_patch = patch
             run.last_judgment_metadata = record.metadata
-            run.state = self._apply_patch(run.state, patch)
+            run.assessments = proposed_assessments
+            run.state = proposed_state
             return None
         if not isinstance(existing, ArtifactAbsent):
             return _JudgmentReplayIndeterminate()
         if run.semantic_invocations >= 12:
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.BUDGET_ERROR)
         refs = tuple(run.observation_refs)
-        try:
-            prompt_payload = await self._judgment_context(
-                run, refs, current_iteration_index=iteration_index
-            )
-        except ArtifactRepositoryError:
-            return ControlResearchFailure(code=CandidateResearchControlFailureCode.ARTIFACT_ERROR)
         prompt = build_observation_prompt(prompt_payload)
+        if recovery_feedback is not None:
+            from .correction import recovery_prompt
+            prompt = recovery_prompt(prompt, code=recovery_feedback.code,
+                                     recovery_number=recovery_feedback.recovery_number)
+        admitted_before = getattr(run.operation, "semantic_invocations_consumed", None)
         try:
             with interaction_call("research_judgment") as identity:
                 result = await run.operation.ainvoke_structured(prompt, JudgmentPatch)
@@ -2262,6 +2730,7 @@ class CandidateResearchService:
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
+                self._account_cancelled_invocation(run, admitted_before)
                 raise
             run.semantic_invocations += 1
             run.provider_attempts_complete = False
@@ -2286,99 +2755,98 @@ class CandidateResearchService:
         try:
             patch = TypeAdapter(JudgmentPatch).validate_json(json.dumps(_json_model(result.value), ensure_ascii=False, sort_keys=True, separators=(",", ":")), strict=True)
             run.last_judgment_patch = patch
-            visible_candidates = tuple(candidate_handle(item.admission_ordinal) for item in run.state.candidates)
-            visible_evidence = tuple(f"e:{index}" for index in range(len(refs)))
+            known_groups = {group.group_id: group.requirement_kind for group in run.state.requirement_group_states}
+            if any(known_groups.get(item.requirement_group_id) != item.requirement_kind for item in patch.requirement_group_updates):
+                raise ValueError("unknown requirement group")
+            visible_evidence = tuple(item["handle"] for item in prompt_payload["evidence"])
             patch = validate_judgment_patch(
                 patch=patch,
                 candidate_handles=visible_candidates,
                 evidence_handles=visible_evidence,
                 candidate_evidence_handles=candidate_evidence_directory(),
             )
-            known_groups = {group.group_id for group in run.state.requirement_group_states}
-            if any(item.requirement_group_id not in known_groups for item in patch.requirement_group_updates):
-                raise ValueError("unknown requirement group")
+            validate_required_judgments(run.judgment_job, run.state.candidates, patch)
+        except JudgmentRequiredMissing:
+            run.judgment_recoverable = True
+            run.judgment_recovery_code = "judgment_required_missing"
+            await identity.record_validation(stage="policy", passed=False, code="judgment_required_missing")
+            return ControlResearchFailure(code=CandidateResearchControlFailureCode.JUDGMENT_REQUIRED_MISSING)
+        except JudgmentEvidenceMismatch:
+            run.judgment_recoverable = True
+            run.judgment_recovery_code = "judgment_evidence_mismatch"
+            await identity.record_validation(stage="policy", passed=False, code="judgment_evidence_mismatch")
+            return ControlResearchFailure(code=CandidateResearchControlFailureCode.JUDGMENT_PATCH_INVALID)
         except (ValidationError, ValueError, TypeError):
             if run.last_judgment_patch is None:
                 return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
             await identity.record_validation(stage="policy", passed=False, code="judgment_patch_invalid")
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.JUDGMENT_PATCH_INVALID)
         await identity.record_validation(stage="policy", passed=True)
-        resolved = self._resolve_patch(patch, refs, run.state.requirement_group_states)
-        artifact = CandidateResearchModelJudgmentArtifact(schema_version="1.0", run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=OBSERVATION_PROMPT_VERSION, prompt_sha256=OBSERVATION_PROMPT_CONTENT_DIGEST, evidence_refs=refs, result=ModelJudgmentAcceptedRecord(record_type="accepted", patch=resolved, metadata=self._metadata(result.metadata)))
-        ref = await self._put(run, slot.judgment_operation_id, "candidate_research.model_judgment", artifact)
-        self._remember_judgment_ref(run, ref)
-        run.state = self._apply_patch(run.state, patch)
-        return None
-
-    async def _judgment_context(
-        self,
-        run: _Run,
-        refs: Sequence[ArtifactRef],
-        *,
-        current_iteration_index: int,
-    ) -> dict[str, object]:
-        """Expose only normalized observation facts and candidate context."""
-        evidence: list[dict[str, object]] = []
-        current_evidence_handles: list[str] = []
-        search_by_observation = {
-            record.observation_index: record for record in run.state.search_coverage.records
-        }
-        for index, ref in enumerate(refs):
+        from .purpose import normalise_meal_update
+        evidence_by_handle = {item["handle"]: item for item in prompt_payload["evidence"]}
+        search_by_observation = {record.observation_index: record for record in run.state.search_coverage.records}
+        for handle in {ref.handle_id for update in patch.meal_updates for ref in update.evidence_handles}:
+            if handle in evidence_by_handle:
+                continue
+            index = int(handle.split(":")[1])
+            ref = refs[index]
             read = await self._repository.get(ref, expected_model=CandidateResearchPlaceObservationArtifact)
             if read.ref != ref or read.content.run_id != run.run_id or _digest(_json_model(read.content)) != ref.content_hash:
                 raise ArtifactRepositoryError()
-            handle = f"e:{index}"
-            if read.content.iteration_index != current_iteration_index:
-                continue
-            current_evidence_handles.append(handle)
             search = search_by_observation.get(index)
-            accepted_search = None
-            if search is not None:
-                accepted_search = {
-                    "objective_kind": search.objective_kind.value,
-                    "role": (
-                        search.role.value
-                        if search.role is not None
-                        else ResearchRole.ATTRACTION.value
-                        if search.objective_kind is ResearchObjectiveKind.INTEREST_COVERAGE
-                        else None
-                    ),
-                    "interest": search.interest.value if search.interest is not None else None,
-                    "meal_intent": search.meal_intent.value if search.meal_intent is not None else None,
-                }
-            evidence.append({
-                "handle": handle,
-                "action_ordinal": read.content.action_ordinal,
-                "tool": read.content.tool.value,
-                "action_fingerprint": read.content.action_fingerprint,
-                "accepted_search": accepted_search,
-                "result": _json_model(read.content.result),
-            })
-        candidates = tuple({
-            "handle": candidate_handle(item.admission_ordinal),
-            "uid": item.core.uid,
-            "name": item.core.name,
-            "address": item.core.address,
-            "coordinate": _json_model(item.core.coordinate),
-            "provider_category": item.core.provider_category,
-            "evidence_handles": tuple(f"e:{index}" for index in item.observation_indexes),
-            "state": item.state.value,
-            "roles": tuple({"role": role.role.value, "verdict": role.verdict.value} for role in item.roles),
-            "interests": tuple(value.value for value in item.interests),
-            "meal_intents": tuple(value.value for value in item.meal_intents),
-            "details": {"status": item.details.status, "observation_index": item.details.observation_index},
-        } for item in run.state.candidates)
-        requirements = tuple({
-            "requirement_kind": kind,
-            "requirement_group_id": group_id,
-            "requirement_item_ids": item_ids,
-        } for kind, group_id, item_ids in run.requirement_specs)
-        return {
-            "candidates": candidates,
-            "requirements": requirements,
-            "evidence": tuple(evidence),
-            "current_evidence_handles": tuple(current_evidence_handles),
-        }
+            observation_result = read.content.result
+            evidence_by_handle[handle] = {"accepted_search": None if search is None else {
+                "meal_intent": None if search.meal_intent is None else search.meal_intent.value},
+                "result": {"record_type": observation_result.record_type, "details": {
+                    "business_hours": ("present",) if observation_result.record_type == "details_success" and observation_result.details.business_hours else ()}}}
+        patch = patch.model_copy(update={"meal_updates": tuple(normalise_meal_update(item, evidence_by_handle) for item in patch.meal_updates)})
+        try:
+            proposed_state = self._apply_patch(run.state, patch)
+            proposed_assessments = record_assessments(run.assessments, run.judgment_job, patch)
+            QualificationState(assessments=proposed_assessments, steps=self._qualification_snapshot(run).steps)
+        except (ValidationError, ValueError, TypeError, KeyError):
+            await identity.record_validation(stage="controller", passed=False, code="state_invariant_failed")
+            return ControlResearchFailure(code=CandidateResearchControlFailureCode.STATE_INVARIANT_FAILED)
+        resolved = self._resolve_patch(patch, refs, run.state.requirement_group_states)
+        record = ModelJudgmentAcceptedRecord(record_type="accepted", patch=resolved, metadata=self._metadata(result.metadata))
+        artifact = CandidateResearchModelJudgmentArtifact(schema_version="3.0", job=run.judgment_job, run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=OBSERVATION_PROMPT_VERSION, prompt_sha256=OBSERVATION_PROMPT_CONTENT_DIGEST, evidence_refs=refs, result=self._recovered_record(record, run.judgment_recoveries, judgment=True))
+        ref = await self._put(run, slot.judgment_operation_id, "candidate_research.model_judgment", artifact)
+        self._remember_judgment_ref(run, ref)
+        run.assessments = proposed_assessments
+        run.state = QualifiedCandidateSetStateSnapshot(**{**_python_model(proposed_state), "model_judgment_refs": tuple(run.judgment_refs)})
+        return None
+
+    async def _observation_contexts(self, run: _Run, refs: Sequence[ArtifactRef]):
+        observations, iterations = {}, {}
+        search_by_index = {item.observation_index: item for item in run.state.search_coverage.records}
+        for index, ref in enumerate(refs):
+            artifact = run.observation_cache.get(ref)
+            if artifact is None:
+                read = await self._repository.get(ref, expected_model=CandidateResearchPlaceObservationArtifact)
+                if read.ref != ref or read.content.run_id != run.run_id or _digest(_json_model(read.content)) != ref.content_hash:
+                    raise ArtifactRepositoryError()
+                artifact = read.content
+                run.observation_cache[ref] = artifact
+            search = search_by_index.get(index)
+            objective = run.objective_history.get(search.objective_id) if search else None
+            observations[index] = observation_context(index, artifact, search,
+                objective.requirement_group_id if objective else None)
+            iterations[index] = artifact.iteration_index
+        return observations, iterations
+
+    async def _judgment_context(
+        self, run: _Run, refs: Sequence[ArtifactRef], *, current_iteration_index: int,
+        selected_ordinals: Sequence[int] | None = None, step_kind: str = "search_and_judge",
+        saved_job: JudgmentJob | None = None,
+    ) -> dict[str, object]:
+        observations, iterations = await self._observation_contexts(run, refs)
+        job, payload = build_judgment_context(run.state, observations,
+            project_requirements(run.requirement_specs, run.requirement_context), run.assessments,
+            iteration_index=current_iteration_index,
+            current_indexes=tuple(index for index, iteration in iterations.items() if iteration == current_iteration_index),
+            selected_ordinals=selected_ordinals, step_kind=step_kind, saved_job=saved_job)
+        run.judgment_job = job
+        return payload
 
     def _resolve_patch(
         self,
@@ -2427,6 +2895,7 @@ class CandidateResearchService:
         )
 
     def _apply_patch(self, state: CandidateSetStateSnapshot, patch: JudgmentPatch) -> CandidateSetStateSnapshot:
+        from .judgments import merge_requirement_group_state
         candidates = list(state.candidates)
         for update in patch.role_updates:
             ordinal = int(update.candidate_handle[2:])
@@ -2449,8 +2918,16 @@ class CandidateResearchService:
             if ordinal >= len(candidates):
                 continue
             item = candidates[ordinal]
-            meals = tuple(sorted(set((*item.meal_intents, update.meal_intent)) if update.verdict is MatchVerdict.CONFIRMED else set(item.meal_intents) - {update.meal_intent}, key=lambda x: list(MealIntent).index(x)))
-            candidates[ordinal] = self._replace_candidate(item, meal_intents=meals)
+            from .purpose import apply_meal_assessment
+            incoming = ArtifactMealAssessmentSnapshot(meal_intent=update.meal_intent, verdict=update.verdict,
+                reason_code=update.reason_code.value, evidence_indexes=tuple(int(h.handle_id[2:]) for h in update.evidence_handles))
+            if isinstance(item, ArtifactCandidateRecordV2Snapshot):
+                assessments = tuple(apply_meal_assessment(old, incoming) if old.meal_intent is update.meal_intent else old
+                                    for old in item.meal_assessments)
+                meals = tuple(old.meal_intent for old in assessments if old.verdict is MatchVerdict.CONFIRMED)
+                candidates[ordinal] = self._replace_candidate(item, meal_intents=meals, meal_assessments=assessments)
+            else:
+                raise ValueError("legacy candidate cannot be updated in a new research run")
         groups = {group.group_id: group for group in state.requirement_group_states}
         visible_evidence = tuple(f"e:{index}" for index in range(len(state.observation_refs)))
         for update in patch.requirement_group_updates:
@@ -2464,7 +2941,7 @@ class CandidateResearchService:
                 )
                 for item in update.exceptions
             )
-            groups[update.requirement_group_id] = ArtifactRequirementGroupState(
+            incoming_group = ArtifactRequirementGroupState(
                 group_id=update.requirement_group_id,
                 requirement_kind=update.requirement_kind,
                 requirement_item_ids=next((item.requirement_item_ids for item in groups.values() if item.group_id == update.requirement_group_id), (update.requirement_group_id,)),
@@ -2474,10 +2951,15 @@ class CandidateResearchService:
                 default_evidence_indexes=evidence_handle_indexes(update.default_evidence_handles, visible_evidence),
                 exceptions=exceptions,
             )
+            groups[update.requirement_group_id] = merge_requirement_group_state(
+                groups[update.requirement_group_id], incoming_group)
         if patch.requirement_group_updates:
+            updated_scopes = {update.requirement_group_id: set(update.evaluated_candidate_handles)
+                              for update in patch.requirement_group_updates}
+            group_order = {key: index for index, key in enumerate(groups)}
             for ordinal, item in enumerate(candidates):
                 for group in groups.values():
-                    if ordinal not in group.evaluated_candidate_ordinals:
+                    if candidate_handle(ordinal) not in updated_scopes.get(group.group_id, ()):
                         continue
                     override = next((value for value in group.exceptions if value.candidate_ordinal == ordinal), None)
                     verdict = override.verdict if override is not None else group.default_verdict
@@ -2485,9 +2967,9 @@ class CandidateResearchService:
                     evidence = override.evidence_indexes if override is not None else group.default_evidence_indexes
                     match = ArtifactRequirementMatchSnapshot(requirement_group_id=group.group_id, verdict=verdict, reason_code=reason, evidence_indexes=evidence)
                     if group.requirement_kind == "must_visit":
-                        item = self._replace_candidate(item, must_matches=tuple((*[value for value in item.must_matches if value.requirement_group_id != group.group_id], match)))
+                        item = self._replace_candidate(item, must_matches=tuple(sorted((*[value for value in item.must_matches if value.requirement_group_id != group.group_id], match), key=lambda value: group_order[value.requirement_group_id])))
                     else:
-                        item = self._replace_candidate(item, avoid_matches=tuple((*[value for value in item.avoid_matches if value.requirement_group_id != group.group_id], match)))
+                        item = self._replace_candidate(item, avoid_matches=tuple(sorted((*[value for value in item.avoid_matches if value.requirement_group_id != group.group_id], match), key=lambda value: group_order[value.requirement_group_id])))
                 candidates[ordinal] = item
         return self._state_from_candidates(
             state,
@@ -2515,7 +2997,7 @@ class CandidateResearchService:
             unresolved_role=unresolved_role,
             all_roles_contradicted=all_roles_contradicted,
         )
-        return ArtifactCandidateRecordSnapshot(**tree)
+        return type(item)(**tree)
 
     def _add_search(self, run: _Run, action: ProposedSearchAction, outcome: PlaceSearchSuccess, index: int) -> CandidateSetStateSnapshot:
         candidates = list(run.state.candidates)
@@ -2550,7 +3032,7 @@ class CandidateResearchService:
                 ArtifactRoleAssessmentSnapshot(role=ResearchRole.ATTRACTION, verdict=RoleVerdict.UNRESOLVED, reason_code=RoleReasonCode.EVIDENCE_INSUFFICIENT, evidence_indexes=(index,)),
                 ArtifactRoleAssessmentSnapshot(role=ResearchRole.RESTAURANT, verdict=RoleVerdict.UNRESOLVED, reason_code=RoleReasonCode.EVIDENCE_INSUFFICIENT, evidence_indexes=(index,)),
             )
-            candidate = ArtifactCandidateRecordSnapshot(schema_version="1.0", admission_ordinal=len(candidates), core=ArtifactCandidateCoreSnapshot(uid=place.uid, name=place.name, address=place.address, coordinate=ArtifactCoordinateSnapshot(coordinate_system="bd09ll", latitude=place.coordinate.latitude, longitude=place.coordinate.longitude), provider_category=place.category), state=CandidateState.WITHHELD, roles=roles, interests=(), meal_intents=(), must_matches=(), avoid_matches=(), details=ArtifactCandidateDetailsStateSnapshot(status="not_requested", observation_index=None), observation_indexes=(index,), dietary_restrictions="not_evaluated", mobility_constraints="not_evaluated", budget_fit="not_evaluated")
+            candidate = ArtifactCandidateRecordV2Snapshot(schema_version="2.0", meal_assessments=tuple(ArtifactMealAssessmentSnapshot(meal_intent=meal, verdict=MatchVerdict.UNRESOLVED, reason_code="evidence_insufficient", evidence_indexes=(index,)) for meal in MealIntent), admission_ordinal=len(candidates), core=ArtifactCandidateCoreSnapshot(uid=place.uid, name=place.name, address=place.address, coordinate=ArtifactCoordinateSnapshot(coordinate_system="bd09ll", latitude=place.coordinate.latitude, longitude=place.coordinate.longitude), provider_category=place.category), state=CandidateState.WITHHELD, roles=roles, interests=(), meal_intents=(), must_matches=(), avoid_matches=(), details=ArtifactCandidateDetailsStateSnapshot(status="not_requested", observation_index=None), observation_indexes=(index,), dietary_restrictions="not_evaluated", mobility_constraints="not_evaluated", budget_fit="not_evaluated")
             candidates.append(candidate)
             known.add(place.uid)
         objective = run.objective_directory.get(action.objective_id)
@@ -2569,20 +3051,7 @@ class CandidateResearchService:
 
     @staticmethod
     def _core_equal(left: ArtifactCandidateCoreSnapshot, right: ArtifactCandidateCoreSnapshot) -> bool:
-        def provider_coordinate(value: float) -> str:
-            # Baidu place-details currently returns six decimal places while
-            # place-search may return additional binary-float precision.
-            return format(value, ".6f")
-
-        return (
-            left.uid == right.uid
-            and left.name == right.name
-            and left.address == right.address
-            and left.coordinate.coordinate_system == right.coordinate.coordinate_system
-            and provider_coordinate(left.coordinate.latitude) == provider_coordinate(right.coordinate.latitude)
-            and provider_coordinate(left.coordinate.longitude) == provider_coordinate(right.coordinate.longitude)
-            and left.provider_category == right.provider_category
-        )
+        return candidate_core_equal(left, right)
 
     def _record_search_no_result(self, run: _Run, action: ProposedSearchAction, index: int) -> CandidateSetStateSnapshot:
         objective = run.objective_directory.get(action.objective_id)
@@ -2595,16 +3064,25 @@ class CandidateResearchService:
         return self._state_from_candidates(run.state, run.state.candidates, search=search)
 
     def _ensure_requirement_groups(self, run: _Run, state: CandidateSetStateSnapshot, evidence_index: int) -> CandidateSetStateSnapshot:
-        if not run.requirement_specs:
+        if not run.requirement_specs or not state.candidates:
             return state
         groups = {group.group_id: group for group in state.requirement_group_states}
         candidates = list(state.candidates)
+        from .judgments import merge_requirement_group_state
         for kind, group_id, item_ids in run.requirement_specs:
             current = groups.get(group_id)
-            if current is None:
-                current = ArtifactRequirementGroupState(group_id=group_id, requirement_kind=kind, requirement_item_ids=item_ids, evaluated_candidate_ordinals=tuple(item.admission_ordinal for item in candidates), default_verdict=MatchVerdict.UNRESOLVED, default_reason_code=RequirementReasonCode.EVIDENCE_INSUFFICIENT, default_evidence_indexes=(evidence_index,), exceptions=())
-            else:
-                current = ArtifactRequirementGroupState(**{**_python_model(current), "evaluated_candidate_ordinals": tuple(item.admission_ordinal for item in candidates)})
+            missing = tuple(item for item in candidates if current is None or item.admission_ordinal not in current.evaluated_candidate_ordinals)
+            if missing:
+                default_evidence = missing[0].observation_indexes[:1]
+                incoming = ArtifactRequirementGroupState(group_id=group_id, requirement_kind=kind,
+                    requirement_item_ids=item_ids, evaluated_candidate_ordinals=tuple(item.admission_ordinal for item in missing),
+                    default_verdict=MatchVerdict.UNRESOLVED, default_reason_code=RequirementReasonCode.EVIDENCE_INSUFFICIENT,
+                    default_evidence_indexes=default_evidence,
+                    exceptions=tuple(ArtifactRequirementVerdictOverrideState(candidate_ordinal=item.admission_ordinal,
+                        verdict=MatchVerdict.UNRESOLVED, reason_code=RequirementReasonCode.EVIDENCE_INSUFFICIENT,
+                        evidence_indexes=item.observation_indexes[:1]) for item in missing
+                        if item.observation_indexes[:1] != default_evidence))
+                current = incoming if current is None else merge_requirement_group_state(current, incoming)
             groups[group_id] = current
         for ordinal, item in enumerate(candidates):
             for kind, group_id, _ in run.requirement_specs:
@@ -2615,7 +3093,7 @@ class CandidateResearchService:
                 reason = existing_match.reason_code if existing_match is not None else next((override.reason_code for override in group.exceptions if override.candidate_ordinal == ordinal), group.default_reason_code)
                 evidence = existing_match.evidence_indexes if existing_match is not None else next((override.evidence_indexes for override in group.exceptions if override.candidate_ordinal == ordinal), group.default_evidence_indexes)
                 if not set(evidence).issubset(item.observation_indexes):
-                    evidence = (evidence_index,)
+                    raise ValueError("requirement evidence ownership mismatch")
                 match = ArtifactRequirementMatchSnapshot(requirement_group_id=group_id, verdict=verdict, reason_code=reason, evidence_indexes=evidence)
                 if kind == "must_visit":
                     matches = [value for value in item.must_matches if value.requirement_group_id != group_id]
@@ -2660,7 +3138,7 @@ class CandidateResearchService:
     def _mark_details_no_result(self, state: CandidateSetStateSnapshot, uid: str, index: int) -> CandidateSetStateSnapshot:
         candidates = list(state.candidates)
         for ordinal, item in enumerate(candidates):
-            if item.core.uid == uid and item.state is CandidateState.ELIGIBLE:
+            if item.core.uid == uid and item.state in {CandidateState.ELIGIBLE, CandidateState.WITHHELD}:
                 indexes = item.observation_indexes if index in item.observation_indexes else tuple((*item.observation_indexes, index))
                 candidates[ordinal] = self._replace_candidate(item, details={"status": "no_result", "observation_index": index}, observation_indexes=indexes)
                 break
@@ -2687,7 +3165,7 @@ class CandidateResearchService:
                 group_verdict = overrides.get(ordinal, group.default_verdict)
                 if (
                     candidate is not None
-                    and candidate.state is CandidateState.ELIGIBLE
+                    and candidate_admitted_purposes(candidate)
                     and group_verdict is MatchVerdict.CONFIRMED
                     and any(
                         match.requirement_group_id == group.group_id
@@ -2708,21 +3186,48 @@ class CandidateResearchService:
         requirement_groups: tuple[ArtifactRequirementGroupState, ...] | None = None,
         clear_pending_gaps: bool = False,
     ) -> CandidateSetStateSnapshot:
-        eligible = tuple(item for item in candidates if item.state is CandidateState.ELIGIBLE)
-        counts = ArtifactResearchCountSummarySnapshot(attraction_count=sum(any(role.role is ResearchRole.ATTRACTION and role.verdict is RoleVerdict.SUPPORTED for role in item.roles) for item in eligible), attraction_target=state.counts.attraction_target, restaurant_count=sum(any(role.role is ResearchRole.RESTAURANT and role.verdict is RoleVerdict.SUPPORTED for role in item.roles) for item in eligible), restaurant_target=state.counts.restaurant_target, unique_eligible_count=len(eligible), admitted_slots=len(candidates), candidate_capacity=128)
-        search = _filter_search_coverage(
-            search or state.search_coverage,
-            tuple(item.admission_ordinal for item in eligible),
+        purposes = {item.admission_ordinal: candidate_admitted_purposes(item) for item in candidates}
+        usable = tuple(item for item in candidates if purposes[item.admission_ordinal])
+        counts = ArtifactResearchCountSummarySnapshot(
+            attraction_count=sum("attraction" in purposes[item.admission_ordinal] for item in usable),
+            attraction_target=state.counts.attraction_target,
+            restaurant_count=sum(any(meal.value in purposes[item.admission_ordinal] for meal in MealIntent)
+                                 for item in usable),
+            restaurant_target=state.counts.restaurant_target, unique_eligible_count=len(usable),
+            admitted_slots=len(candidates), candidate_capacity=128,
         )
+        search = _filter_search_coverage(search or state.search_coverage, tuple(item.admission_ordinal for item in usable))
         requirement_groups = requirement_groups if requirement_groups is not None else state.requirement_group_states
-        covered_interests = tuple(item for item in state.effective_interests if any(item in candidate.interests for candidate in eligible) and any(record.interest is item for record in search.records))
-        covered_meals = tuple(item for item in MealIntent if any(item in candidate.meal_intents for candidate in eligible) and any(record.meal_intent is item for record in search.records))
+        covered_interests = tuple(interest for interest in state.effective_interests
+            if any("attraction" in purposes[item.admission_ordinal] and interest in item.interests for item in usable)
+            and any(record.interest is interest for record in search.records))
+        covered_meals = tuple(meal for meal in MealIntent
+            if any(meal.value in purposes[item.admission_ordinal] for item in usable)
+            and any(record.meal_intent is meal for record in search.records))
         must_item_count, resolved_must_item_count = self._must_coverage_counts(requirement_groups, candidates)
-        coverage = ArtifactResearchCoverageSummarySnapshot(effective_interests=state.effective_interests, covered_interests=covered_interests, covered_meals=covered_meals, must_item_count=must_item_count, resolved_must_item_count=resolved_must_item_count, details_success_count=sum(item.details.status == "success" and item.state is CandidateState.ELIGIBLE for item in candidates), details_target=(len(eligible) + 2) // 3, initial_city_attraction_search_done=search.initial_city_attraction_search_done, initial_hotel_restaurant_nearby_done=search.initial_hotel_restaurant_nearby_done)
-        return CandidateSetStateSnapshot(confirmed_requirement_digest=state.confirmed_requirement_digest, hotel_selection_ref=state.hotel_selection_ref, effective_interests=state.effective_interests, model_action_refs=tuple(self._runs[state.hotel_selection_ref.operation_id.run_id].action_refs) if state.hotel_selection_ref.operation_id.run_id in self._runs else state.model_action_refs, model_judgment_refs=tuple(self._runs[state.hotel_selection_ref.operation_id.run_id].judgment_refs) if state.hotel_selection_ref.operation_id.run_id in self._runs else state.model_judgment_refs, observation_refs=state.observation_refs, candidates=candidates, requirement_group_states=requirement_groups, search_coverage=search, counts=counts, coverage=coverage, budgets=state.budgets, pending_gaps=() if clear_pending_gaps else state.pending_gaps, iteration_no_progress_streak=state.iteration_no_progress_streak)
+        coverage = ArtifactResearchCoverageSummarySnapshot(
+            effective_interests=state.effective_interests, covered_interests=covered_interests, covered_meals=covered_meals,
+            must_item_count=must_item_count, resolved_must_item_count=resolved_must_item_count,
+            details_success_count=sum(item.details.status == "success" for item in usable),
+            details_target=(len(usable) + 2) // 3,
+            initial_city_attraction_search_done=search.initial_city_attraction_search_done,
+            initial_hotel_restaurant_nearby_done=search.initial_hotel_restaurant_nearby_done,
+        )
+        run = self._runs.get(state.hotel_selection_ref.operation_id.run_id)
+        return QualifiedCandidateSetStateSnapshot(
+            confirmed_requirement_digest=state.confirmed_requirement_digest, hotel_selection_ref=state.hotel_selection_ref,
+            effective_interests=state.effective_interests,
+            model_action_refs=tuple(run.action_refs) if run else state.model_action_refs,
+            model_judgment_refs=tuple(run.judgment_refs) if run else state.model_judgment_refs,
+            observation_refs=state.observation_refs, candidates=candidates,
+            requirement_group_states=requirement_groups, search_coverage=search, counts=counts, coverage=coverage,
+            budgets=state.budgets, pending_gaps=() if clear_pending_gaps else state.pending_gaps,
+            iteration_no_progress_streak=state.iteration_no_progress_streak,
+        )
+
 
     def _refresh_state(self, state: CandidateSetStateSnapshot, *, no_progress: int) -> CandidateSetStateSnapshot:
-        return CandidateSetStateSnapshot(**{**_python_model(state), "iteration_no_progress_streak": no_progress})
+        return QualifiedCandidateSetStateSnapshot(**{**_python_model(state), "iteration_no_progress_streak": no_progress})
 
     def _state_with(self, run: _Run, *, no_progress: int) -> CandidateSetStateSnapshot:
         run.state = self._refresh_state(run.state, no_progress=no_progress)
@@ -2734,7 +3239,7 @@ class CandidateResearchService:
             ref = existing.ref
             if (
                 ref.artifact_type != "candidate_research.candidate_set"
-                or ref.schema_version != "1.0"
+                or ref.schema_version != "4.0"
                 or ref.operation_id != slot.candidate_set_operation_id
                 or ref.operation_id.run_id != run.run_id
             ):
@@ -2757,14 +3262,14 @@ class CandidateResearchService:
             raise ArtifactRepositoryUsageError()
         run.state = await self._state_budget(run)
         base_ref = run.predecessor_ref if run.mode is ResearchMode.SUPPLEMENTAL else None
-        artifact = CandidateResearchArtifact(schema_version="1.0", run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=InProgressCandidateSetRecord(record_type="in_progress", state=run.state))
+        artifact = CandidateResearchArtifact(schema_version="4.0", correction_state=self._correction_snapshot(run), qualification_state=self._qualification_snapshot(run), run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=InProgressCandidateSetRecord(record_type="in_progress", state=run.state))
         ref = await self._put(run, slot.candidate_set_operation_id, "candidate_research.candidate_set", artifact)
         run.last_consistent_ref = ref
         return ref
 
     async def _finish(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, terminal_id: OperationId, *, transition_kind: str) -> CandidateResearchOutcome:
         run.state = await self._state_budget(run)
-        completed = self._is_complete(run.state, request)
+        completed = self._is_complete(run, request)
         if completed:
             record = CompletedCandidateSetRecord(record_type="completed", transition_kind=transition_kind, state=run.state, counts=run.state.counts, coverage=run.state.coverage, budgets=run.state.budgets)
         else:
@@ -2785,6 +3290,9 @@ class CandidateResearchService:
                 legal_action_count=self._legal_action_count(run, request),
                 supply_gaps=supply_entries,
             )
+            if run.semantic_invocations >= 12 or (
+                    run.semantic_invocations == 11 and await self._pending_judgment(run) is None):
+                stop += (CandidateResearchStopReason.SEMANTIC_BUDGET_INSUFFICIENT,)
             if not stop:
                 return await self._failed(
                     run,
@@ -2795,7 +3303,7 @@ class CandidateResearchService:
             record = IncompleteCandidateSetRecord(record_type="incomplete", transition_kind=transition_kind, state=self._state_pending(run.state, gaps), counts=run.state.counts, coverage=run.state.coverage, budgets=run.state.budgets, gaps=gaps, stop_reasons=stop)
             run.state = record.state
         base_ref = run.predecessor_ref if run.mode is ResearchMode.SUPPLEMENTAL else None
-        artifact = CandidateResearchArtifact(schema_version="1.0", run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=record)
+        artifact = CandidateResearchArtifact(schema_version="4.0", correction_state=self._correction_snapshot(run), qualification_state=self._qualification_snapshot(run), run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=record)
         try:
             ref = await self._put(run, terminal_id, "candidate_research.candidate_set", artifact)
         except ArtifactRepositoryError:
@@ -2805,35 +3313,20 @@ class CandidateResearchService:
             read = await self._repository.get(ref, expected_model=CandidateResearchArtifact)
         except ArtifactRepositoryError:
             return self._memory_persistence_failure(run)
-        if read.ref != ref or read.content.schema_version != "1.0" or read.content.run_id != run.run_id or read.content.invocation_request_digest != run.request_digest:
+        if read.ref != ref or read.content.schema_version != "4.0" or read.content.run_id != run.run_id or read.content.invocation_request_digest != run.request_digest:
             return self._memory_persistence_failure(run)
         return self._outcome_from_record(ref, read.content.record)
 
     def _legal_action_count(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest) -> int:
         objectives = self._objectives(run, request)
-        if run.state.counts.admitted_slots >= 128 and (
-            run.state.counts.attraction_count < run.state.counts.attraction_target
-            or run.state.counts.restaurant_count < run.state.counts.restaurant_target
-        ):
-            return 0
-        known_uids = {item.core.uid for item in run.state.candidates}
-        legal = 0
-        for objective in objectives:
-            if objective.kind is ResearchObjectiveKind.DETAILS_MATURITY:
-                if any(item.state is CandidateState.ELIGIBLE and item.details.status == "not_requested" for item in run.state.candidates):
-                    legal += 1
-            elif objective.kind is ResearchObjectiveKind.SUPPLEMENTAL_GAP and objective.anchor is not None and getattr(objective.anchor, "anchor_type", None) == "candidate" and getattr(objective.anchor, "uid", None) not in known_uids:
-                continue
-            else:
-                legal += 1
-        return min(8, legal)
+        return min(8, sum(bool(self._allowed_objective_actions(run, item)) for item in objectives))
 
     async def _failed(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, failure: LLMResearchFailure | MapResearchFailure | ControlResearchFailure, failure_ref: ArtifactRef | None) -> CandidateResearchFailed:
         run.state = await self._state_budget(run)
         snapshot_failure = self._failure_snapshot(failure)
         record = FailedCandidateSetRecord(record_type="failed", state=run.state, failure=snapshot_failure, last_consistent_candidate_set_ref=run.last_consistent_ref, failure_artifact_ref=failure_ref, budgets=run.state.budgets, retryable=self._retryable(failure), possible_duplicate=self._duplicate(failure))
         base_ref = run.predecessor_ref if run.mode is ResearchMode.SUPPLEMENTAL else None
-        artifact = CandidateResearchArtifact(schema_version="1.0", run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=record)
+        artifact = CandidateResearchArtifact(schema_version="4.0", correction_state=self._correction_snapshot(run), qualification_state=self._qualification_snapshot(run), run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=record)
         try:
             ref = await self._put(run, request.operation_plan.terminal_successor_operation_id, "candidate_research.candidate_set", artifact)
         except ArtifactRepositoryError:
@@ -2843,18 +3336,19 @@ class CandidateResearchService:
             read = await self._repository.get(ref, expected_model=CandidateResearchArtifact)
         except ArtifactRepositoryError:
             return self._memory_persistence_failure(run)
-        if read.ref != ref or read.content.schema_version != "1.0" or read.content.run_id != run.run_id or read.content.invocation_request_digest != run.request_digest:
+        if read.ref != ref or read.content.schema_version != "4.0" or read.content.run_id != run.run_id or read.content.invocation_request_digest != run.request_digest:
             return self._memory_persistence_failure(run)
         return self._outcome_from_record(ref, read.content.record)
 
     async def _write_action_artifact(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int, failure: LLMResearchFailure, _: object) -> ArtifactRef:
-        artifact = CandidateResearchModelActionArtifact(schema_version="1.0", run_id=run.run_id, mode=run.mode, invocation_index=max(0, run.semantic_invocations - 1), invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=ACTION_PROMPT_VERSION, prompt_sha256=ACTION_PROMPT_CONTENT_DIGEST, input_digest=run.request_digest, result=ModelActionLLMFailureRecord(record_type="llm_failure", error=ArtifactLLMErrorSnapshot(**_python_model(failure.error))))
+        record = ModelActionLLMFailureRecord(record_type="llm_failure", error=ArtifactLLMErrorSnapshot(**_python_model(failure.error)))
+        artifact = CandidateResearchModelActionArtifact(schema_version="2.0", run_id=run.run_id, mode=run.mode, invocation_index=max(0, run.semantic_invocations - 1), invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=ACTION_PROMPT_VERSION, prompt_sha256=ACTION_PROMPT_CONTENT_DIGEST, input_digest=run.request_digest, result=self._recovered_record(record, run.action_recoveries))
         ref = await self._put(run, slot.action_operation_id, "candidate_research.model_action", artifact)
         self._remember_action_ref(run, ref)
         return ref
 
     async def _write_model_action(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int, record: object) -> ArtifactRef:
-        artifact = CandidateResearchModelActionArtifact(schema_version="1.0", run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=ACTION_PROMPT_VERSION, prompt_sha256=ACTION_PROMPT_CONTENT_DIGEST, input_digest=run.request_digest, result=record)
+        artifact = CandidateResearchModelActionArtifact(schema_version="2.0", run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=ACTION_PROMPT_VERSION, prompt_sha256=ACTION_PROMPT_CONTENT_DIGEST, input_digest=run.request_digest, result=self._recovered_record(record, run.action_recoveries))
         ref = await self._put(run, slot.action_operation_id, "candidate_research.model_action", artifact)
         if run.action_interaction is not None:
             accepted = record.record_type == "accepted"
@@ -2886,9 +3380,9 @@ class CandidateResearchService:
                 record_type="controller_rejected",
                 proposed_patch=proposed,
                 metadata=run.last_judgment_metadata,
-                code="judgment_patch_invalid",
+                code=failure.code.value,
             )
-        artifact = CandidateResearchModelJudgmentArtifact(schema_version="1.0", run_id=run.run_id, mode=run.mode, invocation_index=max(0, run.semantic_invocations - 1), invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=OBSERVATION_PROMPT_VERSION, prompt_sha256=OBSERVATION_PROMPT_CONTENT_DIGEST, evidence_refs=tuple(run.observation_refs), result=record)
+        artifact = CandidateResearchModelJudgmentArtifact(schema_version="3.0", job=run.judgment_job, run_id=run.run_id, mode=run.mode, invocation_index=max(0, run.semantic_invocations - 1), invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=OBSERVATION_PROMPT_VERSION, prompt_sha256=OBSERVATION_PROMPT_CONTENT_DIGEST, evidence_refs=tuple(run.observation_refs), result=self._recovered_record(record, run.judgment_recoveries, judgment=True))
         ref = await self._put(run, slot.judgment_operation_id, "candidate_research.model_judgment", artifact)
         self._remember_judgment_ref(run, ref)
         return ref
@@ -2902,7 +3396,7 @@ class CandidateResearchService:
                 ref.operation_id != operation_id
                 or ref.operation_id.run_id != run.run_id
                 or ref.artifact_type != artifact_type
-                or ref.schema_version != "1.0"
+                or ref.schema_version != artifact.schema_version
             ):
                 raise _OperationReplayIndeterminate()
             expected_models: dict[str, type[BaseModel]] = {
@@ -2923,15 +3417,35 @@ class CandidateResearchService:
             return ref
         if not isinstance(existing, ArtifactAbsent):
             raise ArtifactRepositoryUsageError()
-        return await self._repository.put(request)
+        try:
+            return await self._repository.put(request)
+        except ArtifactRepositoryError as error:
+            # Resolve an ambiguous write using the exact operation and content;
+            # never retry the supplier or the write here.
+            try:
+                observed = await self._repository.lookup(operation_id=operation_id)
+                if isinstance(observed, ArtifactFound):
+                    ref = observed.ref
+                    read = await self._repository.get(ref, expected_model=type(artifact))
+                    if (ref.operation_id == operation_id and ref.artifact_type == artifact_type
+                            and ref.schema_version == artifact.schema_version and read.ref == ref
+                            and ref.content_hash == _digest(request.content)
+                            and _digest(_json_model(read.content)) == ref.content_hash):
+                        return ref
+            except ArtifactRepositoryError:
+                pass
+            run.indeterminate = True
+            raise _OperationReplayIndeterminate() from error
 
     @staticmethod
     def _remember_action_ref(run: _Run, ref: ArtifactRef) -> None:
+        run.active_action_ref = ref
         if ref not in run.action_refs:
             run.action_refs.append(ref)
 
     @staticmethod
     def _remember_judgment_ref(run: _Run, ref: ArtifactRef) -> None:
+        run.active_judgment_ref = ref
         if ref not in run.judgment_refs:
             run.judgment_refs.append(ref)
 
@@ -2948,7 +3462,7 @@ class CandidateResearchService:
         iteration_consumed = iteration.consumed
         place_consumed = places.consumed
         budget = ArtifactResearchBudgetSummarySnapshot(iteration_limit=6, iterations_consumed=iteration_consumed, place_call_limit=48, place_calls_consumed=place_consumed, semantic_invocation_limit=12, semantic_invocations_consumed=run.semantic_invocations, known_provider_attempts=run.provider_attempts, provider_attempts_complete=run.provider_attempts_complete, known_usage=ArtifactKnownLLMUsageSnapshot(prompt_tokens=run.usage.get("prompt_tokens", 0), completion_tokens=run.usage.get("completion_tokens", 0), total_tokens=run.usage.get("total_tokens", 0), reasoning_tokens=run.usage.get("reasoning_tokens", 0), prompt_cache_hit_tokens=run.usage.get("prompt_cache_hit_tokens", 0), prompt_cache_miss_tokens=run.usage.get("prompt_cache_miss_tokens", 0)), usage_complete=run.usage_complete)
-        return CandidateSetStateSnapshot(**{**_python_model(run.state), "budgets": budget, "model_action_refs": tuple(run.action_refs), "model_judgment_refs": tuple(run.judgment_refs), "observation_refs": tuple(run.observation_refs)})
+        return QualifiedCandidateSetStateSnapshot(**{**_python_model(run.state), "budgets": budget, "model_action_refs": tuple(run.action_refs), "model_judgment_refs": tuple(run.judgment_refs), "observation_refs": tuple(run.observation_refs)})
 
     @staticmethod
     def _valid_budget_snapshot(snapshot: object, run_id: UUID, key: object) -> bool:
@@ -2968,27 +3482,22 @@ class CandidateResearchService:
         return CANDIDATE_RESEARCH_PLACE_CALL_BUDGET_KEY
 
     @staticmethod
-    def _is_complete(state: CandidateSetStateSnapshot, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest) -> bool:
-        if not state.coverage.initial_city_attraction_search_done or not state.coverage.initial_hotel_restaurant_nearby_done:
+    def _is_complete(run: _Run | CandidateSetStateSnapshot, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest) -> bool:
+        state = run if isinstance(run, CandidateSetStateSnapshot) else run.state
+        if isinstance(request, CandidateResearchSupplementalRequest) and not all(
+                CandidateResearchService._gap_satisfied(run, gap) for gap in request.gaps):
             return False
-        if state.coverage.covered_interests != state.effective_interests or state.coverage.covered_meals != tuple(MealIntent):
-            return False
-        if state.counts.attraction_count < state.counts.attraction_target or state.counts.restaurant_count < state.counts.restaurant_target:
-            return False
-        if state.coverage.details_success_count < state.coverage.details_target:
-            return False
-        by_ordinal = {item.admission_ordinal: item for item in state.candidates}
-        for group in state.requirement_group_states:
-            overrides = {item.candidate_ordinal: item.verdict for item in group.exceptions}
-            effective = {ordinal: overrides.get(ordinal, group.default_verdict) for ordinal in group.evaluated_candidate_ordinals}
-            if group.requirement_kind == "must_visit":
-                if not any(by_ordinal[ordinal].state is CandidateState.ELIGIBLE and any(match.requirement_group_id == group.group_id and match.verdict is MatchVerdict.CONFIRMED for match in by_ordinal[ordinal].must_matches) for ordinal in group.evaluated_candidate_ordinals):
-                    return False
-            elif any(verdict in {MatchVerdict.AMBIGUOUS, MatchVerdict.UNRESOLVED} for verdict in effective.values()):
-                return False
-            elif set(group.evaluated_candidate_ordinals) != set(by_ordinal) or any(verdict is MatchVerdict.CONFIRMED and by_ordinal[ordinal].state is not CandidateState.EXCLUDED for ordinal, verdict in effective.items()):
-                return False
-        return not state.pending_gaps
+        return _candidate_set_state_complete(state, require_all_avoid=False) and not state.pending_gaps
+
+    @staticmethod
+    def _supply_qualification_needed(state: CandidateSetStateSnapshot) -> bool:
+        return (
+            state.counts.attraction_count < state.counts.attraction_target
+            or state.counts.restaurant_count < state.counts.restaurant_target
+            or state.coverage.covered_interests != state.effective_interests
+            or state.coverage.covered_meals != tuple(MealIntent)
+            or state.coverage.resolved_must_item_count < state.coverage.must_item_count
+        )
 
     def _gaps(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest) -> tuple[object, ...]:
         if isinstance(request, CandidateResearchSupplementalRequest):
@@ -3067,7 +3576,7 @@ class CandidateResearchService:
         missing_details = tuple(
             item.core.uid
             for item in run.state.candidates
-            if item.state is CandidateState.ELIGIBLE and item.details.status != "success"
+            if candidate_admitted_purposes(item) and item.details.status != "success"
         ) if run.state.coverage.details_success_count < run.state.coverage.details_target else ()
         if missing_details:
             result.append(ArtifactCandidateDetailsMissingSummary(
@@ -3077,14 +3586,14 @@ class CandidateResearchService:
         for kind, group_id, item_ids in run.requirement_specs:
             group = next((value for value in run.state.requirement_group_states if value.group_id == group_id), None)
             if kind == "must_visit":
-                resolved = group is not None and any(item.state is CandidateState.ELIGIBLE and any(match.requirement_group_id == group_id and match.verdict is MatchVerdict.CONFIRMED for match in item.must_matches) for item in run.state.candidates)
+                resolved = group is not None and any(candidate_admitted_purposes(item) and any(match.requirement_group_id == group_id and match.verdict is MatchVerdict.CONFIRMED for match in item.must_matches) for item in run.state.candidates)
                 if not resolved:
                     result.append(ArtifactMustVisitResolutionMissingSummary(
                         gap_type="must_visit_resolution_missing", gap_id=f"gap:must:{group_id}",
                         evidence_indexes=self._related_gap_indexes(run, "must_visit_resolution_missing", requirement_group_id=group_id),
                         requirement_group_id=group_id, requirement_item_ids=item_ids,
                     ))
-            elif group is not None:
+            elif group is not None and self._supply_qualification_needed(run.state):
                 unresolved_uids = tuple(item.core.uid for item in run.state.candidates if item.admission_ordinal in group.evaluated_candidate_ordinals and (next((match.verdict for match in item.avoid_matches if match.requirement_group_id == group_id), group.default_verdict) in {MatchVerdict.AMBIGUOUS, MatchVerdict.UNRESOLVED}))
                 if unresolved_uids:
                     result.append(ArtifactAvoidResolutionMissingSummary(
@@ -3135,6 +3644,11 @@ class CandidateResearchService:
         common = {"gap_type": gap_type, "gap_id": getattr(gap, "gap_id"), "evidence_indexes": evidence_indexes}
         if gap_type == "candidate_count_shortfall":
             return ArtifactCandidateCountShortfallSummary(**common, role=getattr(gap, "role"), current_count=getattr(gap, "current_count"), target_count=getattr(gap, "target_count"))
+        if gap_type == "meal_count_shortfall":
+            return ArtifactMealCountShortfallSummary(**common, meal_intent=gap.meal_intent,
+                current_count=gap.current_count, target_count=gap.target_count,
+                anchor=CandidateResearchService._anchor_snapshot(gap.anchor), radius_km=gap.radius_km,
+                source_candidate_set_ref=gap.evidence_refs[0])
         if gap_type == "interest_coverage_missing":
             return ArtifactInterestCoverageMissingSummary(**common, interest=getattr(gap, "interest"))
         if gap_type == "area_coverage_missing":
@@ -3158,33 +3672,34 @@ class CandidateResearchService:
         return ArtifactResearchAnchorSnapshot(anchor_type="candidate", uid=getattr(anchor, "uid"))
 
     @staticmethod
-    def _gap_satisfied(run: _Run, gap: object) -> bool:
-        state = run.state
+    def _gap_satisfied(run: _Run | CandidateSetStateSnapshot, gap: object) -> bool:
+        state = run if isinstance(run, CandidateSetStateSnapshot) else run.state
         gap_type = getattr(gap, "gap_type")
+        if gap_type == "meal_count_shortfall":
+            return sum(gap.meal_intent.value in candidate_admitted_purposes(item) for item in state.candidates) >= gap.target_count
         if gap_type == "candidate_count_shortfall":
-            count = state.counts.attraction_count if getattr(gap, "role") is ResearchRole.ATTRACTION else state.counts.restaurant_count
+            purpose = "attraction" if getattr(gap, "role") is ResearchRole.ATTRACTION else "restaurant"
+            count = sum("attraction" in candidate_admitted_purposes(item) if purpose == "attraction" else
+                any(meal in candidate_admitted_purposes(item) for meal in ("lunch", "dinner")) for item in state.candidates)
             return count >= getattr(gap, "target_count")
         if gap_type == "interest_coverage_missing":
             interest = getattr(gap, "interest")
             return interest in state.coverage.covered_interests or (
                 any(record.interest is interest for record in state.search_coverage.records)
-                and any(item.state is CandidateState.ELIGIBLE and interest in item.interests for item in state.candidates)
+                and any("attraction" in candidate_admitted_purposes(item) and interest in item.interests for item in state.candidates)
             )
         if gap_type == "area_coverage_missing":
             role = getattr(gap, "role")
             return any(record.role is role for record in state.search_coverage.records)
         if gap_type == "meal_coverage_missing":
             meal = getattr(gap, "meal_intent")
-            return meal in state.coverage.covered_meals or (
-                any(record.meal_intent is meal for record in state.search_coverage.records)
-                and any(item.state is CandidateState.ELIGIBLE and meal in item.meal_intents for item in state.candidates)
-            )
+            return any(meal.value in candidate_admitted_purposes(item) for item in state.candidates)
         if gap_type == "candidate_details_missing":
             by_uid = {item.core.uid: item for item in state.candidates}
             return all(by_uid.get(uid) is not None and by_uid[uid].details.status == "success" for uid in getattr(gap, "candidate_uids"))
         if gap_type == "must_visit_resolution_missing":
             group = next((item for item in state.requirement_group_states if item.group_id == getattr(gap, "requirement_group_id")), None)
-            return group is not None and any(item.state is CandidateState.ELIGIBLE and any(match.requirement_group_id == group.group_id and match.verdict is MatchVerdict.CONFIRMED for match in item.must_matches) for item in state.candidates)
+            return group is not None and any(candidate_admitted_purposes(item) and any(match.requirement_group_id == group.group_id and match.verdict is MatchVerdict.CONFIRMED for match in item.must_matches) for item in state.candidates)
         if gap_type == "avoid_resolution_missing":
             group_id = getattr(gap, "requirement_group_id")
             group = next((item for item in state.requirement_group_states if item.group_id == group_id and item.requirement_kind == "avoid"), None)
@@ -3200,7 +3715,7 @@ class CandidateResearchService:
             if not target_ordinals.issubset(evaluated_ordinals):
                 return False
             for item in state.candidates:
-                if item.admission_ordinal not in evaluated_ordinals:
+                if item.admission_ordinal not in target_ordinals:
                     continue
                 match = next((value for value in item.avoid_matches if value.requirement_group_id == group_id), None)
                 if match is None or match.verdict in {MatchVerdict.AMBIGUOUS, MatchVerdict.UNRESOLVED}:
@@ -3216,17 +3731,21 @@ class CandidateResearchService:
                     return False
             return True
         if gap_type == "replacement_candidate_needed":
+            if isinstance(run, CandidateSetStateSnapshot):
+                return False  # Replacement requires the actual supplemental baseline.
             return any(
                 item.core.uid != getattr(gap, "rejected_uid")
-                and item.state is CandidateState.ELIGIBLE
                 and item.core.uid not in run.supplemental_baseline_uids
+                and ("attraction" in candidate_admitted_purposes(item)
+                     if getattr(gap, "role") is ResearchRole.ATTRACTION else
+                     any(meal in candidate_admitted_purposes(item) for meal in ("lunch", "dinner")))
                 for item in state.candidates
             )
         return False
 
     @staticmethod
     def _state_pending(state: CandidateSetStateSnapshot, gaps: Sequence[object]) -> CandidateSetStateSnapshot:
-        return CandidateSetStateSnapshot(**{**_python_model(state), "pending_gaps": tuple(gaps)})
+        return QualifiedCandidateSetStateSnapshot(**{**_python_model(state), "pending_gaps": tuple(gaps)})
 
     @staticmethod
     def _supply_entry(run: _Run, role: ResearchRole) -> tuple[bool, bool] | None:
@@ -3264,8 +3783,49 @@ class CandidateResearchService:
         failure = ControlResearchFailure(code=CandidateResearchControlFailureCode.PERSISTENCE_ERROR)
         return CandidateResearchFailed(failure=failure, last_consistent_candidate_set_ref=run.last_consistent_ref, failure_artifact_ref=None, budgets=self._public_budget(run.state.budgets), retryable=False, possible_duplicate=True)
 
+    async def _active_failed(self, request, code) -> CandidateResearchFailed:
+        """Preserve known consumption when failure happens after a run was started."""
+        run = self._runs.get(request.operation_plan.run_id)
+        if run is None:
+            return self._zero_failed(code)
+        if code is CandidateResearchControlFailureCode.REPLAY_MISMATCH:
+            return await self._read_failure(request, code)
+        try:
+            return await self._failed(run, request, ControlResearchFailure(code=code), None)
+        except _OperationReplayIndeterminate:
+            return await self._indeterminate(run.run_id)
+        except (ArtifactRepositoryError, ExecutionBudgetError,
+                RuntimeError, ValueError, TypeError, AttributeError):
+            # A failed terminal write cannot authorize replaying external work.
+            return await self._read_failure(request, code)
+
+    async def _read_failure(self, request, code) -> CandidateResearchFailed:
+        if request.operation_plan.run_id not in self._runs:
+            return self._zero_failed(code)
+        # Read failures cannot authorize a new terminal write or provider call.
+        known = await self._indeterminate(request.operation_plan.run_id)
+        failure = ControlResearchFailure(code=code)
+        return CandidateResearchFailed(failure=failure,
+            last_consistent_candidate_set_ref=known.last_consistent_candidate_set_ref,
+            failure_artifact_ref=None, budgets=known.budgets,
+            retryable=False, possible_duplicate=self._duplicate(failure))
+
     async def _indeterminate(self, run_id: UUID) -> CandidateResearchFailed:
         run = self._runs.get(run_id)
+        if run is not None:
+            run.indeterminate = True
+            try:
+                run.state = await self._state_budget(run)
+            except (ExecutionBudgetError, RuntimeError, ValueError, TypeError):
+                run.provider_attempts_complete = False
+                run.usage_complete = False
+                budget = _python_model(run.state.budgets)
+                known = {name: run.usage.get(name, 0) for name in ArtifactKnownLLMUsageSnapshot.model_fields}
+                budget.update(semantic_invocations_consumed=run.semantic_invocations,
+                    known_provider_attempts=run.provider_attempts, provider_attempts_complete=False,
+                    known_usage=ArtifactKnownLLMUsageSnapshot(**known), usage_complete=False)
+                run.state = QualifiedCandidateSetStateSnapshot(**{**_python_model(run.state),
+                    "budgets": ArtifactResearchBudgetSummarySnapshot(**budget)})
         budgets = self._public_budget(run.state.budgets) if run is not None else ResearchBudgetSummary(iteration_limit=6, iterations_consumed=0, place_call_limit=48, place_calls_consumed=0, semantic_invocation_limit=12, semantic_invocations_consumed=0, known_provider_attempts=0, provider_attempts_complete=True, known_usage=KnownLLMUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0, reasoning_tokens=0, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0), usage_complete=True)
         return CandidateResearchFailed(failure=ControlResearchFailure(code=CandidateResearchControlFailureCode.OPERATION_RESULT_INDETERMINATE), last_consistent_candidate_set_ref=run.last_consistent_ref if run else None, failure_artifact_ref=None, budgets=budgets, retryable=False, possible_duplicate=True)
 

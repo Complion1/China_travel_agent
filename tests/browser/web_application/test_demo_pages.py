@@ -298,7 +298,14 @@ def test_truncated_post_response_keeps_original_id_and_queries_one_real_run(page
 
 @pytest.mark.parametrize("terminal_code,expected", [
     ("planning_incomplete", "规划失败，未生成完整攻略"),
-    ("workflow_provider_failed", "规划失败，模型调用或输出校验未通过"),
+    ("workflow_provider_failed", "规划失败，模型服务调用未成功"),
+    ("workflow_model_output_invalid", "规划失败，模型输出未通过格式或完整性校验"),
+    ("research_no_candidates", "研究失败，地图查询未找到候选地点"),
+    ("research_judgments_unfinished", "研究失败，必要候选资格判断尚未完成"),
+    ("research_evidence_insufficient", "研究失败，现有证据不足以确认候选用途"),
+    ("research_candidates_unsuitable", "研究失败，已核验候选不符合用途或避开要求"),
+    ("research_recovery_exhausted", "研究失败，经允许的修正仍未补齐必要判断"),
+    ("research_budget_exhausted", "研究失败，研究或模型调用额度已用尽"),
 ])
 def test_registered_failed_terminal_projection_is_clear_without_partial_result(page,origin,terminal_code,expected):
     # A UI projection fixture, not a claim of running a failed business graph.

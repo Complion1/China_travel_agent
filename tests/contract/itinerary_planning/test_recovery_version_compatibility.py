@@ -67,6 +67,21 @@ def test_new_root_cannot_silently_wrap_old_state_or_action_directory():
             PlanningBudgetSummary.model_validate(missing, strict=True)
 
 
+def test_legacy_directory_cannot_claim_new_candidate_proof_and_v4_state_is_required():
+    from app.itinerary_planning.artifacts import ArtifactRefDirectories, _PlanningStateSnapshotV4
+    from tests.contract.itinerary_planning.test_artifact_registration import _directories, _state
+    old = _directories().model_dump(mode="python")
+    old["candidate_set_refs"] = tuple({**ref,"schema_version":"2.0"} for ref in old["candidate_set_refs"])
+    with pytest.raises(ValueError): ArtifactRefDirectories.model_validate(old,strict=True)
+    state = _state().model_dump(mode="python")
+    state.update(schema_version="4.0",format_repair_used=0,budgets=new_budget(schema_version="4.0").model_dump(mode="python"))
+    with pytest.raises(ValueError): _PlanningStateSnapshotV4.model_validate(state,strict=True)
+    state.update(correction_targets=(),correction_plan_fingerprints=(),correction_evidence_fingerprint=None,
+        correction_fact_fingerprints=(),correction_no_progress=0,last_proposal_fingerprint=None)
+    closed = _PlanningStateSnapshotV4.model_validate(state,strict=True)
+    assert closed.schema_version == "4.0"
+
+
 @pytest.mark.asyncio
 async def test_new_writer_refuses_legacy_content_before_repository_io():
     from tests.unit.itinerary_planning.test_service_initial import _fixture

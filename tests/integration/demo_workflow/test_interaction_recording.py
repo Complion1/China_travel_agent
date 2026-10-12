@@ -187,7 +187,7 @@ def multiday_boundaries(boundaries, patch, turn):
         EvidenceHandle, MealJudgmentUpdate, MealIntent, MatchVerdict, MealReasonCode, JudgmentPatch)
     from tests.support.candidate_research_fakes import structured
     from tests.unit.candidate_research.test_service_initial import _multi_place_search, _matching_details
-    from app.itinerary_planning.models import (PlanDirectionsArgs, DirectionLegIntent, TransportSemantic,
+    from app.itinerary_planning.models import (PlanDirectionsArgs, DirectionLegIntent, TransportSemantic, PurposeVisitIntent,
         ProposedScheduledVisit, VisitKind, BusinessHoursState, ProposedDayPlan, PlanningDayKind, TimeInterval)
     from app.baidu_map import TravelMode
     payload = patch.model_dump(mode='json')
@@ -197,18 +197,33 @@ def multiday_boundaries(boundaries, patch, turn):
     patch = StrictRequirementPatchDTO.model_validate_json(json.dumps(payload), strict=True)
     turn = turn.model_copy(update={'user_message': '\n'.join(spans.values())})
     research = boundaries.research_model
-    old_patch = research.responses[1].value
+    old_patch = research.base_patch
     roles = tuple(RoleJudgmentUpdate(candidate_handle=f'c:{i}', role=ResearchRole.ATTRACTION if i<18 else ResearchRole.RESTAURANT,
         verdict=RoleVerdict.SUPPORTED, reason_code=RoleReasonCode.PROVIDER_CATEGORY_SUPPORTS,
         evidence_handles=(EvidenceHandle(handle_id='e:0' if i<18 else 'e:1'),)) for i in range(30))
     meals = tuple(MealJudgmentUpdate(candidate_handle=f'c:{18+i}', meal_intent=MealIntent.LUNCH if i%2==0 else MealIntent.DINNER,
         verdict=MatchVerdict.CONFIRMED, reason_code=MealReasonCode.TARGETED_MEAL_SEARCH,
-        evidence_handles=(EvidenceHandle(handle_id='e:1'),)) for i in range(12))
-    research.responses[1] = structured(old_patch.model_copy(update={'role_updates':roles,'meal_updates':meals}))
-    research.responses[4:] = [research.responses[2], structured(JudgmentPatch(role_updates=(),interest_updates=(),meal_updates=(),requirement_group_updates=()))]
+        evidence_handles=(EvidenceHandle(handle_id='e:2' if i%2==0 else 'e:3'),)) for i in range(12))
+    patch_for_candidates = old_patch.model_copy(update={'role_updates':roles,'meal_updates':meals})
+    initial_actions, detail_actions = research.responses[0], research.responses[2]
+    def research_output(count):
+        from tests.unit.candidate_research.test_qualification import legal_judgment
+        payload = json.loads(research.prompts[-1].user_text)
+        if 'required_judgments' not in payload:
+            return (detail_actions if payload['objectives'][0]['kind'] == 'details_maturity' else initial_actions)(count)
+        selected = {item['handle'] for item in payload['candidates']}
+        patch = patch_for_candidates.model_copy(update={field: tuple(item for item in getattr(patch_for_candidates,field)
+            if item.candidate_handle in selected) for field in ('role_updates','interest_updates','meal_updates')})
+        return legal_judgment(research,patch)
+    research.responses = [research_output] * 12
     maps = boundaries.research_map
     maps.responses[:2] = [_multi_place_search(tuple(f'a{i}' for i in range(18)), category='museum'),
         _multi_place_search(tuple(f'r{i}' for i in range(12)), category='restaurant')]
+    # The confirmed meal uses are backed by actual targeted search observations,
+    # never by the ordinary nearby restaurant search at e:1.
+    maps.responses[2:4] = [
+        _multi_place_search(tuple(f'r{i}' for i in range(0,12,2)), category='restaurant'),
+        _multi_place_search(tuple(f'r{i}' for i in range(1,12,2)), category='restaurant')]
     maps.responses[8:] = [_matching_details(f'a{i}',category='museum') for i in range(18)]
     model = boundaries.planning_model
     model.known_hours = False
@@ -235,7 +250,12 @@ def multiday_boundaries(boundaries, patch, turn):
             model.endpoints = tuple(pairs)
             return model.batch(('plan_directions', PlanDirectionsArgs(legs=tuple(DirectionLegIntent(leg_id=f'leg{i}',
                 origin_handle=a,destination_handle=b,transport_semantic=TransportSemantic.PUBLIC_TRANSIT,route_mode=TravelMode.TRANSIT,
-                alternatives_limit=1) for i,(a,b) in enumerate(pairs)))))
+                alternatives_limit=1) for i,(a,b) in enumerate(pairs)),
+                visit_intents=tuple(PurposeVisitIntent(date=date(2026,9,3+day),candidate_handle=handle,
+                    visit_kind=kind,is_backup=False) for day in range(3) for handle,kind in (
+                        (f'candidate-handle-{day:04d}',VisitKind.ATTRACTION),
+                        (f'candidate-handle-{18+day*2:04d}',VisitKind.LUNCH),
+                        (f'candidate-handle-{19+day*2:04d}',VisitKind.DINNER))))))
         return await original_continue(results, **kwargs)
     model.acontinue_tools = continuation
     original_proposal = model.proposal

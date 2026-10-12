@@ -107,7 +107,7 @@ async def test_public_close_waits_for_active_run_and_is_idempotent() -> None:
     run_id = UUID(int=5)
     request, hotel_ref, hotel_artifact, _ = _request(run_id)
     operation = FakeModelOperation()
-    operation.responses.extend((lambda _count: structured(_action_batch_from_prompt(operation, 1)), structured(JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())), structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
+    operation.responses.extend((lambda _count: structured(_action_batch_from_prompt(operation, 1)), structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
     operation.block = True
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel_artifact)

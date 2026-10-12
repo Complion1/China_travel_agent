@@ -88,29 +88,26 @@ def _seed_supplemented_candidate(
     state = candidate.record.state
     first = state.candidates[0]
     second = first.model_copy(update={
-        "admission_ordinal": 1,
+        "admission_ordinal": len(state.candidates),
         "core": first.core.model_copy(update={
-            "uid": "candidate-2",
+            "uid": "candidate-added",
             "name": "补充景点",
             "address": "杭州补充路",
             "coordinate": first.core.coordinate.model_copy(update={"latitude": 30.26, "longitude": 120.17}),
         }),
     })
     counts = state.counts.model_copy(update={
-        "attraction_count": 2,
-        "restaurant_count": 2,
-        "unique_eligible_count": 2,
-        "admitted_slots": 2,
+        "attraction_count": len(state.candidates) + 1,
+        "restaurant_count": len(state.candidates) + 1,
+        "unique_eligible_count": len(state.candidates) + 1,
+        "admitted_slots": len(state.candidates) + 1,
     })
-    supplemented_state = state.model_copy(update={"candidates": (first, second), "counts": counts})
+    supplemented_state = state.model_copy(update={"candidates": (*state.candidates, second), "counts": counts})
     supplemented_record = candidate.record.model_copy(update={"state": supplemented_state, "counts": counts})
-    gap = awaiting.gaps[0]
-    original = CandidateResearchSupplementalRequest(
-        predecessor_candidate_set_ref=predecessor_ref,
-        gaps=tuple(CandidateCountShortfallGap(gap_id=item.gap_id, evidence_refs=item.evidence_refs,
-            role=item.target.role, current_count=item.target.current_count, target_count=item.target.target_count) for item in awaiting.gaps),
-        operation_plan=_supplemental_plan(run_id),
-    )
+    from app.itinerary_planning.service import _supplement_request
+    from app.itinerary_planning import ItineraryPlanningArtifact
+    predecessor = ItineraryPlanningArtifact.model_validate_json(json.dumps(repository.contents[awaiting.planning_ref.artifact_id]))
+    original = _supplement_request(predecessor, _supplemental_plan(run_id))
     original_bytes = json.dumps(original.model_dump(mode="json", exclude_none=False, by_alias=False, exclude_computed_fields=True), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     candidate = candidate.model_copy(update={
         "mode": ResearchMode.SUPPLEMENTAL,
@@ -121,7 +118,7 @@ def _seed_supplemented_candidate(
     base = ArtifactRef(
         artifact_id=uuid4(),
         artifact_type="candidate_research.candidate_set",
-        schema_version="1.0",
+        schema_version=candidate.schema_version,
         content_hash="sha256:" + "0" * 64,
         operation_id=OperationId(
             run_id=run_id,
@@ -259,7 +256,8 @@ async def test_real_runtime_resume_selects_new_candidate_from_visible_context() 
                 )
                 return self.response(tuple((call.call_id, call.tool_name, call.arguments.model_dump(mode="json")) for call in hubs().calls))
             if self.call_count == 2:
-                return self.response((("new_matrix", "calculate_route_matrix", {"date": self.sightseeing_start_date, "mode": "walking", "location_handles": [self.hotel, self.new_handle]}),))
+                return self.response((("new_matrix", "calculate_route_matrix", {"date": self.sightseeing_start_date, "mode": "walking", "location_handles": [self.hotel, self.new_handle],
+                    "visit_intents": [{"date":self.sightseeing_start_date,"candidate_handle":self.new_handle,"visit_kind":"attraction","is_backup":False}]}),))
             assert latest["tool_call_id"] == "new_matrix"
             return self.response(())
 
@@ -350,7 +348,7 @@ async def test_resume_rejects_successor_with_invalid_must_item_coverage_before_m
         run.invocation_count,
     ) == before
     assert len(repository.put_requests) == writes
-    assert runtime.start_count == operation.call_count == 1
+    assert runtime.start_count == 1 and operation.call_count == 0
     assert not service._map_adapter.matrix_calls and not service._map_adapter.directions_calls
 
 

@@ -133,6 +133,72 @@ async def test_research_technical_failure_stops_before_planning(durable_executio
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scenario,code", [
+    ("empty", "research_no_candidates"),
+    ("unknown", "research_evidence_insufficient"),
+    ("unsuitable", "research_candidates_unsuitable"),
+    ("budget", "research_budget_exhausted"),
+    ("missing", "research_recovery_exhausted"),
+])
+async def test_real_research_controller_root_terminal_and_consumption(durable_execution_settings, scenario, code):
+    """真实控制器、主图与PostgreSQL运行，仅替换模型和地图边界。"""
+    import json
+    from app.candidate_research import (CandidateResearchArtifact, JudgmentPatch, ProposedActionBatch,
+        RoleJudgmentUpdate, ResearchRole, RoleVerdict, RoleReasonCode, EvidenceHandle)
+    from app.demo_workflow.plans import research_plan
+    from tests.support.demo_workflow_fakes import full_runtime, start_to_pause, select_hotel
+    from tests.support.candidate_research_fakes import structured, search_no_result
+    from tests.unit.candidate_research.test_service_initial import _first_objective_action, _multi_place_search
+    from tests.unit.candidate_research.test_qualification import legal_judgment
+
+    async with full_runtime(durable_execution_settings) as context:
+        model, maps = context.providers.research_model, context.providers.research_map
+        def output(count):
+            payload = json.loads(model.prompts[-1].user_text)
+            if "required_judgments" not in payload:
+                return structured(ProposedActionBatch(actions=(
+                    _first_objective_action(model, query=f"qualification-{scenario}-{count}"),)))
+            if scenario in {"empty", "missing"}:
+                return structured(JudgmentPatch(role_updates=(), interest_updates=(),
+                    meal_updates=(), requirement_group_updates=()))
+            patch = None
+            if scenario == "unsuitable":
+                patch = JudgmentPatch(role_updates=tuple(RoleJudgmentUpdate(
+                    candidate_handle=item["handle"], role=ResearchRole(key["target"]),
+                    verdict=RoleVerdict.CONTRADICTED, reason_code=RoleReasonCode.PROVIDER_CATEGORY_CONTRADICTS,
+                    evidence_handles=(EvidenceHandle(handle_id=item["evidence_handles"][0]),))
+                    for item in payload["candidates"] for key in payload["required_judgments"]
+                    if key["kind"] == "role" and key["candidate_handle"] == item["handle"]),
+                    interest_updates=(), meal_updates=(), requirement_group_updates=())
+            return legal_judgment(model, patch)
+        model.responses = [output] * 12
+        maps.responses = [search_no_result() if scenario == "empty" else
+            _multi_place_search((f"candidate-{index}" if scenario == "budget" else "candidate-0",),
+                category="museum") for index in range(48)]
+        paused = await start_to_pause(context, hotel=True)
+        result = await select_hotel(context, paused)
+        assert type(result) is DurableExecutionTerminal
+        assert result.state.terminal_code == code
+        assert result.state.delivery_status is DeliveryStatus.FAILED
+        assert context.providers.planning_model.call_count == 0
+        assert not (context.providers.planning_map.geocode_calls or context.providers.planning_map.directions_calls
+                    or context.providers.planning_map.matrix_calls)
+        assert not any(ref.artifact_type.startswith("result_formatting.") for ref in result.state.artifact_refs)
+        plan = research_plan(result.state.run_id)
+        found = await context.artifacts.repository.lookup(operation_id=plan.terminal_successor_operation_id)
+        artifact = (await context.artifacts.repository.get(found.ref, expected_model=CandidateResearchArtifact)).content
+        assert artifact.record.budgets.semantic_invocations_consumed == model.call_count
+        assert artifact.record.budgets.place_calls_consumed == maps.call_count
+        assert model.call_count <= 12 and maps.call_count <= 48
+        if scenario == "missing":
+            assert (model.call_count, maps.call_count) == (4, 1)
+        budgets = await context.runtime.get_terminal_budget_snapshots(run_id=result.state.run_id)
+        consumed = {item.key.name: item.consumed for item in budgets}
+        assert consumed["research.iteration"] == artifact.record.budgets.iterations_consumed
+        assert consumed["research.place_call"] == maps.call_count
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("known_hours,map_requested,supplement", [(True,False,False),(False,False,False),(True,True,False),(True,False,True)])
 async def test_production_graph_real_services_and_postgres(durable_execution_settings,known_hours,map_requested,supplement):
     from uuid import uuid4

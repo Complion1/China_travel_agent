@@ -22,12 +22,13 @@ def test_frozen_prompt_resources_load_and_hash():
     assert "do not return outcome_type at the top level" in action
     assert "include interest and meal_intent and copy them exactly" in action
     assert "Query wording never substitutes for these fields" in action
-    assert "candidate's evidence_handles" in observation
-    assert "shared by those defaulted candidates" in observation
-    assert "When requirements is empty, requirement_group_updates must be empty" in observation
+    assert "evidence_handles of that exact candidate" in observation
+    assert "belong to every defaulted candidate" in observation
+    assert "required_judgments" in observation
     assert "accepted_search is controller-validated" in observation
-    assert "current_evidence_handles identifies" in observation
-    assert "do not repeat unchanged judgments" in observation
+    assert "Do not assume a key was assessed merely" in observation
+    assert "default unresolved" in observation
+    assert "Omitted non-required keys retain earlier conclusions" in observation
 
 
 @pytest.mark.parametrize("resource_name,expected", [

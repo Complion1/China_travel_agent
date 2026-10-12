@@ -49,6 +49,15 @@ def content_digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def candidate_core_equal(left, right) -> bool:
+    """搜索和详情坐标按供应商六位精度比较，其余身份字段保持精确。"""
+    return (all(getattr(left, key) == getattr(right, key)
+                for key in ("uid", "name", "address", "provider_category"))
+            and left.coordinate.coordinate_system == right.coordinate.coordinate_system
+            and format(left.coordinate.latitude, ".6f") == format(right.coordinate.latitude, ".6f")
+            and format(left.coordinate.longitude, ".6f") == format(right.coordinate.longitude, ".6f"))
+
+
 def _short_id(prefix: str, tree: object, *, directory: MutableMapping[str, str] | None = None) -> str:
     """Return a digest16 id while optionally guarding its full digest directory."""
     full_digest = "sha256:" + hashlib.sha256(canonical_json_bytes(tree)).hexdigest()

@@ -37,6 +37,8 @@ from app.candidate_research.artifacts import (
     ArtifactCandidateDetailsMissingSummary,
     ArtifactCandidateDetailsStateSnapshot,
     ArtifactCandidateRecordSnapshot,
+    ArtifactCandidateRecordV2Snapshot,
+    ArtifactMealAssessmentSnapshot,
     ArtifactCoordinateSnapshot,
     ArtifactKnownLLMUsageSnapshot,
     ArtifactResearchBudgetSummarySnapshot,
@@ -45,8 +47,8 @@ from app.candidate_research.artifacts import (
     ArtifactRequirementMatchSnapshot,
     ArtifactRequirementGroupState,
     ArtifactRoleAssessmentSnapshot,
-    CandidateSetStateSnapshot,
-    IncompleteCandidateSetRecord,
+    QualifiedCandidateSetStateSnapshot as CandidateSetStateSnapshot,
+    QualifiedIncompleteCandidateSetRecord as IncompleteCandidateSetRecord,
     SearchCoverageState,
 )
 from app.candidate_research import CandidateResearchStopReason
@@ -222,9 +224,14 @@ def _upstream(run_id: UUID) -> tuple[ArtifactRef, ArtifactRef, HotelSelectionArt
         prompt_tokens=0, completion_tokens=0, total_tokens=0, reasoning_tokens=0,
         prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0,
     )
+    candidate = ArtifactCandidateRecordV2Snapshot(**{**candidate.model_dump(mode="python"), "schema_version": "2.0",
+        "meal_assessments": tuple(ArtifactMealAssessmentSnapshot(meal_intent=meal, verdict=MatchVerdict.CONFIRMED,
+            reason_code="targeted_meal_search", evidence_indexes=(0,)) for meal in MealIntent)})
+    second = ArtifactCandidateRecordV2Snapshot(**{**candidate.model_dump(mode="python"), "admission_ordinal": 1,
+        "core": candidate.core.model_copy(update={"uid": "candidate-2", "name": "合成第二候选"})})
     counts = ArtifactResearchCountSummarySnapshot(
-        attraction_count=1, attraction_target=2, restaurant_count=1, restaurant_target=1,
-        unique_eligible_count=1, admitted_slots=1, candidate_capacity=128,
+        attraction_count=2, attraction_target=2, restaurant_count=2, restaurant_target=1,
+        unique_eligible_count=2, admitted_slots=2, candidate_capacity=128,
     )
     coverage = ArtifactResearchCoverageSummarySnapshot(
         effective_interests=(InterestTag.CULTURE, InterestTag.NATURE), covered_interests=(), covered_meals=(),
@@ -243,13 +250,15 @@ def _upstream(run_id: UUID) -> tuple[ArtifactRef, ArtifactRef, HotelSelectionArt
     state = CandidateSetStateSnapshot(
         confirmed_requirement_digest=_confirmed().confirmation_summary_digest,
         hotel_selection_ref=hotel_ref, effective_interests=(InterestTag.CULTURE, InterestTag.NATURE),
-        model_action_refs=(), model_judgment_refs=(), observation_refs=(evidence_ref,), candidates=(candidate,),
+        model_action_refs=(), model_judgment_refs=(), observation_refs=(evidence_ref,), candidates=(candidate, second),
         requirement_group_states=(), search_coverage=SearchCoverageState(
             records=(), initial_city_attraction_search_done=False, initial_hotel_restaurant_nearby_done=False,
         ), counts=counts, coverage=coverage, budgets=budgets, pending_gaps=(gap,), iteration_no_progress_streak=0,
     )
     candidate_artifact = CandidateResearchArtifact(
-        schema_version="1.0", run_id=run_id, mode=ResearchMode.INITIAL, predecessor_ref=None,
+        correction_state=(),
+        qualification_state={"assessments": (), "steps": ()},
+        schema_version="4.0", run_id=run_id, mode=ResearchMode.INITIAL, predecessor_ref=None,
         invocation_request_digest="sha256:" + "f" * 64,
         record=IncompleteCandidateSetRecord(
             record_type="incomplete", transition_kind="normal", state=state,
@@ -259,7 +268,7 @@ def _upstream(run_id: UUID) -> tuple[ArtifactRef, ArtifactRef, HotelSelectionArt
     candidate_ref = _ref(run_id, "candidate_research.candidate_set", WorkflowPhase.CANDIDATE_RESEARCH, "candidate-set", "f")
     _, candidate_encoded = FakeRepository._encoded(candidate_artifact)
     candidate_ref = ArtifactRef(
-        artifact_id=candidate_ref.artifact_id, artifact_type=candidate_ref.artifact_type, schema_version=candidate_ref.schema_version,
+        artifact_id=candidate_ref.artifact_id, artifact_type=candidate_ref.artifact_type, schema_version="4.0",
         content_hash="sha256:" + hashlib.sha256(candidate_encoded).hexdigest(), operation_id=candidate_ref.operation_id,
         created_at=candidate_ref.created_at, size_bytes=len(candidate_encoded),
     )
@@ -292,13 +301,37 @@ def _metadata() -> InvocationMetadata:
     )
 
 
-def _fixture(*responses: object):
+def _feedback_core(content):
+    feedback = json.loads(content)["tool_result"]
+    if feedback.get("status") == "rejected":
+        assert feedback["issues"] and 0 <= feedback["correction_no_progress"] <= 2
+        assert "patch_draft" in feedback["allowed_actions"]
+    return {key:value for key,value in feedback.items() if key not in {"issues","correction_no_progress","allowed_actions"}}
+
+
+def _fixture(*responses: object, declare_query_intents: bool = True):
     run_id = uuid4()
     hotel_ref, candidate_ref, hotel, candidate = _upstream(run_id)
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel)
     repository.seed(candidate_ref, candidate)
     responses = list(responses)
+    if declare_query_intents:
+        from tests.support.itinerary_planning_fakes import query_intents
+        for index, response in enumerate(responses):
+            if not isinstance(response, ToolCallsReady):
+                continue
+            calls = []
+            for call in response.calls:
+                args = call.arguments
+                if call.tool_name in {"calculate_route_matrix", "plan_directions"} and not args.visit_intents:
+                    handles = args.location_handles if call.tool_name == "calculate_route_matrix" else tuple(
+                        handle for leg in args.legs for handle in (leg.origin_handle, leg.destination_handle))
+                    day = args.date if call.tool_name == "calculate_route_matrix" else date(2026, 9, 3)
+                    args = args.model_copy(update={"visit_intents": query_intents(day, handles)})
+                    call = call.model_copy(update={"arguments": args})
+                calls.append(call)
+            responses[index] = response.model_copy(update={"calls": tuple(calls)})
     if responses and isinstance(responses[0], ToolCallsReady) and any(call.tool_name in {"calculate_route_matrix", "plan_directions", "submit_itinerary"} for call in responses[0].calls):
         from app.itinerary_planning.models import GeocodeHubArgs
         responses.insert(0, ToolCallsReady(calls=tuple(ValidatedToolCall(call_id=f"prepare-{endpoint}", tool_name="geocode_hub",
@@ -592,9 +625,11 @@ async def test_initial_accepts_distinct_item_ids_for_identical_must_texts() -> N
 
     result = await service.plan_initial(request)
 
-    assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
+    from app.itinerary_planning import ItineraryPlanningCandidateSupplementRequested
+    assert isinstance(result, ItineraryPlanningCandidateSupplementRequested), result.model_dump(mode="json")
     assert runtime.start_count == 1
-    assert operation.call_count == 1
+    assert operation.call_count == 0
+    assert result.gaps[0].target.requirement_item_ids == expected[0].requirement_item_ids
 
 
 @pytest.mark.asyncio
@@ -916,10 +951,12 @@ async def test_public_initial_accepts_cross_midnight_hotel_closure_and_marks_nex
         ValidatedToolCall(call_id="cross_matrix_day1", tool_name=PlanningTool.CALCULATE_ROUTE_MATRIX.value, arguments=CalculateRouteMatrixArgs(
             date=date(2026, 9, 3), mode=MatrixTravelMode.WALKING,
             location_handles=tuple(f"candidate-handle-{index:04d}" for index in range(6)),
+            visit_intents=__import__("tests.support.itinerary_planning_fakes", fromlist=["query_intents"]).query_intents(date(2026,9,3), tuple(f"candidate-handle-{i:04d}" for i in range(6))),
         )),
         ValidatedToolCall(call_id="cross_matrix_day2", tool_name=PlanningTool.CALCULATE_ROUTE_MATRIX.value, arguments=CalculateRouteMatrixArgs(
             date=date(2026, 9, 4), mode=MatrixTravelMode.WALKING,
             location_handles=("candidate-handle-0006", "candidate-handle-0007"),
+            visit_intents=__import__("tests.support.itinerary_planning_fakes", fromlist=["query_intents"]).query_intents(date(2026,9,4), ("candidate-handle-0006","candidate-handle-0007")),
         )),
     )
     arrival_ref = HubLocationRef(endpoint_kind="arrival", geocode_observation_index=0)
@@ -963,7 +1000,10 @@ async def test_public_initial_accepts_cross_midnight_hotel_closure_and_marks_nex
         ))
     directions_call = ValidatedToolCall(
         call_id="cross_directions", tool_name=PlanningTool.PLAN_DIRECTIONS.value,
-        arguments=models.PlanDirectionsArgs(legs=tuple(direction_intents)),
+        arguments=models.PlanDirectionsArgs(legs=tuple(direction_intents), visit_intents=(
+            *__import__("tests.support.itinerary_planning_fakes", fromlist=["query_intents"]).query_intents(date(2026,9,3), tuple(f"candidate-handle-{i:04d}" for i in range(3))),
+            *__import__("tests.support.itinerary_planning_fakes", fromlist=["query_intents"]).query_intents(date(2026,9,4), ("candidate-handle-0006",)),
+        )),
     )
 
     def route(index: int) -> ProposedRouteLeg:
@@ -1075,8 +1115,8 @@ async def test_invalid_submit_is_rejected_as_business_feedback_and_consumes_one_
     assert operation.call_count == 3
     diagnostic = next(json.loads(r.message) for r in caplog.records if r.name == "app.error_location" and json.loads(r.message)["event"] == "planning_submit_rejected")
     assert diagnostic["budget_category"] == "submit_repair"
-    assert diagnostic["reason"] == "proposal_structure_or_reference_invalid"
-    assert diagnostic["field"] == "draft"
+    assert diagnostic["reason"] == "required_visit_missing"
+    assert diagnostic["field"] == "draft.days.visits"
     assert diagnostic["run_id"] == str(request.operation_plan.run_id)
     assert diagnostic["location"]
     assert "空白日" not in caplog.text and "hotel-handle" not in caplog.text
@@ -1320,7 +1360,7 @@ _R16_POLICY_CASES = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ("supported", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
+@pytest.mark.parametrize("case", ("supported", "patch_boundary_repair", "patch_revalidates", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
 async def test_service_completed_requires_main_plan_and_valid_optional_backups(case: str) -> None:
     service, request, _, operation, repository = _fixture()
     if case == "must_valid":
@@ -1353,9 +1393,15 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
     if case == "meal_intent_mismatch_feedback":
         candidates = (
             candidates[0],
-            candidates[1].model_copy(update={"meal_intents": (MealIntent.DINNER,)}),
+            candidates[1].model_copy(update={"meal_intents": (MealIntent.DINNER,), "meal_assessments": (
+                candidates[1].meal_assessments[0].model_copy(update={"verdict": MatchVerdict.UNRESOLVED,
+                    "reason_code": "evidence_insufficient"}), candidates[1].meal_assessments[1])}),
             *candidates[2:],
         )
+    if case == "qualification_meal_rotation":
+        candidates = (candidates[0], candidates[1].model_copy(update={"meal_intents": (), "meal_assessments": tuple(
+            assessment.model_copy(update={"verdict": MatchVerdict.UNRESOLVED, "reason_code": "evidence_insufficient"})
+            for assessment in candidates[1].meal_assessments)}), *candidates[2:])
     evidence_refs = list(candidate_artifact.record.state.observation_refs)
     if case != "missing_hours":
         import app.candidate_research.artifacts as candidate_local
@@ -1405,7 +1451,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         candidates = tuple(updated)
     expanded_counts = candidate_artifact.record.state.counts.model_copy(update={
         "attraction_count": 6,
-        "restaurant_count": 6,
+        "restaurant_count": 5 if case == "qualification_meal_rotation" else 6,
         "unique_eligible_count": 6,
         "admitted_slots": 6,
     })
@@ -1581,6 +1627,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
     matrix_call = ValidatedToolCall(call_id="e2e_matrix", tool_name=PlanningTool.CALCULATE_ROUTE_MATRIX.value, arguments=matrix_args.CalculateRouteMatrixArgs(
         date=date(2026, 9, 3), mode=MatrixTravelMode.WALKING,
         location_handles=("candidate-handle-0000", "candidate-handle-0001", "candidate-handle-0002", "candidate-handle-0003", "candidate-handle-0004", "candidate-handle-0005"),
+        visit_intents=__import__("tests.support.itinerary_planning_fakes", fromlist=["query_intents"]).query_intents(date(2026,9,3), tuple(f"candidate-handle-{i:04d}" for i in range(6))),
     ))
     context = fingerprint_planning_context(base.run_id, _confirmed_digest(request.confirmed), request.hotel_selection_ref, _canonical_hash("杭州东站"), _canonical_hash("杭州东站"))
     arrival_ref = HubLocationRef(endpoint_kind="arrival", geocode_observation_index=0)
@@ -1607,7 +1654,8 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             destination_handle="hub-location-arrival" if destination == arrival_ref else "hub-location-departure" if destination == departure_ref else "hotel-handle" if destination == hotel_location else f"candidate-handle-{destination.admission_ordinal:04d}",
             transport_semantic=TransportSemantic.WALKING, route_mode=TravelMode.WALKING, alternatives_limit=1,
         ))
-    direction_call = ValidatedToolCall(call_id="e2e_directions", tool_name=PlanningTool.PLAN_DIRECTIONS.value, arguments=direction_args.PlanDirectionsArgs(legs=tuple(intents)))
+    direction_call = ValidatedToolCall(call_id="e2e_directions", tool_name=PlanningTool.PLAN_DIRECTIONS.value, arguments=direction_args.PlanDirectionsArgs(legs=tuple(intents),
+        visit_intents=__import__("tests.support.itinerary_planning_fakes", fromlist=["query_intents"]).query_intents(date(2026,9,3), tuple(f"candidate-handle-{i:04d}" for i in range(3)))))
 
     def route(leg_id: str, origin: str, destination: str, directions_handle: str, start_at: datetime, end_at: datetime) -> ProposedRouteLeg:
         return ProposedRouteLeg(leg_id=leg_id, origin_handle=origin, destination_handle=destination, start_at=start_at, end_at=end_at, transport_semantic=TransportSemantic.WALKING, route_mode=TravelMode.WALKING, directions_handle=directions_handle, alternative_index=0)
@@ -1879,6 +1927,23 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             ToolCallsReady(calls=(ValidatedToolCall(call_id="bad_backup_slots", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=bad_submit),), metadata=_metadata()),
             ToolCallsReady(calls=(ValidatedToolCall(call_id="corrected_backup_slots", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=submit),), metadata=_metadata()),
         ]
+    if case in {"patch_boundary_repair", "patch_revalidates"}:
+        from app.itinerary_planning import ProposedItineraryPatch
+        wrong = proposal.arrival_transfer.model_copy(update={"route_leg":proposal.arrival_transfer.route_leg.model_copy(
+            update={"end_at":proposal.arrival_transfer.route_leg.end_at + timedelta(minutes=30)})})
+        bad = SubmitItineraryArgs(effective_policy=submit.effective_policy,draft=proposal.model_copy(update={"arrival_transfer":wrong}))
+        repaired_patch = SubmitItineraryArgs(effective_policy=submit.effective_policy,
+            patch=ProposedItineraryPatch(arrival_transfer=proposal.arrival_transfer))
+        submit_responses = [ToolCallsReady(calls=(ValidatedToolCall(call_id="patch-base",tool_name="submit_itinerary",arguments=bad),),metadata=_metadata())]
+        if case == "patch_revalidates":
+            bad_day = proposal.days[0].model_copy(update={"visits":(*proposal.days[0].visits[:-1],
+                proposal.days[0].visits[-1].model_copy(update={"candidate_handle":proposal.days[0].visits[-2].candidate_handle}))})
+            invalid_patch = SubmitItineraryArgs(effective_policy=submit.effective_policy,
+                patch=ProposedItineraryPatch(days=(bad_day,),arrival_transfer=proposal.arrival_transfer))
+            submit_responses.append(ToolCallsReady(calls=(ValidatedToolCall(call_id="invalid-patch",tool_name="submit_itinerary",arguments=invalid_patch),),metadata=_metadata()))
+            repaired_patch = SubmitItineraryArgs(effective_policy=submit.effective_policy,
+                patch=ProposedItineraryPatch(days=proposal.days))
+        submit_responses.append(ToolCallsReady(calls=(ValidatedToolCall(call_id="good-patch",tool_name="submit_itinerary",arguments=repaired_patch),),metadata=_metadata()))
     if case == "route_end_mismatch_repair":
         wrong = proposal.arrival_transfer.route_leg.model_copy(update={"end_at": proposal.arrival_transfer.route_leg.end_at + timedelta(minutes=30)})
         bad = submit.model_copy(update={"draft": proposal.model_copy(update={"arrival_transfer": proposal.arrival_transfer.model_copy(update={"route_leg": wrong})})})
@@ -1886,6 +1951,17 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             ToolCallsReady(calls=(ValidatedToolCall(call_id="wrong_end", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=bad),), metadata=_metadata()),
             ToolCallsReady(calls=(ValidatedToolCall(call_id="fixed_end", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=submit),), metadata=_metadata()),
         ]
+    if case == "qualification_meal_rotation":
+        from app.itinerary_planning import BusinessHoursState
+        first_day = proposal.days[0].model_copy(update={"visits": tuple(visit.model_copy(update={
+            "business_hours_state": BusinessHoursState.UNKNOWN, "business_evidence_handles": ()})
+            if visit.visit_kind in {VisitKind.LUNCH, VisitKind.DINNER} else visit for visit in proposal.days[0].visits)})
+        second_day = first_day.model_copy(update={"visits": tuple(visit.model_copy(update={
+            "candidate_handle": "candidate-handle-0002" if visit.visit_kind is VisitKind.LUNCH else "candidate-handle-0001"})
+            if visit.visit_kind in {VisitKind.LUNCH, VisitKind.DINNER} else visit for visit in first_day.visits)})
+        submit_responses = [ToolCallsReady(calls=(ValidatedToolCall(call_id=f"rotate-{index}", tool_name="submit_itinerary",
+            arguments=SubmitItineraryArgs(effective_policy=submit.effective_policy, draft=proposal.model_copy(update={"days": (day,)}))),),
+            metadata=_metadata()) for index, day in enumerate((first_day, second_day, first_day))]
     if case == "route_rebind_repair":
         mismatched_arrival = proposal.arrival_transfer.model_copy(update={
             "route_leg": proposal.arrival_transfer.route_leg.model_copy(update={"leg_id": "regenerated-arrival"}),
@@ -2123,6 +2199,18 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
 
     result = await service.plan_initial(request)
     replay = None if case == "r12_fake_verified_anchor" or case in _R14_POLICY_CASES or case in _R15_POLICY_CASES else await service.plan_initial(request)
+
+    if case == "qualification_meal_rotation":
+        assert isinstance(result, ItineraryPlanningIncomplete), result
+        assert result.stop_reasons == (PlanningStopReason.NO_PROGRESS,)
+        assert replay == result
+        assert result.budgets.model_invocations_consumed == operation.call_count == 6
+        assert len(service._map_adapter.matrix_calls) == 1
+        assert result.budgets.direction_calls_consumed == len(service._map_adapter.directions_calls) == 6
+        assert service._runs[base.run_id].correction_no_progress == 2
+        feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+        assert any(issue["rule"] == "purpose_not_admitted" and ":dinner:" in issue["target"] for issue in feedback["issues"])
+        return
 
     if case in {"missing_backups", "partial_backups"}:
         assert isinstance(result, ItineraryPlanningCompleted)
@@ -2556,15 +2644,15 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         assert result.budgets.direction_calls_consumed == 6
         return
 
-    if case not in {"supported", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "must_valid"}:
+    if case not in {"supported", "patch_boundary_repair", "patch_revalidates", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "must_valid"}:
         assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
         assert replay == result
         if case == "meal_intent_mismatch_feedback":
-            feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+            feedback = _feedback_core(operation.continuations[-1][0].content)
             assert feedback == {
                 "status": "rejected",
                 "code": "policy_rejected",
-                "reason": "meal_intent_mismatch", "field": "draft",
+                "reason": "meal_intent_mismatch", "field": "draft.days[0].visits[1].candidate_handle",
             }
         if case.startswith("prefix_"):
             assert result.itinerary_ref is not None
@@ -2587,8 +2675,19 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
     assert result.summary.transit_only_days == 0
     assert result.summary.lunch_count == 1 and result.summary.dinner_count == 1
     assert result.summary.backups == 3
+    if case in {"patch_boundary_repair", "patch_revalidates"}:
+        assert result.budgets.model_invocations_consumed == operation.call_count == (6 if case == "patch_revalidates" else 5)
+        assert result.budgets.direction_calls_consumed == len(service._map_adapter.directions_calls) == 6
+        assert len(service._map_adapter.matrix_calls) == 1
+        assert result.itinerary_ref is not None
+        stored = (await repository.get(result.itinerary_ref,expected_model=__import__("app.itinerary_planning",fromlist=["ItineraryPlanningArtifact"]).ItineraryPlanningArtifact)).content.record.draft
+        assert stored.departure_transfer.route_leg.leg_id == proposal.departure_transfer.route_leg.leg_id
+        assert [leg.leg_id for leg in stored.days[0].route_legs] == [leg.leg_id for leg in proposal.days[0].route_legs]
+        if case == "patch_revalidates":
+            assert any(issue["rule"] == "candidate_duplicate" for issue in json.loads(operation.continuations[-1][0].content)["tool_result"]["issues"])
+        return
     if case.startswith("backup_slots_"):
-        feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+        feedback = _feedback_core(operation.continuations[-1][0].content)
         assert feedback == {
             "status": "rejected", "code": "policy_rejected", "reason": "backup_slots_mismatch", "field": "draft",
             "day_no": 1, "expected_backup_kinds": (
@@ -2604,10 +2703,10 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         assert len(service._map_adapter.matrix_calls) == 1
         assert json.loads(operation.continuations[-1][0].content)["tool_result"]["code"] != "success"
     if case == "route_end_mismatch_repair":
-        feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+        feedback = _feedback_core(operation.continuations[-1][0].content)
         assert feedback == {"status": "rejected", "code": "policy_rejected", "reason": "route_end_time_mismatch", "field": "draft.arrival_transfer.route_leg.end_at"}
     if case == "route_rebind_repair":
-        feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+        feedback = _feedback_core(operation.continuations[-1][0].content)
         assert feedback == {
             "status": "rejected",
             "code": "policy_rejected",
@@ -2615,7 +2714,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             "reason": "route_leg_binding_mismatch",
         }
     if case == "backup_distance_repair":
-        feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+        feedback = _feedback_core(operation.continuations[-1][0].content)
         assert feedback == {
             "status": "rejected",
             "code": "policy_rejected",
@@ -2623,13 +2722,15 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             "reason": "backup_distance_exceeded",
         }
     if case in {"duplicate_main_repair", "duplicate_backup_repair"}:
-        feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+        feedback = _feedback_core(operation.continuations[-1][0].content)
+        issues = json.loads(operation.continuations[-1][0].content)["tool_result"]["issues"]
+        assert any(issue["rule"] == "candidate_duplicate" for issue in issues)
         assert feedback == {
             "status": "rejected",
             "code": "policy_rejected",
-            "field": "draft",
+            "field": "draft.days[0].visits[2].business_evidence_handles" if case == "duplicate_main_repair" else "draft.days[0].backups[2].candidate_handle",
             "reason": (
-                "main_candidate_duplicate"
+                "business_hours_unverified"
                 if case == "duplicate_main_repair"
                 else "backup_candidate_duplicate"
             ),

@@ -32,7 +32,7 @@ async def test_incomplete_research_continues_but_no_draft_planning_stops_with_re
     from types import SimpleNamespace
     from app.demo_workflow.nodes import changed
     from app.demo_workflow.plans import DemoBudgetPlanProvider, planning_plan
-    from app.candidate_research import CandidateResearchArtifact, CandidateResearchIncomplete
+    from app.candidate_research import CandidateResearchArtifact, CandidateResearchLegacyArtifact, CandidateResearchIncomplete
     from app.itinerary_planning import ItineraryPlanningIncomplete, ItineraryPlanningArtifact
     from app.workflow_contracts import WorkflowPhase, ArtifactWriteRequest, InMemoryExecutionBudgetManager, DEMO_EXECUTION_BUDGET_MANAGER_LIMITS, TravelSessionState
     from tests.support.demo_workflow_fakes import hotel_nodes
@@ -41,9 +41,22 @@ async def test_incomplete_research_continues_but_no_draft_planning_stops_with_re
     nodes, state, _, _ = await hotel_nodes()
     cap = nodes.cap("research")
     scenario = await make_scenario(cap.artifact_repository, run_id=state.run_id)
-    record = (await cap.artifact_repository.get(scenario.refs["candidate_set"], expected_model=CandidateResearchArtifact)).content.record
+    previous = (await cap.artifact_repository.get(scenario.refs["candidate_set"], expected_model=CandidateResearchLegacyArtifact)).content
+    candidate = previous.model_dump(mode="json")
+    candidate["schema_version"] = "4.0"
+    candidate["correction_state"] = []
+    candidate["qualification_state"] = {"assessments": [], "steps": []}
+    for item in candidate["record"]["state"]["candidates"]:
+        item.update(schema_version="2.0", meal_intents=[], meal_assessments=[dict(meal_intent=meal,
+            verdict="unresolved", reason_code="evidence_insufficient", evidence_indexes=item["observation_indexes"][:1]) for meal in ("lunch", "dinner")])
+    for counts in (candidate["record"]["counts"], candidate["record"]["state"]["counts"]):
+        counts["restaurant_count"] = 0
+    candidate = CandidateResearchArtifact.model_validate_json(canonical(candidate), strict=True)
+    current_ref = await cap.artifact_repository.put(ArtifactWriteRequest(operation_id=scenario.refs["candidate_set"].operation_id.model_copy(
+        update={"logical_step": "current_candidate_set"}), artifact_type="candidate_research.candidate_set", schema_version="4.0", content=candidate.model_dump(mode="json")))
+    record = candidate.record
     research_result = CandidateResearchIncomplete.model_validate_json(canonical(dict(
-        candidate_set_ref=scenario.refs["candidate_set"].model_dump(mode="json"),
+        candidate_set_ref=current_ref.model_dump(mode="json"),
         counts=record.counts.model_dump(mode="json"), coverage=record.coverage.model_dump(mode="json"),
         budgets=record.budgets.model_dump(mode="json"), gaps=[g.model_dump(mode="json") for g in record.gaps],
         stop_reasons=[r.value for r in record.stop_reasons])), strict=True)
@@ -62,9 +75,10 @@ async def test_incomplete_research_continues_but_no_draft_planning_stops_with_re
         plan=DemoBudgetPlanProvider().plan_for_phase(run_id=state.run_id, phase=state.phase, state=state),
         limits=DEMO_EXECUTION_BUDGET_MANAGER_LIMITS)
     artifact = scenario.itinerary.model_dump(mode="json")
-    artifact["schema_version"] = "3.0"
-    artifact["directories"].update(schema_version="2.0", model_action_refs=[], hub_geocode_refs=[], matrix_refs=[], directions_refs=[])
-    artifact["record"]["budgets"].update(schema_version="3.0", model_invocation_limit=19, semantic_invocation_limit=19,
+    artifact["schema_version"] = "4.0"
+    artifact["directories"].update(schema_version="3.0", candidate_set_refs=[current_ref.model_dump(mode="json")],
+        model_action_refs=[], hub_geocode_refs=[], matrix_refs=[], directions_refs=[])
+    artifact["record"]["budgets"].update(schema_version="4.0", model_invocation_limit=19, semantic_invocation_limit=19,
         normal_invocation_limit=17, format_repair_limit=2, format_repair_used=0)
     artifact["record"].update(record_type="incomplete", draft=None, stop_reasons=["no_legal_action"],
         gaps=[dict(schema_version="1.0", summary_type="planning_process", gap_id="stop", evidence_indexes=[], process_reason="no_legal_action")])
@@ -72,11 +86,12 @@ async def test_incomplete_research_continues_but_no_draft_planning_stops_with_re
     from app.itinerary_planning import ItineraryPlanningInitialRequest
     from app.demo_workflow.plans import planning_request_digest
     artifact["request_digest"] = planning_request_digest(ItineraryPlanningInitialRequest(confirmed=state.requirement_outcome,
-        hotel_selection_ref=scenario.refs["hotel_selection"],candidate_set_ref=scenario.refs["candidate_set"],operation_plan=plan))
+        hotel_selection_ref=scenario.refs["hotel_selection"],candidate_set_ref=current_ref,operation_plan=plan))
     incomplete = ItineraryPlanningArtifact.model_validate_json(canonical(artifact), strict=True)
     terminal_ref = await cap.artifact_repository.put(ArtifactWriteRequest(operation_id=plan.terminal_successor_operation_id,
-        artifact_type="itinerary_planning.itinerary", schema_version="3.0", content=incomplete.model_dump(mode="json")))
+        artifact_type="itinerary_planning.itinerary", schema_version="4.0", content=incomplete.model_dump(mode="json")))
     planning_result = ItineraryPlanningIncomplete.model_validate_json(canonical(dict(
+        schema_version="4.0",
         itinerary_ref=None, summary=incomplete.record.summary.model_dump(mode="json"), budgets=incomplete.record.budgets.model_dump(mode="json"),
         stop_reasons=["no_legal_action"], gaps=[dict(gap_type="planning_process", gap_id="stop", evidence_refs=[], process_reason="no_legal_action")])), strict=True)
     async def planning(request):

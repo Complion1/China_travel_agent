@@ -16,7 +16,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ValidationError
 
-from app.candidate_research import CandidateResearchArtifact, CandidateResearchPlaceObservationArtifact
+from app.candidate_research import (
+    CandidateResearchArtifact, CandidateResearchV3Artifact,
+    CandidateResearchLegacyArtifact, CandidateResearchPlaceObservationArtifact,
+    CandidateResearchModelActionArtifact, CandidateResearchModelJudgmentArtifact,
+    CandidateResearchLegacyModelJudgmentArtifact, validate_qualification_sources,
+)
 from app.hotel_selection import HotelDiscoveryArtifact, HotelPlaceSearchArtifact, HotelSelectionArtifact
 from app.itinerary_planning import (
     ItineraryPlanningArtifact, ItineraryPlanningDirectionsObservationArtifact,
@@ -144,9 +149,14 @@ _READ_TYPES = {
     HotelSelectionArtifact: ("hotel.selection", "hotel_selection", "1.0"),
     HotelDiscoveryArtifact: ("hotel.candidate_set", "hotel_selection", "1.0"),
     HotelPlaceSearchArtifact: ("hotel.place_search", "hotel_selection", "1.0"),
-    CandidateResearchArtifact: ("candidate_research.candidate_set", "candidate_research", "1.0"),
+    CandidateResearchArtifact: ("candidate_research.candidate_set", "candidate_research", "4.0"),
+    CandidateResearchV3Artifact: ("candidate_research.candidate_set", "candidate_research", "3.0"),
+    CandidateResearchLegacyArtifact: ("candidate_research.candidate_set", "candidate_research", ("1.0", "2.0")),
     CandidateResearchPlaceObservationArtifact: ("candidate_research.place_observation", "candidate_research", "1.0"),
-    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", ("5.0", "6.0")),
+    CandidateResearchModelActionArtifact: ("candidate_research.model_action", "candidate_research", ("1.0", "2.0")),
+    CandidateResearchModelJudgmentArtifact: ("candidate_research.model_judgment", "candidate_research", "3.0"),
+    CandidateResearchLegacyModelJudgmentArtifact: ("candidate_research.model_judgment", "candidate_research", ("1.0", "2.0")),
+    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", ("5.0", "6.0", "7.0")),
     ItineraryPlanningHubGeocodeObservationArtifact: ("itinerary_planning.hub_geocode_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningDirectionsObservationArtifact: ("itinerary_planning.directions_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningRouteMatrixObservationArtifact: ("itinerary_planning.route_matrix_observation", "itinerary_planning", "1.0"),
@@ -170,6 +180,12 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
     sources: dict[UUID, dict[str, Any]] = {}
 
     def read(ref: ArtifactRef, model: type[BaseModel]) -> Generator:
+        if model is CandidateResearchArtifact and ref.schema_version in {"1.0", "2.0"}:
+            model = CandidateResearchLegacyArtifact
+        elif model is CandidateResearchArtifact and ref.schema_version == "3.0":
+            model = CandidateResearchV3Artifact
+        elif model is CandidateResearchModelJudgmentArtifact and ref.schema_version in {"1.0", "2.0"}:
+            model = CandidateResearchLegacyModelJudgmentArtifact
         artifact_type, phase, version = _READ_TYPES[model]
         _require(ref.operation_id.run_id == request.state.run_id)
         _require(ref.artifact_type == artifact_type and ref.schema_version in ((version,) if isinstance(version, str) else version), Code.ARTIFACT_CONTRACT_ERROR)
@@ -187,7 +203,8 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
         except ResultFormattingUsageError:
             raise ProjectionFailure(Code.ARTIFACT_INTEGRITY_ERROR) from None
         _require(content.schema_version == ref.schema_version, Code.ARTIFACT_INTEGRITY_ERROR)
-        if isinstance(content, (CandidateResearchArtifact, CandidateResearchPlaceObservationArtifact)):
+        if isinstance(content, (CandidateResearchLegacyArtifact, CandidateResearchPlaceObservationArtifact,
+                                CandidateResearchModelActionArtifact, CandidateResearchLegacyModelJudgmentArtifact)):
             _require(content.run_id == request.state.run_id)
         read_cache[ref.artifact_id] = ArtifactReadResult(ref=ref, content=content)
         return content
@@ -225,6 +242,17 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
     _require(candidates.record.record_type in {"completed", "incomplete"})
     candidate_state = candidates.record.state
     _require(candidate_state.confirmed_requirement_digest == digest and candidate_state.hotel_selection_ref == draft.hotel_selection_ref)
+    for ref in candidate_state.model_judgment_refs:
+        yield from read(ref, CandidateResearchModelJudgmentArtifact)
+    if type(candidates) is CandidateResearchArtifact:
+        for ref in candidate_state.model_action_refs:
+            yield from read(ref, CandidateResearchModelActionArtifact)
+        for ref in candidate_state.observation_refs:
+            yield from read(ref, CandidateResearchPlaceObservationArtifact)
+        try:
+            validate_qualification_sources(candidates, read_cache)
+        except (TypeError, ValueError):
+            raise ProjectionFailure(Code.SOURCE_MISMATCH) from None
     selected = hotel.decision.selected_candidate
     _require(selected in discovery.result.candidates)
     _require(discovery.confirmation_summary_digest == request.state.requirement_outcome.confirmation_summary_digest)

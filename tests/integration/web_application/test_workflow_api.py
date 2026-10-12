@@ -140,7 +140,7 @@ async def test_generic_argument_recovery_real_graph_pg_and_read_only_reopen(pg_s
         terminal=await wait_for_view(service,owner,receipt.run_id,activity="terminal")
         assert terminal.result_available == (bad_responses < 3)
         assert terminal.run.terminal_code in ({"workflow_completed","workflow_degraded"}
-            if bad_responses < 3 else {"workflow_provider_failed"})
+            if bad_responses < 3 else {"workflow_model_output_invalid"})
         summary=await wait_for_summary(service,owner,receipt.run_id)
         state=await service._deps.durable.get_state(run_id=receipt.run_id)
         control_ref=max((ref for ref in state.artifact_refs if ref.artifact_type=="demo.control"),
@@ -158,7 +158,7 @@ async def test_generic_argument_recovery_real_graph_pg_and_read_only_reopen(pg_s
             # control's planning_ref continues to mean a consistent itinerary.
             assert control.planning_ref is None and control.last_outcome=="failed"
         planning=(await repository.get(planning_ref,expected_model=ItineraryPlanningArtifact)).content
-        assert planning.schema_version == planning_ref.schema_version == "3.0"
+        assert planning.schema_version == planning_ref.schema_version == "4.0"
         budget=planning.record.budgets
         assert budget.format_repair_used == min(bad_responses,2)
         assert budget.model_invocations_consumed == sum((budget.preparation_used,budget.transport_used,

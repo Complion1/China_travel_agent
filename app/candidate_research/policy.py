@@ -26,6 +26,8 @@ class ResearchObjective(_PublicModel):
     anchor: ResearchAnchorRef | None
     radius_km: Literal[1, 3, 5, 10] | None
     candidate_uids: tuple[BoundedText, ...]
+    gap_type: StableId | None = None
+    rejected_uid: BoundedText | None = None
 
     @field_validator("candidate_uids")
     @classmethod

@@ -19,7 +19,7 @@ def test_previous_prompt_remains_immutable():
 
 def test_planning_prompt_is_packaged_utf8_and_hash_locked() -> None:
     resource = load_planning_prompt()
-    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v6"
+    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v7"
     assert resource.sha256 == PLANNING_PROMPT_SHA256
     assert "普通日开放区间固定为当日 07:30–22:00" in resource.text
     assert "backup_distance_exceeded" in resource.text

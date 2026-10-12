@@ -210,6 +210,11 @@ class ModelOperation:
     def role(self) -> ModelRole:
         return self._profile.role
 
+    @property
+    def semantic_invocations_consumed(self) -> int:
+        """Public read-only admission count, including admitted cancelled calls."""
+        return self._semantic_invocations_used
+
     def _check_closed(self) -> None:
         if self._closed:
             raise RuntimeError("Operation closed")
@@ -365,20 +370,20 @@ class ModelOperation:
         possible_duplicate: bool,
     ) -> StructuredInvocationOutcome:
         if response.model_name and response.model_name != self._profile.model_name:
-            return _failure(LLMErrorCode.UNEXPECTED_MODEL, self.role)
+            return _failure(LLMErrorCode.UNEXPECTED_MODEL, self.role, possible_duplicate=possible_duplicate)
         metadata = self._metadata(response, attempts, possible_duplicate)
         if metadata is None:
-            return _failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE, self.role)
+            return _failure(LLMErrorCode.MALFORMED_PROVIDER_RESPONSE, self.role, possible_duplicate=possible_duplicate)
         if response.finish_reason == "length":
-            return _failure(LLMErrorCode.OUTPUT_TRUNCATED, self.role)
+            return _failure(LLMErrorCode.OUTPUT_TRUNCATED, self.role, possible_duplicate=possible_duplicate)
         if response.finish_reason == "content_filter":
-            return _failure(LLMErrorCode.CONTENT_FILTERED, self.role)
+            return _failure(LLMErrorCode.CONTENT_FILTERED, self.role, possible_duplicate=possible_duplicate)
         if response.finish_reason != "stop" or response.tool_calls or response.content is None:
-            return _failure(LLMErrorCode.STRUCTURED_OUTPUT_INVALID, self.role)
+            return _failure(LLMErrorCode.STRUCTURED_OUTPUT_INVALID, self.role, possible_duplicate=possible_duplicate)
         try:
             validated = schema.model_validate_json(response.content, strict=True)
         except (ValidationError, TypeError, ValueError):
-            return _failure(LLMErrorCode.STRUCTURED_OUTPUT_INVALID, self.role)
+            return _failure(LLMErrorCode.STRUCTURED_OUTPUT_INVALID, self.role, possible_duplicate=possible_duplicate)
         return StructuredInvocationSuccess(value=validated, metadata=metadata)
 
     @_tool_turn("structured")

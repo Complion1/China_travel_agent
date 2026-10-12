@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from .interest_policy import interest_selection_error, pace_selection_error
 from datetime import date, datetime
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 from uuid import UUID
@@ -66,6 +67,13 @@ class RequirementMerger:
             for issue in validate_requirement_hubs(current)
             if issue.code in {"hub_name_not_specific", "hub_type_mismatch"}
         }
+        invalid_interests = interest_selection_error(current.preferences) is not None
+        invalid_pace = pace_selection_error(current.preferences) is not None
+
+        def evidenced_interest_repair(path: str) -> bool:
+            return ((invalid_interests and path in {
+                "preferences.interests", "preferences.agent_decides_interests"
+            } or invalid_pace and path in {"preferences.pace", "preferences.agent_decides_pace"}) and path in evidence_paths)
 
         def evidenced_hub_repair(path: str, new: object) -> bool:
             prefix, _, field = path.rpartition(".")
@@ -105,7 +113,7 @@ class RequirementMerger:
                 return
             if old == new:
                 return
-            if _is_unset_domain_value(old) or patch.is_correction or evidenced_hub_repair(path, new):
+            if _is_unset_domain_value(old) or patch.is_correction or evidenced_hub_repair(path, new) or evidenced_interest_repair(path):
                 setter(new)
                 changed.append(path)
             else:
@@ -178,6 +186,29 @@ class RequirementMerger:
                     lambda value, name=attribute: setattr(updated.preferences, name, value),
                     clearable=clearable,
                 )
+            # The UI asks one mutually exclusive choice to repair an invalid
+            # interest group. Only current-turn verified evidence authorizes it.
+            choose_agent = ("agent_decides_interests" in fields
+                and patch.preferences.agent_decides_interests
+                and evidenced_interest_repair("preferences.agent_decides_interests"))
+            choose_values = ("interests" in fields and bool(patch.preferences.interests)
+                and evidenced_interest_repair("preferences.interests"))
+            if choose_agent and not choose_values:
+                updated.preferences.interests = None
+                changed.append("preferences.interests")
+            elif choose_values and not choose_agent:
+                updated.preferences.agent_decides_interests = False
+                changed.append("preferences.agent_decides_interests")
+            choose_pace_agent = ("agent_decides_pace" in fields and patch.preferences.agent_decides_pace
+                and evidenced_interest_repair("preferences.agent_decides_pace"))
+            choose_pace = ("pace" in fields and patch.preferences.pace is not None
+                and evidenced_interest_repair("preferences.pace"))
+            if choose_pace_agent and not choose_pace:
+                updated.preferences.pace = None
+                changed.append("preferences.pace")
+            elif choose_pace and not choose_pace_agent:
+                updated.preferences.agent_decides_pace = False
+                changed.append("preferences.agent_decides_pace")
 
         derived = self._recompute_derived(updated, set(changed), patch)
         return MergeResult(updated, tuple(issues), tuple(changed), derived)
