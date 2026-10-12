@@ -1,10 +1,44 @@
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.venv/
+# Local configuration and credentials
 .env
 .env.*
 !.env.example
+**/config.env
 .m14-local/
 .m14-cloud/
-**/pause-key.json
+**/pause-key*.json
+*.pem
+*.key
+
+# Private data and publication preparation
+/data/
+/diagnostics/
+/exports/
+/evidence/
+/.publication/
+
+# Python and test output
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+test-results/
+playwright-report/
+
+# Local tools
+.idea/
+.vscode/
+*.log
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
