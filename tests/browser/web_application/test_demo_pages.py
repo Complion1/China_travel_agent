@@ -136,6 +136,9 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     page.get_by_role("button",name="选择这家酒店",exact=True).click()
     expect(page.locator("#message")).to_contain_text("请先选择")
     page.locator("input[name=hotel]").first.check()
+    expect(page.locator(".hotel-card").first).to_have_css("border-color", "rgb(126, 171, 244)")
+    expect(page.get_by_role("button",name="全部放弃",exact=True)).to_have_class("danger")
+    page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"])/"browser-hotel-options.png"),full_page=True)
     control(page,origin,supplement=True)
     page.get_by_role("button",name="选择这家酒店",exact=True).click()
     assert_active_phase(page,origin,"candidate_research","research")
@@ -182,6 +185,7 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     cookies=page.context.cookies();assert cookies[0]["httpOnly"] and cookies[0]["sameSite"]=="Lax" and not cookies[0]["secure"]
     assert not page.evaluate("Object.keys(localStorage).length")
     page.goto(origin+"/history");expect(page.get_by_role("link",name="进入任务")).to_have_count(1)
+    expect(page.locator(".history-card .task-state")).to_have_text("已完成")
     page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"])/"browser-history.png"),full_page=True)
 
 
@@ -240,8 +244,8 @@ def test_busy_429_low_disk_preserve_input_samples_and_disconnect_never_restarts(
     expect(second.get_by_role("button",name="确认需求",exact=True)).to_be_visible()
     assert info(second,origin)["provider_calls"]==before+1
     second.get_by_role("button",name="取消任务",exact=True).click();expect(second.locator("#task-status")).to_contain_text("已取消",timeout=15000)
-    second.goto(origin+"/samples");expect(second.locator("#sample-list")).to_contain_text("离线合成模拟样例")
-    expect(second.locator("#sample-list")).to_contain_text("游览日三")
+    second.goto(origin+"/samples");expect(second.locator("#sample-list")).to_contain_text("真实任务结果")
+    expect(second.locator("#sample-list")).to_contain_text("第 3 天")
     second.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"])/"browser-samples.png"),full_page=True)
     second.close()
 
@@ -250,7 +254,9 @@ def test_expired_and_other_browser_uniform_404_xss_canary_and_sse_read_only(page
     page.goto(origin+"/history");links=page.get_by_role("link",name="进入任务")
     # An empty initial container does not prove the asynchronous session/history
     # bootstrap has finished. Wait for its authenticated empty-history response.
-    expect(page.locator("#history-list")).to_have_text("当前浏览器尚无任务。")
+    expect(page.locator("#history-list .empty-state h2")).to_have_text("当前浏览器尚无任务。")
+    expect(page.locator("#history-list .history-card")).to_have_count(0)
+    expect(page.locator("#history-list .empty-state a")).to_have_attribute("href", "/")
     # This independent cookie has no access to the preceding visitors' tasks.
     expect(links).to_have_count(0)
     response=page.request.get(origin+"/api/runs/00000000-0000-4000-8000-000000000001")
@@ -638,7 +644,8 @@ def test_result_readable_overview_days_transit_sources_safe_dom_and_original_dow
     day1 = ("## 第 1 天｜2026-09-03｜西湖\\#周边\n\n- 天气未获取。\n\n### 主行程\n\n"
             "- 2026-09-03 09:00—2026-09-03 09:30（北京时间）｜交通：酒店 → 西湖；公共交通；费用未核验。〔来源 1〕\n\n"
             "  乘车顺序（班次与实时运营未核验）：\n\n  1. 在湖滨站乘车。\n  2. 在西湖站下车。\n\n"
-            "- 2026-09-03 10:00—2026-09-03 11:00（北京时间）｜景点：湖边；营业时间未核验，请出行前确认。\n\n"
+            "- 2026-09-03 10:00—2026-09-03 11:00（北京时间）｜景点：湖边；地点身份已核验〔来源 1〕；地址：湖滨路；营业时间未核验，请出行前确认。\n\n"
+            "- 未匹配编号〔来源 99〕；代码：\x60〔来源 1〕\x60；[保留链接〔来源 1〕](https://example.com/reference)。\n\n"
             "| 时间 | 安排 |\n| --- | --- |\n| 12:00 | 午餐\\|备选 |\n\n"
             "- **保留提醒**；路径 C:\\\\旅行\\/计划。\n\n"
             "&lt;img src=x onerror=&quot;globalThis.ctaXss=1&quot;&gt;\n\n"
@@ -673,6 +680,21 @@ def test_result_readable_overview_days_transit_sources_safe_dom_and_original_dow
     expect(page.locator("#result-notes")).to_contain_text("返程：2026-09-04 18:00")
     expect(page.locator("#result-notes")).to_contain_text("〔来源 1〕")
     expect(page.locator("#result-notes")).to_contain_text("部分营业信息不足")
+    expect(page.locator("#result-notes .source-details")).to_have_count(1)
+    assert not page.locator(".source-details").evaluate("node=>node.open")
+    assert "地点身份已核验" not in page.locator("#itinerary-day-1").inner_text()
+    expect(page.locator("#itinerary-day-1 .source-reference").first).to_be_hidden()
+    expect(page.locator("#itinerary-day-1")).to_contain_text("营业时间未核验，请出行前确认")
+    expect(page.locator("#itinerary-day-1")).to_contain_text("地址：湖滨路")
+    expect(page.locator("#itinerary-day-1 code")).to_have_text("〔来源 1〕")
+    expect(page.get_by_role("link", name="保留链接〔来源 1〕", exact=True)).to_be_visible()
+    assert "〔来源 99〕" in page.locator("#itinerary-day-1").inner_text()
+    page.locator(".source-details summary").click()
+    expect(page.locator("#itinerary-day-1 .source-reference").first).to_be_visible()
+    assert "地点身份已核验〔来源 1〕" in page.locator("#itinerary-day-1").inner_text()
+    expect(page.locator(".source-content")).to_contain_text("获取时间：2026-08-20")
+    page.locator(".source-details summary").click()
+    expect(page.locator("#itinerary-day-1 .source-reference").first).to_be_hidden()
     assert page.locator("#result img, #result script").count() == 0
     assert page.evaluate("globalThis.ctaXss") is None
     assert page.locator('#result a[href^="javascript:"]').count() == 0
@@ -697,7 +719,7 @@ def test_result_delivery_only_completes_after_successful_read_and_has_lossless_f
     view["result_available"] = True
     route_projection(page, run_id, view)
     available = [False]
-    original = "# 完整攻略\n\n总览与全部提醒保留。费用未核验。\n"
+    original = "# 完整攻略\n\n总览与全部提醒保留。费用未核验。〔来源 1〕\n\n## 来源清单\n\n- 〔来源 1〕百度地图｜获取时间：2026-08-20。\n"
     def result(route):
         if not available[0]:
             route.fulfill(status=503, content_type="application/json",
@@ -723,4 +745,81 @@ def test_result_delivery_only_completes_after_successful_read_and_has_lossless_f
     expect(page.locator("#result-overview")).to_contain_text("总览与全部提醒保留")
     expect(page.locator("#result-day-nav")).to_be_hidden()
     expect(page.locator("#result-days article")).to_have_count(0)
+    expect(page.locator("#result-overview")).to_contain_text("〔来源 1〕")
+    expect(page.locator(".source-details")).to_have_count(0)
     assert page.locator("#result-markdown").text_content() == original
+
+
+@pytest.mark.parametrize("path,page_name", [("/", "home"), ("/history", "history"), ("/samples", "samples")])
+def test_shared_page_style_navigation_and_mobile_layout(page, origin, path, page_name):
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(origin + path)
+    expect(page.locator("body")).to_have_attribute("data-page", page_name)
+    expect(page.locator(".site-header nav a")).to_have_count(3)
+    expect(page.locator('.site-header nav a[aria-current="page"]')).to_have_count(1)
+    if page_name == "history":
+        expect(page.locator(".empty-state")).to_be_visible()
+    if page_name == "samples":
+        expect(page.locator(".sample-card").first).to_be_visible()
+    assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()") == "#3774d7"
+    expect(page.locator(".button, button").first).to_have_css("border-radius", "8px")
+    page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"]) / f"browser-{page_name}-unified-desktop.png"), full_page=True)
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    page.locator(".site-header nav a").first.focus()
+    expect(page.locator(".site-header nav a").first).to_be_focused()
+    expect(page.locator(".site-header nav a").first).to_have_css("outline-style", "solid")
+    page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"]) / f"browser-{page_name}-unified-mobile.png"), full_page=True)
+    if page_name == "history":
+        expect(page.locator(".empty-state")).to_contain_text("当前浏览器尚无任务")
+        expect(page.locator(".empty-state a")).to_have_attribute("href", "/")
+    if page_name == "samples":
+        expect(page.locator(".sample-meta").first).to_contain_text("真实任务结果")
+        expect(page.locator(".sample-meta").first).to_contain_text("非实时")
+
+
+@pytest.mark.parametrize("suffix", [
+    "## 来源清单\n\n- 来源说明格式不同，保留整段内容。",
+    "## 来源清单\n\n- 〔来源 1〕百度地图｜查询时快照。\n\n## 来源清单\n\n- 〔来源 2〕百度地图｜另一条查询。",
+    "## 来源清单\n\n- 〔来源 1〕百度地图｜查询时快照。\n\n具体交通提醒不能收进来源列表。",
+])
+def test_unrecognized_source_directory_keeps_all_guide_content_visible(page, origin, suffix):
+    run_id = "00000000-0000-4000-8000-000000000067"
+    view = ui_projection(run_id, activity="terminal", lifecycle="closed", phase="output_formatting",
+                         delivery_status="demo_ready", terminal_code="workflow_completed",
+                         finalized_at="2026-08-20T00:01:00Z")
+    view["result_available"] = True
+    route_projection(page, run_id, view)
+    day = "## 第 1 天\n\n### 主行程\n\n- 景点：湖边；地点身份已核验〔来源 1〕；营业时间未核验。"
+    original = "# 攻略\n\n" + day + "\n\n" + suffix + "\n"
+    page.route(f"**/api/runs/{run_id}/result", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps({
+            "schema_version": "1.0", "result_schema_version": "2.0", "markdown": original,
+            "days": [{"schema_version": "1.0", "ordinal": 1, "markdown": day}],
+            "delivery_status": "demo_ready", "terminal_code": "workflow_completed",
+        })))
+    page.goto(origin + f"/tasks/{run_id}")
+    expect(page.locator("#result")).to_be_visible()
+    expect(page.locator(".source-details")).to_have_count(0)
+    assert "地点身份已核验〔来源 1〕" in page.locator("#result-days").inner_text()
+    assert page.locator("#result-markdown").text_content() == original
+    assert page.locator("#result-notes").inner_text().strip()
+
+
+def test_sample_guide_uses_source_disclosure_and_preserves_synthetic_label(page, origin):
+    samples = page.request.get(origin + "/api/samples").json()
+    samples["items"][0]["source_kind"] = "synthetic"
+    samples["items"][0]["markdown"] = (
+        "# 合成示例\n\n- 景点：湖边；地点身份已核验〔来源 1〕；营业时间未核验。\n\n"
+        "## 来源清单\n\n- 〔来源 1〕百度地图｜合成来源格式示例。\n\n"
+        "## 出行前复核\n\n费用未核验。")
+    page.route("**/api/samples", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(samples)))
+    page.goto(origin + "/samples")
+    expect(page.locator(".sample-meta").first).to_contain_text("离线合成模拟样例")
+    expect(page.locator(".sample-body .source-reference").first).to_be_hidden()
+    assert not page.locator(".source-details").evaluate("node=>node.open")
+    expect(page.locator(".sample-body").first).to_contain_text("营业时间未核验")
+    expect(page.locator(".sample-body").first).to_contain_text("费用未核验")
+    page.locator(".source-details summary").click()
+    expect(page.locator(".sample-body .source-reference").first).to_be_visible()

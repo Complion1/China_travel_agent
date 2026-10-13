@@ -8,11 +8,14 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body data-page="task">
-<header><a href="/">中国旅行规划</a><nav><a href="/samples">完整样例</a><a href="/history">我的任务</a></nav></header>
+<header class="site-header">
+  <a class="site-brand" href="/"><span class="brand-mark" aria-hidden="true">旅</span>中国旅行规划</a>
+  <nav aria-label="主导航"><a href="/">开始规划</a><a href="/samples">完整样例</a><a href="/history" aria-current="page">我的任务</a></nav>
+</header>
 <main>
   <div class="task-heading"><div><p class="eyebrow">你的旅行，正在成形</p><h1 id="task-title">旅行规划任务</h1><p id="task-status" role="status">正在读取真实任务状态…</p></div><a class="secondary button" href="/">新建任务</a></div>
   <p id="message" aria-live="polite"></p>
-  <button id="query-request" hidden>查询原请求</button>
+  <button id="query-request" class="secondary" hidden>查询原请求</button>
   <section id="workflow" aria-label="旅行规划流程" hidden>
     <div id="workflow-canvas" class="workflow-canvas">
       <svg id="workflow-edges" aria-hidden="true" focusable="false">
@@ -58,8 +61,8 @@
     </div>
     <div class="phase-detail"><div class="phase-detail-heading"><h2 id="phase-title"></h2><span id="phase-badge" class="phase-badge"></span></div><p id="phase-description"></p><p id="phase-next" class="muted"></p></div>
   </section>
-  <section id="input-issues" aria-live="polite" hidden></section>
-  <section id="interaction"></section>
+  <section id="input-issues" class="panel input-issues" aria-live="polite" hidden></section>
+  <section id="interaction" class="panel interaction-panel"></section>
   <div id="controls"></div>
   <section id="result" hidden>
     <div class="result-heading"><div><p class="eyebrow">旅行规划结果</p><h2>完整旅行攻略</h2></div><div class="actions"><button id="copy-result">复制 Markdown</button><button id="download-result" class="secondary">下载 Markdown</button></div></div>
@@ -70,8 +73,8 @@
     <section id="result-notes" class="result-notes markdown-body" aria-label="返程与出行提醒"></section>
     <details class="raw-result"><summary>查看原始 Markdown</summary><pre id="result-markdown"></pre></details>
   </section>
-  <details id="statistics"><summary>运行统计</summary><p id="summary-status">展开后读取最终保存的统计。</p><button id="refresh-summary" type="button">刷新统计</button><div id="summary-content"></div></details>
-  <p><a href="/">新建任务</a> · <a href="/samples">查看完整样例</a></p>
+  <details id="statistics" class="disclosure"><summary>运行统计</summary><p id="summary-status">展开后读取最终保存的统计。</p><button id="refresh-summary" class="secondary" type="button">刷新统计</button><div id="summary-content"></div></details>
+  <p class="task-links"><a href="/">新建任务</a><a href="/samples">查看完整样例</a></p>
 </main>
 <footer>刷新或关闭页面不会取消任务。恢复需要明确点击；取消以真实终态为准。</footer>
 </body>

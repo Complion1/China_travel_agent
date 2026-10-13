@@ -39,4 +39,4 @@ docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256
 
 密钥扫描应覆盖待发布文件及将推送的全部 Git 历史。告警需要检查来源，不能直接忽略测试目录或整个业务模块。数据库约束校验包含固定的 SHA-256 摘要，可能触发通用密钥规则；需要通过代码用途证明后单独记录。
 
-诊断导出可能含用户需求、任务标识与供应商正文。请保存在 `diagnostics/` 或 `exports/` 等忽略目录，不提交实际运行记录。合成样例位于 `app/web_application/samples`，与访客任务数据分开保存。
+诊断导出可能含用户需求、任务标识与供应商正文。请保存在 `diagnostics/` 或 `exports/` 等忽略目录，不提交实际运行记录。公开样例位于 `app/web_application/samples`，与访客任务数据分开保存。当前完整样例来自已脱敏的真实任务结果，保留生成日期和未核验信息的说明，不代表实时出行安排。

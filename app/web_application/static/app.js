@@ -165,6 +165,46 @@
       const paragraph=[line];index++;while(index<lines.length&&!block(lines[index])&&!(index+1<lines.length&&lines[index].includes("|")&&separator.test(lines[index+1])))paragraph.push(lines[index++]);inlineMarkdown(paragraph.join("\n"),make("p",undefined,parent));
     }
   }
+  function foldGuideSources(parent,root){
+    const headings=[...parent.children].filter(node=>node.tagName==="H3"&&node.textContent==="来源清单");
+    if(headings.length!==1)return new Set();
+    const heading=headings[0],content=[];
+    for(let node=heading.nextElementSibling;node&&!/^H[1-3]$/.test(node.tagName);node=node.nextElementSibling)content.push(node);
+    if(!content.length||content.some(node=>node.tagName!=="UL"))return new Set();
+    const items=content.flatMap(node=>[...node.children]);
+    const numbers=items.map(node=>{
+      const match=node.tagName==="LI"&&node.textContent.match(/^〔来源 ([1-9]\d{0,3})〕百度地图[｜|]/);
+      return match?Number(match[1]):null;
+    });
+    const ids=new Set(numbers);
+    if(!items.length||items.length>1024||numbers.some(value=>value===null||value>1024)||ids.size!==items.length)return new Set();
+    const details=make("details");details.className="source-details";
+    make("summary","数据来源",details);
+    const body=make("div",undefined,details);body.className="source-content";
+    parent.insertBefore(details,heading);body.append(heading,...content);
+    details.addEventListener("toggle",()=>root.classList.toggle("guide-sources-visible",details.open));
+    return ids;
+  }
+  function compactGuideReferences(parent,sourceIds){
+    if(!sourceIds.size)return;
+    const walker=document.createTreeWalker(parent,NodeFilter.SHOW_TEXT),nodes=[];
+    while(walker.nextNode()){
+      const node=walker.currentNode;
+      if(!node.parentElement.closest("pre,code,a,.source-details"))nodes.push(node);
+    }
+    for(const node of nodes){
+      const text=node.textContent,fragment=document.createDocumentFragment();
+      const references=/地点身份已核验〔来源 ([1-9]\d{0,3})〕；?|〔来源 ([1-9]\d{0,3})〕/g;
+      let offset=0;
+      for(const match of text.matchAll(references)){
+        if(!sourceIds.has(Number(match[1]||match[2])))continue;
+        fragment.append(document.createTextNode(text.slice(offset,match.index)));
+        const label=make("span",match[0],fragment);label.className="source-reference";
+        offset=match.index+match[0].length;
+      }
+      if(offset){fragment.append(document.createTextNode(text.slice(offset)));node.replaceWith(fragment);}
+    }
+  }
   async function send(kind,fields,runId){
     if(inflight || pending)return;
     let id;try{id=requestId();}catch(e){message(e.message);return;}
@@ -284,7 +324,8 @@
     const label=make("label",questions.length?"补充说明":"回答本轮问题",notesParent);label.htmlFor="clarify-input";
     const notes=make("textarea",undefined,notesParent);notes.id="clarify-input";notes.maxLength=16000;notes.rows=4;notes.required=!questions.length;
     if(manual)manual.addEventListener("change",()=>{for(const set of groups)set.disabled=manual.checked;notes.required=manual.checked;});
-    make("button","提交补充",form).type="submit";
+    const actions=make("div",undefined,form);actions.className="form-actions";
+    make("button","提交补充",actions).type="submit";
     form.addEventListener("submit",e=>{
       e.preventDefault();
       try{
@@ -314,20 +355,30 @@
       make("summary","查看本轮问题说明",paragraphs);
     }
     for(const p of c.paragraphs)make("p",p,paragraphs).className="domain-message";facts(c.facts,parent);
-    const form=make("form",undefined,parent);
+    const form=make("form",undefined,parent);form.className="interaction-form";
     if(c.kind==="clarification"){
       clarificationForm(c,form,view);
     }else if(c.kind==="confirmation"){
       const label=make("label","希望修改的内容（选择修改时填写）",form);label.htmlFor="revision-input";
       const input=make("textarea",undefined,form);input.id="revision-input";input.maxLength=8000;
       const mapLabel=make("label",undefined,form);const map=make("input",undefined,mapLabel);map.type="checkbox";map.id="map-requested";make("span","希望提供地图链接（信息足够时）",mapLabel);
-      const accept=make("button","确认需求",form);accept.type="button";accept.addEventListener("click",()=>send("confirm",{pause_generation:view.run.pause_generation,decision:"accept",revision_text:null,map_requested:map.checked},view.run.run_id));
-      const revise=make("button","修改需求",form);revise.type="button";revise.addEventListener("click",()=>{if(!input.value.trim()){message("请填写修改内容。");return;}send("confirm",{pause_generation:view.run.pause_generation,decision:"revise",revision_text:input.value,map_requested:false},view.run.run_id);});
+      const actions=make("div",undefined,form);actions.className="form-actions";
+      const accept=make("button","确认需求",actions);accept.type="button";accept.addEventListener("click",()=>send("confirm",{pause_generation:view.run.pause_generation,decision:"accept",revision_text:null,map_requested:map.checked},view.run.run_id));
+      const revise=make("button","修改需求",actions);revise.type="button";revise.className="secondary";revise.addEventListener("click",()=>{if(!input.value.trim()){message("请填写修改内容。");return;}send("confirm",{pause_generation:view.run.pause_generation,decision:"revise",revision_text:input.value,map_requested:false},view.run.run_id);});
     }else{
-      for(const choice of c.choices){const article=make("article",undefined,form);const label=make("label",undefined,article);const radio=make("input",undefined,label);radio.type="radio";radio.name="hotel";radio.value=String(choice.ordinal);make("span",`${choice.ordinal}. ${choice.name}`,label);if(choice.address)make("p",choice.address,article);facts(choice.facts,article);}
-      const select=make("button","选择这家酒店",form);select.type="submit";
+      const options=make("div",undefined,form);options.className="hotel-options";
+      for(const choice of c.choices){
+        const article=make("article",undefined,options);article.className="hotel-card";
+        const label=make("label",undefined,article),radio=make("input",undefined,label);
+        radio.type="radio";radio.name="hotel";radio.value=String(choice.ordinal);
+        make("span",`${choice.ordinal}. ${choice.name}`,label);
+        if(choice.address)make("p",choice.address,article);
+        facts(choice.facts,article);
+      }
+      const actions=make("div",undefined,form);actions.className="form-actions";
+      const select=make("button","选择这家酒店",actions);select.type="submit";
       form.addEventListener("submit",e=>{e.preventDefault();const chosen=form.querySelector("input[name=hotel]:checked");if(!chosen){message("请先选择一家酒店。");return;}send("hotel",{pause_generation:view.run.pause_generation,decision:"select",ordinal:Number(chosen.value)},view.run.run_id);});
-      const decline=make("button","全部放弃",form);decline.type="button";decline.addEventListener("click",()=>send("hotel",{pause_generation:view.run.pause_generation,decision:"decline",ordinal:null},view.run.run_id));
+      const decline=make("button","全部放弃",actions);decline.type="button";decline.className="danger";decline.addEventListener("click",()=>send("hotel",{pause_generation:view.run.pause_generation,decision:"decline",ordinal:null},view.run.run_id));
     }
   }
   async function readSummary(){
@@ -347,8 +398,11 @@
     const body=data.days.map(day=>day.markdown).join("\n\n"),boundary=body?markdown.indexOf("\n\n"+body+"\n\n"):-1;
     if(boundary<0){safeMarkdown(markdown,overview);nav.hidden=true;notes.hidden=true;}
     else{
-      safeMarkdown(markdown.slice(0,boundary),overview);safeMarkdown(markdown.slice(boundary+body.length+4),notes);
-      for(const d of data.days){const article=make("article",undefined,parent);article.className="day-card";article.id=`itinerary-day-${d.ordinal}`;make("p",`第 ${d.ordinal} 天`,article).className="eyebrow";safeMarkdown(d.markdown,article);const link=make("a",`第 ${d.ordinal} 天`,nav);link.href=`#${article.id}`;}
+      safeMarkdown(markdown.slice(boundary+body.length+4),notes);
+      const sourceIds=foldGuideSources(notes,$("result"));
+      compactGuideReferences(notes,sourceIds);
+      safeMarkdown(markdown.slice(0,boundary),overview);compactGuideReferences(overview,sourceIds);
+      for(const d of data.days){const article=make("article",undefined,parent);article.className="day-card";article.id=`itinerary-day-${d.ordinal}`;make("p",`第 ${d.ordinal} 天`,article).className="eyebrow";safeMarkdown(d.markdown,article);compactGuideReferences(article,sourceIds);const link=make("a",`第 ${d.ordinal} 天`,nav);link.href=`#${article.id}`;}
     }
     workflow(view);
   }
@@ -361,7 +415,7 @@
         if(messageSource==="sse")message("");
       }
       $("task-status").textContent=(view.input_issues||[]).length?"旅行需求未通过校验":status(view);workflow(view);inputIssues(view);interaction(view);const controls=$("controls");controls.replaceChildren();
-      for(const kind of ["cancel","recover"]){if(!view.actions.includes(kind))continue;const button=make("button",kind==="cancel"?"取消任务":"明确恢复任务",controls);button.addEventListener("click",()=>send(kind,{},id));}
+      for(const kind of ["cancel","recover"]){if(!view.actions.includes(kind))continue;const button=make("button",kind==="cancel"?"取消任务":"明确恢复任务",controls);if(kind==="cancel")button.className="danger";button.addEventListener("click",()=>send(kind,{},id));}
       await readResult(view);if($("statistics").open)await readSummary();
     }catch(e){workflowUnavailable();message(e.message,"read");}finally{refreshing=false;}
   }
@@ -371,13 +425,39 @@
   }
   async function history(cursor=null){
     try{const data=await api("/api/runs"+(cursor?"?cursor="+encodeURIComponent(cursor):""));const parent=$("history-list");parent.replaceChildren();
-      if(data.items.length===0)make("p","当前浏览器尚无任务。",parent);
-      for(const view of data.items){const article=make("article",undefined,parent);make("h2",status(view),article);const time=(value)=>value?new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",dateStyle:"medium",timeStyle:"short"}).format(new Date(value)):"尚未完成";make("p",`创建：${time(view.run.created_at)}；完成：${time(view.run.finalized_at)}`,article);const a=make("a","进入任务",article);a.href=`/tasks/${view.run.run_id}`;}
+      if(data.items.length===0){
+        const empty=make("section",undefined,parent);empty.className="panel empty-state";
+        make("h2","当前浏览器尚无任务。",empty);make("p","从旅行需求开始，规划记录会显示在这里。",empty);
+        const start=make("a","开始规划",empty);start.className="button";start.href="/";
+      }
+      for(const view of data.items){
+        const article=make("article",undefined,parent);article.className="panel history-card";
+        const content=make("div",undefined,article),r=view.run;
+        const badge=make("span",activities[r.activity]||"处理中",content);badge.className="task-state";
+        badge.dataset.tone=r.activity==="executing"?"running":["awaiting_user","recovery_required","cancelling"].includes(r.activity)?"waiting":["blocked","incompatible"].includes(r.activity)?"stopped":"neutral";
+        if(r.activity==="terminal"){
+          const completed=["demo_ready","degraded"].includes(r.delivery_status);
+          badge.textContent=r.delivery_status==="cancelled"?"已取消":r.delivery_status==="failed"?"未完成":r.delivery_status==="degraded"?"部分信息不足":completed?"已完成":"已结束";
+          badge.dataset.tone=r.delivery_status==="failed"?"stopped":r.delivery_status==="degraded"?"waiting":completed?"complete":"neutral";
+        }
+        make("h2",status(view),content);
+        const time=value=>value?new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",dateStyle:"medium",timeStyle:"short"}).format(new Date(value)):"尚未完成";
+        make("p",`创建：${time(r.created_at)}；完成：${time(r.finalized_at)}`,content);
+        const a=make("a","进入任务",article);a.className="button secondary";a.href=`/tasks/${r.run_id}`;
+      }
       $("history-next").hidden=!data.next_cursor;$("history-next").onclick=()=>history(data.next_cursor);
     }catch(e){message(e.message);}
   }
   async function samples(){
-    const data=await api("/api/samples");for(const item of data.items){const article=make("article",undefined,$("sample-list"));make("h2",item.title,article);make("p",`生成日期 ${item.generated_date} · ${item.source_kind==="synthetic"?"离线合成模拟样例":"经验证的结果"} · 非实时`,article);safeMarkdown(item.markdown,article);}
+    const data=await api("/api/samples");
+    for(const item of data.items){
+      const article=make("article",undefined,$("sample-list"));article.className="panel sample-card";
+      const heading=make("div",undefined,article);heading.className="sample-heading";
+      make("h2",item.title,heading);
+      make("p",`生成日期 ${item.generated_date} · ${item.source_kind==="synthetic"?"离线合成模拟样例":"真实任务结果"} · 非实时`,heading).className="sample-meta";
+      const body=make("div",undefined,article);body.className="sample-body";safeMarkdown(item.markdown,body);
+      const sourceIds=foldGuideSources(body,article);compactGuideReferences(body,sourceIds);
+    }
   }
   async function init(){
     const page=document.body.dataset.page;
