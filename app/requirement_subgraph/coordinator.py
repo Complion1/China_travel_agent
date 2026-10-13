@@ -653,7 +653,7 @@ class RequirementSubgraphCoordinator:
             or state.terminal_code is not None
             or state.terminal_outcome is not None
             or state.requirement_outcome is not None
-            or state.requirement_state != RequirementDomainState()
+            or state.requirement_state != RequirementDomainState(schema_version=state.requirement_state.schema_version)
             or state.artifact_refs
             or turn.current != state.requirement_state
         ):

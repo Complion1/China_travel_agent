@@ -145,7 +145,7 @@ def _transfer_allowance(core: ResultCore, *, arrival: bool) -> str:
             "（均为规划预留，并非机场/车站官方政策）。")
 
 
-def render_header(core: ResultCore) -> str:
+def render_header(core: ResultCore, *, template_version="zh-guide-v1") -> str:
     requirement = core.requirement
     hotel = core.places[0]
     ages = "、".join(f"{age} 岁" for age in requirement.children_ages) or "未记录"
@@ -173,6 +173,10 @@ def render_header(core: ResultCore) -> str:
     if requirement.budget_total_cny is not None:
         budget = ("约 " if requirement.budget_is_approximate else "") + _decimal(requirement.budget_total_cny)
         lines.insert(5, f"- 用户总预算：{budget} 元；范围为目的地内住宿、当地交通、餐饮、景点和其他当地消费，不含往返目的地的大交通。")
+    if template_version == "zh-guide-v2-active-inputs":
+        lines = [line for line in lines if not line.startswith(("- 同行人员：", "- 用户总预算："))]
+        lines[3] = (f"- 住宿日期：{requirement.hotel_check_in_date.isoformat()} 入住，"
+                    f"{requirement.hotel_check_out_date.isoformat()} 离店；{requirement.hotel_nights} 晚。")
     return "\n".join(lines)
 
 
@@ -205,21 +209,25 @@ def render_day(core: ResultCore, day: ResultDayData) -> str:
     return "\n".join(lines)
 
 
-def render_footer(core: ResultCore) -> str:
+def render_footer(core: ResultCore, *, template_version="zh-guide-v1") -> str:
     requirement = core.requirement
     lines = ["## 酒店到返程枢纽", "", _hub_line(core, arrival=False),
              _route_line(core.departure_transfer.route, _place_map(core)),
              _transfer_allowance(core, arrival=False), "", "## 费用核验状态", ""]
     lines.extend(f"- {category}：未核验。" for category in ("住宿", "当地交通", "餐饮", "景点", "其他当地消费"))
-    lines.extend(["", "## 关键限制（已记录，本版未逐项验证）", ""])
-    restrictions = (("行动限制", requirement.mobility_constraints), ("饮食禁忌", requirement.dietary_restrictions))
-    if all(value is None for _, value in restrictions):
-        lines.append("- 未记录行动限制或饮食禁忌文本；本版未验证适配性。")
-    else:
-        lines.extend(f"- {label}：{_escape(value)}。" for label, value in restrictions if value is not None)
-    supplements = (("房型", requirement.room_type_requirements), ("酒店偏好", requirement.hotel_preferences),
+    legacy = template_version == "zh-guide-v1"
+    if legacy:
+        lines.extend(["", "## 关键限制（已记录，本版未逐项验证）", ""])
+        restrictions = (("行动限制", requirement.mobility_constraints), ("饮食禁忌", requirement.dietary_restrictions))
+        if all(value is None for _, value in restrictions):
+            lines.append("- 未记录行动限制或饮食禁忌文本；本版未验证适配性。")
+        else:
+            lines.extend(f"- {label}：{_escape(value)}。" for label, value in restrictions if value is not None)
+    supplements = (("酒店偏好", requirement.hotel_preferences),
                    ("交通偏好", requirement.transport_preferences), ("作息", requirement.daily_time_preferences),
                    ("补充备注", requirement.free_text_notes))
+    if legacy:
+        supplements = (("房型", requirement.room_type_requirements), *supplements)
     if any(value is not None for _, value in supplements) or requirement.must_visit_places or requirement.avoid_places:
         lines.extend(["", "## 用户补充要求（已记录，本版未逐项验证）", ""])
         lines.extend(f"- {label}：{_escape(value)}。" for label, value in supplements if value is not None)

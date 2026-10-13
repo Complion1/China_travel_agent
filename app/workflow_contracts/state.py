@@ -241,7 +241,7 @@ class TravelSessionState(BaseModel):
                 "requirement_outcome",
                 _fresh_requirement_outcome(transition.outcome),
             )
-        elif self.requirement_state != RequirementDomainState():
+        elif self.requirement_state != RequirementDomainState(schema_version=self.requirement_state.schema_version):
             raise ValueError("outcome is required after initial state")
 
         if self.delivery_status in _NONTERMINAL_STATUSES:

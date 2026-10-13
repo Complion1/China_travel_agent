@@ -79,7 +79,7 @@ def _list_or_none(values: list[object]) -> str:
     return "、".join(str(value) for value in values) if values else "无"
 
 
-def render_confirmation_summary(req: TravelRequirement) -> str:
+def render_confirmation_summary(req: TravelRequirement, *, collection_version="1.0") -> str:
     """Render every business field in a fixed, deterministic order."""
     time_window = req.time_window
     arrival = time_window.arrival
@@ -147,4 +147,11 @@ def render_confirmation_summary(req: TravelRequirement) -> str:
             f"目的地内总预算：{req.budget.total_cny:g} 元",
             f"预算约数：{'是' if req.budget.is_approximate else '否'}",
         ]
+    if collection_version == "1.1":
+        deferred_labels = {
+            "成人数量", "儿童数量", "儿童年龄", "老人数量", "总人数",
+            "房间数量", "房型要求", "行动限制", "饮食禁忌", "派生同行场景",
+            "目的地内总预算", "预算约数",
+        }
+        lines = [line for line in lines if line.split("：", 1)[0] not in deferred_labels]
     return "\n".join(lines)

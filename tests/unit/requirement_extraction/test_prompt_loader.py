@@ -34,6 +34,20 @@ def test_prompt_version_is_frozen():
 
 
 @pytest.mark.parametrize("loader", [load_extract_prompt, load_repair_prompt])
+def test_new_collection_uses_separate_prompt_with_deferred_fields_and_preserved_timing(loader):
+    from app.requirement_extraction.prompt_loader import prompt_version_for
+    legacy = loader()
+    active = loader("1.1")
+    assert active != legacy
+    assert prompt_version_for("1.0") == "requirement-extraction-v4-hub-roles"
+    assert prompt_version_for("1.1") == "requirement-extraction-v5-active-inputs"
+    for field in ("adults_count", "children_ages", "room_count", "mobility_constraints", "dietary_restrictions"):
+        assert field in active
+    assert "Do not emit their evidence" in active
+    assert "activity time" in active.lower() and "duration" in active.lower()
+
+
+@pytest.mark.parametrize("loader", [load_extract_prompt, load_repair_prompt])
 def test_current_prompt_explicitly_defers_amounts_and_budget_notes(loader):
     text = loader()
     assert "Always set budget_total_cny and budget_is_approximate to null" in text

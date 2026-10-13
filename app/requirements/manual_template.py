@@ -36,7 +36,10 @@ MANUAL_TEMPLATE_KEYS = [
     "节奏",
 ]
 
-_ALL_KEYS = ["模板版本", *MANUAL_TEMPLATE_KEYS]
+ACTIVE_MANUAL_TEMPLATE_VERSION = "2"
+ACTIVE_MANUAL_TEMPLATE_KEYS = [key for key in MANUAL_TEMPLATE_KEYS if key not in {
+    "成人/儿童/老人", "儿童年龄", "房间及房型", "行动限制", "饮食禁忌",
+}]
 _LINE_RE = re.compile(r"^(?P<key>[^：:]+)(?:：|:)(?P<value>.*)$")
 _DATE_RANGE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\s+至\s+(\d{4}-\d{2}-\d{2})$")
 _HUB_RE = re.compile(
@@ -60,9 +63,18 @@ _PACE_TO_LABEL = {
 _LABEL_TO_PACE = {label: value for value, label in _PACE_TO_LABEL.items()}
 
 
-def render_manual_template() -> str:
-    """Render the fixed empty v1 template in canonical order."""
-    return "\n".join([f"模板版本：{MANUAL_TEMPLATE_VERSION}", *(f"{key}：" for key in MANUAL_TEMPLATE_KEYS)])
+def _template_keys(version: str) -> list[str]:
+    if version == MANUAL_TEMPLATE_VERSION:
+        return MANUAL_TEMPLATE_KEYS
+    if version == ACTIVE_MANUAL_TEMPLATE_VERSION:
+        return ACTIVE_MANUAL_TEMPLATE_KEYS
+    raise ValueError("unsupported manual template version")
+
+
+def render_manual_template(*, template_version: str = MANUAL_TEMPLATE_VERSION) -> str:
+    """按版本生成固定顺序的空模板。"""
+    keys = _template_keys(template_version)
+    return "\n".join([f"模板版本：{template_version}", *(f"{key}：" for key in keys)])
 
 
 def _interest_text(requirement: TravelRequirement) -> str:
@@ -94,7 +106,7 @@ def _hub_text(
     return f"{base}，大约" if endpoint.is_approximate else base
 
 
-def serialize_manual_template(requirement: TravelRequirement) -> ManualTemplateSubmission:
+def serialize_manual_template(requirement: TravelRequirement, *, template_version: str = MANUAL_TEMPLATE_VERSION) -> ManualTemplateSubmission:
     """Serialize every field represented by the fixed v1 template."""
     time_window = requirement.time_window
     party = requirement.party
@@ -126,11 +138,11 @@ def serialize_manual_template(requirement: TravelRequirement) -> ManualTemplateS
     }
     content = "\n".join(
         [
-            f"模板版本：{MANUAL_TEMPLATE_VERSION}",
-            *(f"{key}：{values[key]}" for key in MANUAL_TEMPLATE_KEYS),
+            f"模板版本：{template_version}",
+            *(f"{key}：{values[key]}" for key in _template_keys(template_version)),
         ]
     )
-    return ManualTemplateSubmission(template_version=MANUAL_TEMPLATE_VERSION, content=content)
+    return ManualTemplateSubmission(template_version=template_version, content=content)
 
 
 class ManualTemplateParseError(ValueError):
@@ -185,8 +197,12 @@ def _parse_hub(
 def parse_manual_template(submission: ManualTemplateSubmission) -> RequirementPatch:
     """Parse a fixed v1 template into a presence-aware domain patch."""
     errors: dict[str, str] = {}
-    if submission.template_version != MANUAL_TEMPLATE_VERSION:
-        _add_error(errors, "模板版本", f"只支持版本 {MANUAL_TEMPLATE_VERSION}")
+    try:
+        keys = _template_keys(submission.template_version)
+    except ValueError:
+        keys = MANUAL_TEMPLATE_KEYS
+        _add_error(errors, "模板版本", "只支持版本 1 或 2")
+    all_keys = ["模板版本", *keys]
 
     lines = submission.content.splitlines()
     parsed: dict[str, str] = {}
@@ -207,7 +223,7 @@ def parse_manual_template(submission: ManualTemplateSubmission) -> RequirementPa
             if seen[key] > 1:
                 _add_error(errors, key, "重复键")
             continue
-        if key not in _ALL_KEYS:
+        if key not in all_keys:
             _add_error(errors, f"第{index}行", f"未知键：{key}")
             continue
         encountered.append(key)
@@ -217,16 +233,16 @@ def parse_manual_template(submission: ManualTemplateSubmission) -> RequirementPa
             continue
         parsed[key] = value
 
-    for key in _ALL_KEYS:
+    for key in all_keys:
         if seen.get(key, 0) == 0:
             _add_error(errors, key, "缺少键")
-    if encountered != _ALL_KEYS:
+    if encountered != all_keys:
         _add_error(errors, "_order", "全部键必须按固定顺序且恰好出现一次")
 
-    if parsed.get("模板版本") != MANUAL_TEMPLATE_VERSION:
-        _add_error(errors, "模板版本", f"内容版本必须精确为 {MANUAL_TEMPLATE_VERSION}")
+    if parsed.get("模板版本") != submission.template_version:
+        _add_error(errors, "模板版本", f"内容版本必须精确为 {submission.template_version}")
 
-    required_non_empty = set(MANUAL_TEMPLATE_KEYS) - {"儿童年龄"}
+    required_non_empty = set(keys) - {"儿童年龄"}
     for key in required_non_empty:
         if key in parsed and not parsed[key]:
             _add_error(errors, key, "值不能为空")
@@ -343,6 +359,8 @@ def parse_manual_template(submission: ManualTemplateSubmission) -> RequirementPa
         agent_decides_interests=agent_decides_interests,
         agent_decides_pace=agent_decides_pace,
     )
+    if submission.template_version == ACTIVE_MANUAL_TEMPLATE_VERSION:
+        return RequirementPatch(destination=destination, time_window=time_window, preferences=preferences)
     return RequirementPatch(
         destination=destination,
         time_window=time_window,

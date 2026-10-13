@@ -109,7 +109,7 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     expect(page.get_by_text("离开杭州的机场/车站", exact=True).first).to_be_visible()
     expect(page.locator("#clarify-time_window-arrival-hub_type-airport")).to_be_visible()
     expect(page.locator("#clarify-time_window-departure-hub_type-railway_station")).to_be_visible()
-    answer_current_questions(page,origin,**{"preferences.interests":["人文","自然"],"rooms.room_type_requirements":"需要两张床"})
+    answer_current_questions(page,origin,**{"preferences.interests":["人文","自然"]})
     page.get_by_text("其他补充说明（可选）",exact=True).click()
     page.locator("#clarify-input").fill("保留我的选择草稿")
     page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"])/"browser-clarification-options.png"),full_page=True)
@@ -117,18 +117,19 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     assert page.locator("#clarify-input").input_value()=="保留我的选择草稿"
     assert page.locator("#clarify-preferences-interests-culture").is_checked()
     assert page.locator("#clarify-preferences-interests-nature").is_checked()
-    assert page.locator("#clarify-rooms-room_type_requirements-other-text").input_value()=="需要两张床"
+    assert page.locator("#clarify-rooms-room_type_requirements-other-text").count()==0
     page.get_by_role("button",name="提交补充",exact=True).click()
     expect(page.get_by_role("button",name="确认需求",exact=True)).to_be_visible()
     expect(page.locator("#interaction")).to_contain_text("兴趣：人文、自然")
-    expect(page.locator("#interaction")).to_contain_text("房型要求：需要两张床")
+    assert all(label not in page.locator("#interaction").inner_text() for label in ("房型要求", "儿童数量", "行动限制", "饮食禁忌"))
     page.locator("#revision-input").fill("保留草稿：我还在思考")
-    page.locator("#map-requested").check()
+    assert page.locator("#map-requested").count()==0
     page.wait_for_timeout(10500)
     assert page.locator("#revision-input").input_value()=="保留草稿：我还在思考"
-    assert page.locator("#map-requested").is_checked()
-    page.locator("#map-requested").uncheck()
-    page.get_by_role("button",name="确认需求",exact=True).click()
+    assert page.locator("#map-requested").count()==0
+    with page.expect_request("**/confirm") as confirmation:
+        page.get_by_role("button",name="确认需求",exact=True).click()
+    assert confirmation.value.post_data_json["map_requested"] is False
     assert_active_phase(page,origin,"hotel_selection","hotel")
     control(page,origin,phase_release="hotel_selection")
     expect(page.get_by_role("button",name="选择这家酒店",exact=True)).to_be_visible()
@@ -162,6 +163,7 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     run_id=page.url.rsplit("/",1)[1]
     assert page.request.get(origin+f"/api/runs/{run_id}").json()["progress_phase"] is None
     expected=page.request.get(origin+f"/api/runs/{run_id}/result").json()["markdown"]
+    assert all(label not in expected for label in ("同行人员", "间房", "- 房型：", "- 行动限制：", "- 饮食禁忌："))
     assert page.locator("#result-markdown").text_content()==expected
     expect(page.locator("#result-days article")).to_have_count(1)
     page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"])/"browser-guide-main-chain.png"),full_page=True)
@@ -388,22 +390,66 @@ def test_sse_terminal_races_preserve_message_ownership(page,origin,other_message
     assert len(posts)==(1 if other_message=="uncertain_post" else 0)
 
 
-def test_real_children_and_agent_decisions_are_extracted_without_filling_absent_fields(page,origin):
+def test_new_task_collects_only_active_inputs_and_preserves_agent_decisions(page,origin):
     page.goto(origin+"/");page.locator("#trip-input").fill("我想去杭州")
     page.locator("#date-confirm").check();page.locator("#start-button").click();page.wait_for_url("**/tasks/*")
-    expect(page.locator("#clarify-party-children_count")).to_be_visible()
-    answer_current_questions(page,origin,**{"party.children_count":2,"party.children_ages":[6,10],
-        "rooms.room_count":2,"preferences.interests":None,"preferences.pace":None})
-    assert page.locator("#clarify-child-age-1").input_value()=="6"
-    assert page.locator("#clarify-child-age-2").input_value()=="10"
+    expect(page.locator("#clarify-time_window-sightseeing_start_date")).to_be_visible()
+    questions=page.request.get(origin+f"/api/runs/{page.url.rsplit('/',1)[1]}").json()["card"]["questions"]
+    assert not any(question["field"].startswith(("party.","rooms.","constraints.")) for question in questions)
+    answer_current_questions(page,origin,**{"preferences.interests":None,"preferences.pace":None})
     page.get_by_role("button",name="提交补充",exact=True).click()
     expect(page.get_by_role("button",name="确认需求",exact=True)).to_be_visible()
-    expect(page.locator("#interaction")).to_contain_text("儿童数量：2")
-    expect(page.locator("#interaction")).to_contain_text("儿童年龄：6、10")
+    assert "儿童数量" not in page.locator("#interaction").inner_text()
+    assert "房间数量" not in page.locator("#interaction").inner_text()
+    assert page.locator("#map-requested").count()==0
     expect(page.locator("#interaction")).to_contain_text("兴趣：由 Agent 决定")
     expect(page.locator("#interaction")).to_contain_text("节奏：由 Agent 决定")
     page.get_by_role("button",name="取消任务",exact=True).click()
     expect(page.locator("#task-status")).to_contain_text("已取消",timeout=15000)
+
+
+def test_legacy_domain_confirmation_keeps_party_room_fields(page, origin):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import date
+    from uuid import UUID
+    from app.requirements import RequirementDomainService, RequirementDomainState
+    from app.requirements.manual_template import serialize_manual_template
+    from app.web_application.presentation import interaction_card
+    from app.workflow_contracts import DeliveryStatus, TravelSessionState, WorkflowPhase
+    from tests.unit.requirements.fakes import FixedClock, InMemoryEvidenceSink, RecordingRequirementExtractor
+    from tests.unit.requirements.test_requirement_service import complete_requirement
+
+    requirement = complete_requirement()
+    requirement.party.children_count = 2
+    requirement.party.children_ages = [6, 10]
+    requirement.rooms.room_count = 2
+    requirement.rooms.room_type_requirements = "需要两张床"
+    domain = RequirementDomainService(extractor=RecordingRequirementExtractor([]),
+        evidence_sink=InMemoryEvidenceSink(), clock=FixedClock(date(2026, 10, 13)))
+    transition = domain.process_manual_template(RequirementDomainState(), serialize_manual_template(requirement))
+    assert transition.outcome.outcome_type == "need_confirmation"
+    run_id = "00000000-0000-4000-8000-000000000078"
+    state = TravelSessionState(schema_version="2.0", run_id=UUID(run_id), trace_id=UUID(run_id),
+        phase=WorkflowPhase.REQUIREMENTS, delivery_status=DeliveryStatus.AWAITING_USER,
+        terminal_code=None, terminal_outcome=None, requirement_state=transition.state,
+        requirement_outcome=transition.outcome, artifact_refs=())
+    # Playwright 已占用当前线程的事件循环；纯投影在独立循环中完成。
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        card = executor.submit(lambda: asyncio.run(interaction_card(state=state, repository=None))).result(timeout=10)
+    view = {"schema_version":"1.0", "run":{"run_id":run_id,"trace_id":run_id,
+        "created_at":"2026-08-20T00:00:00Z","finalized_at":None,"lifecycle":"open",
+        "activity":"awaiting_user","phase":"requirements","delivery_status":"awaiting_user",
+        "terminal_code":None,"pause_generation":1,"cancel_requested":False},
+        "card":card.model_dump(mode="json"), "actions":["confirm"], "result_available":False,
+        "summary_status":"not_finalized"}
+    WebRunView.model_validate_json(json.dumps(view), strict=True)
+    capture_sse(page)
+    route_projection(page, run_id, view)
+    page.goto(origin + f"/tasks/{run_id}")
+    for text in ("儿童数量：2", "儿童年龄：6、10", "房间数量：2", "房型要求：需要两张床"):
+        expect(page.locator("#interaction")).to_contain_text(text)
+    assert page.locator("#map-requested").count() == 0
 
 
 def test_controls_fixture_exclusivity_other_age_zero_polling_generation_and_manual_limit(page,origin):

@@ -29,6 +29,7 @@ from .projection import (
     require_ready_state,
 )
 from .renderer import render_day, render_footer, render_header
+from .projection import template_version_for
 
 
 def _require(condition: bool, code: Code = Code.SOURCE_MISMATCH) -> None:
@@ -124,9 +125,11 @@ async def _reconstruct(request: ResultFormattingRequest, reads: _Reads) -> _Bund
         steps.close()
     input_hash, bundle_hash = input_digest(request), bundle_digest(request, core, day_data)
     # Validate all visible text even when prepare only returns daily fragments.
-    header, footer = render_header(core), render_footer(core)
+    template_version = template_version_for(request)
+    header = render_header(core, template_version=template_version)
+    footer = render_footer(core, template_version=template_version)
     days = tuple(ResultDayArtifact(
-        schema_version="2.0", template_version="zh-guide-v1", run_id=request.state.run_id,
+        schema_version="2.0", template_version=template_version, run_id=request.state.run_id,
         source_itinerary_ref=request.itinerary_ref, input_digest=input_hash, bundle_digest=bundle_hash,
         data=day, markdown=render_day(core, day),
     ) for day in day_data)
@@ -152,7 +155,7 @@ async def _checked_days(bundle: _Bundle, refs: tuple[ArtifactRef, ...], reads: _
 def _index(bundle: _Bundle, refs: tuple[ArtifactRef, ...]) -> ResultIndexArtifact:
     first = bundle.days[0]
     index = ResultIndexArtifact(
-        schema_version="2.0", template_version="zh-guide-v1", run_id=first.run_id,
+        schema_version="2.0", template_version=first.template_version, run_id=first.run_id,
         source_itinerary_ref=first.source_itinerary_ref, input_digest=first.input_digest,
         bundle_digest=first.bundle_digest, core=bundle.core,
         days=tuple(ResultDayEntry(day_no=day.data.day_no, date=day.data.date, ref=ref)

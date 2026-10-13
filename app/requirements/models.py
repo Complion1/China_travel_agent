@@ -246,7 +246,7 @@ class RequirementPatch(BaseModel):
 
 class RequirementDomainState(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.0", "1.1"] = "1.0"
     requirement: TravelRequirement = Field(default_factory=TravelRequirement)
     metadata: FieldMetadataRegistry = Field(default_factory=FieldMetadataRegistry)
     issues: Tuple[RequirementIssue, ...] = ()
@@ -275,7 +275,7 @@ class NeedConfirmation(BaseModel):
 class ConfirmedTravelRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     outcome_type: Literal["confirmed"] = "confirmed"
-    schema_version: Literal["1.0"]
+    schema_version: Literal["1.0", "1.1"]
     requirement: TravelRequirement
     metadata_without_raw_evidence: FieldMetadataRegistry
     confirmation_summary_digest: Annotated[str, StringConstraints(min_length=1)]
@@ -351,6 +351,7 @@ class RequirementDomainTransition(BaseModel):
         elif isinstance(outcome, ConfirmedTravelRequirement):
             if (
                 state.confirmation_status != "confirmed"
+                or state.schema_version != outcome.schema_version
                 or state.issues
                 or state.requirement != outcome.requirement
                 or state.metadata != outcome.metadata_without_raw_evidence

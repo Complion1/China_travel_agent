@@ -13,7 +13,7 @@ class ExtractionInvocationEvent(BaseModel):
 
     schema_version: Literal["1.0"] = "1.0"
     turn_id: UUID
-    prompt_version: Literal["requirement-extraction-v1", "requirement-extraction-v2-budget-deferred", "requirement-extraction-v3-explicit-negatives", "requirement-extraction-v4-hub-roles"]
+    prompt_version: Literal["requirement-extraction-v1", "requirement-extraction-v2-budget-deferred", "requirement-extraction-v3-explicit-negatives", "requirement-extraction-v4-hub-roles", "requirement-extraction-v5-active-inputs"]
     attempt_kind: Literal["extract", "repair"]
     outcome_kind: Literal["succeeded", "repair_required", "runtime_failure"]
     semantic_call_number: Literal[1, 2]

@@ -26,6 +26,7 @@ from .errors import ResultFormattingUsageError
 
 RESULT_FORMATTING_SCHEMA_VERSION = "2.0"
 RESULT_FORMATTING_TEMPLATE_VERSION = "zh-guide-v1"
+ACTIVE_INPUTS_TEMPLATE_VERSION = "zh-guide-v2-active-inputs"
 MAX_RESULT_ARTIFACT_BYTES = 1_048_576
 _SAFE_INTEGER_MAX = 2**53 - 1
 
@@ -208,12 +209,12 @@ class ResultRequirement(_ResultArtifactModel):
     hotel_check_in_date: date
     hotel_check_out_date: date
     hotel_nights: PositiveInt
-    adults_count: Annotated[int, Field(ge=0, le=100)]
-    children_count: Annotated[int, Field(ge=0, le=100)]
+    adults_count: Annotated[int, Field(ge=0, le=100)] | None
+    children_count: Annotated[int, Field(ge=0, le=100)] | None
     children_ages: Annotated[tuple[Annotated[int, Field(ge=0, le=17)], ...], Field(min_length=0, max_length=100)]
-    seniors_count: Annotated[int, Field(ge=0, le=100)]
-    total_people: Annotated[int, Field(ge=1, le=100)]
-    room_count: PositiveInt
+    seniors_count: Annotated[int, Field(ge=0, le=100)] | None
+    total_people: Annotated[int, Field(ge=1, le=100)] | None
+    room_count: PositiveInt | None
     budget_total_cny: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None
     budget_is_approximate: bool
     budget_scope: Literal["destination_only"]
@@ -290,7 +291,7 @@ def _check_markdown(value: str) -> None:
 
 class ResultDayArtifact(_ResultArtifactModel):
     schema_version: Literal["2.0"]
-    template_version: Literal["zh-guide-v1"]
+    template_version: Literal["zh-guide-v1", "zh-guide-v2-active-inputs"]
     run_id: UUID
     source_itinerary_ref: ArtifactRef
     input_digest: Digest
@@ -307,7 +308,7 @@ class ResultDayArtifact(_ResultArtifactModel):
 
 class ResultIndexArtifact(_ResultArtifactModel):
     schema_version: Literal["2.0"]
-    template_version: Literal["zh-guide-v1"]
+    template_version: Literal["zh-guide-v1", "zh-guide-v2-active-inputs"]
     run_id: UUID
     source_itinerary_ref: ArtifactRef
     input_digest: Digest
@@ -322,6 +323,12 @@ class ResultIndexArtifact(_ResultArtifactModel):
         _check_itinerary_ref(self.source_itinerary_ref, self.run_id)
         _check_markdown(self.markdown_header)
         _check_markdown(self.markdown_footer)
+        requirement = self.core.requirement
+        if self.template_version == "zh-guide-v1" and any(value is None for value in (
+            requirement.adults_count, requirement.children_count, requirement.seniors_count,
+            requirement.total_people, requirement.room_count,
+        )):
+            raise ValueError("legacy result requires party and room fields")
         if len(self.days) != self.core.requirement.sightseeing_days:
             raise ValueError("index day count mismatch")
         for index, day in enumerate(self.days):

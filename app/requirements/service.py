@@ -9,9 +9,11 @@ from uuid import UUID, uuid4
 from pydantic import TypeAdapter
 
 from app.requirements.dialogue import render_clarification, render_confirmation_summary
+from app.requirements.collection_policy import deferred_field_paths
 from app.requirements.interest_policy import interest_selection_error, pace_selection_error
 from app.requirements.evidence import verify_evidence
 from app.requirements.extraction_contract import (
+    ATTR_TO_PATH,
     EvidenceVerified,
     ExtractionInput,
     ExtractionAttemptSucceeded,
@@ -113,6 +115,7 @@ class RequirementDomainService:
             timezone=input.timezone,
             current_requirement=input.current.requirement.model_copy(deep=True),
             intent=input.intent,
+            collection_version=input.current.schema_version,
         )
         extracted = await self._extract_with_one_repair(extraction_input)
         if isinstance(extracted, RequirementExtractionFailed):
@@ -189,8 +192,8 @@ class RequirementDomainService:
             )
 
         working = state.model_copy(deep=True)
-        missing = self._merger.detect_missing_fields(working.requirement)
-        unresolved = [*working.issues, *self._merger.detect_conflicts(working.requirement)]
+        missing = self._merger.detect_missing_fields(working.requirement, collection_version=working.schema_version)
+        unresolved = [*working.issues, *self._merger.detect_conflicts(working.requirement, collection_version=working.schema_version)]
         interest_error = interest_selection_error(working.requirement.preferences)
         if interest_error:
             unresolved.append(RequirementIssue(code=interest_error,
@@ -214,11 +217,11 @@ class RequirementDomainService:
         for metadata in working.metadata.metadata.values():
             if not metadata.issues:
                 metadata.status = FieldStatus.CONFIRMED
-        summary = render_confirmation_summary(working.requirement)
+        summary = render_confirmation_summary(working.requirement, collection_version=working.schema_version)
         return self._transition(
             working,
             ConfirmedTravelRequirement(
-                schema_version="1.0",
+                schema_version=working.schema_version,
                 requirement=working.requirement,
                 metadata_without_raw_evidence=working.metadata,
                 confirmation_summary_digest=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
@@ -231,6 +234,9 @@ class RequirementDomainService:
         submission: ManualTemplateSubmission,
     ) -> RequirementDomainTransition:
         try:
+            expected_version = "2" if state.schema_version == "1.1" else "1"
+            if submission.template_version != expected_version:
+                raise ManualTemplateParseError({"模板版本": f"本任务使用版本 {expected_version}"})
             patch = parse_manual_template(submission)
         except ManualTemplateParseError as exc:
             issues = tuple(
@@ -264,7 +270,7 @@ class RequirementDomainService:
     def _issues_after_merge(self, state, before, patch, result):
         touched = set(iter_patch_leaf_paths(patch)) | set(result.derived_fields) | set(result.changed_fields)
         prior_validation = {(issue.code, issue.field_path)
-            for issue in self._merger.detect_conflicts(before)}
+            for issue in self._merger.detect_conflicts(before, collection_version=state.schema_version)}
         previous = [*state.issues, *(issue for meta in state.metadata.metadata.values() for issue in meta.issues)]
         remaining = [issue for issue in previous
             if issue.field_path.value not in touched
@@ -272,7 +278,7 @@ class RequirementDomainService:
             and issue.code not in _HUB_ISSUE_CODES
             and issue.code != RequirementErrorCode.CONFIRMATION_NOT_READY.value
             and (issue.code, issue.field_path) not in prior_validation]
-        return _unique_issues([*remaining, *result.issues, *self._merger.detect_conflicts(state.requirement)])
+        return _unique_issues([*remaining, *result.issues, *self._merger.detect_conflicts(state.requirement, collection_version=state.schema_version)])
 
     @staticmethod
     def _metadata_paths(state, patch):
@@ -298,7 +304,7 @@ class RequirementDomainService:
         else:
             checked = self._validate_attempt(first, request)
             if isinstance(checked, EvidenceVerified):
-                return first.value, checked.evidence
+                return self._active_dto(first.value, request.collection_version), checked.evidence
             feedback = checked.feedback
 
         repaired = await session.repair(feedback)
@@ -311,7 +317,15 @@ class RequirementDomainService:
             return RequirementExtractionFailed(
                 code=self._feedback_error_code(checked.feedback)
             )
-        return repaired.value, checked.evidence
+        return self._active_dto(repaired.value, request.collection_version), checked.evidence
+
+    @staticmethod
+    def _active_dto(dto: StrictRequirementPatchDTO, collection_version: str) -> StrictRequirementPatchDTO:
+        # 停用字段不进入证据校验、领域合并或派生字段计算。
+        deferred = deferred_field_paths(collection_version)
+        updates = {attribute: None for attribute, path in ATTR_TO_PATH.items() if path in deferred}
+        updates["evidence"] = [item for item in dto.evidence if item.field_path.value not in deferred]
+        return dto.model_copy(update=updates)
 
     @staticmethod
     def _validate_attempt(
@@ -329,16 +343,7 @@ class RequirementDomainService:
                     field_paths=(),
                 )
             )
-        # Budget collection is deferred. Keep legacy DTO compatibility while
-        # applying the evidence contract only to fields active in this release.
-        active = attempt.value.model_copy(update={
-            "budget_total_cny": None,
-            "budget_is_approximate": None,
-            "evidence": [item for item in attempt.value.evidence if item.field_path not in {
-                RequirementFieldPath.BUDGET_TOTAL_CNY,
-                RequirementFieldPath.BUDGET_IS_APPROXIMATE,
-            }],
-        })
+        active = RequirementDomainService._active_dto(attempt.value, request.collection_version)
         return verify_evidence(active, request.user_message)
 
     @staticmethod
@@ -557,7 +562,7 @@ class RequirementDomainService:
         before: TravelRequirement,
         result: MergeResult,
     ) -> RequirementDomainTransition:
-        missing = self._merger.detect_missing_fields(state.requirement)
+        missing = self._merger.detect_missing_fields(state.requirement, collection_version=state.schema_version)
         interest_error = interest_selection_error(state.requirement.preferences)
         needs_interests = interest_error is not None
         if interest_error:
@@ -594,7 +599,7 @@ class RequirementDomainService:
                     before_digest=_digest_model(before),
                     after_digest=_digest_model(state.requirement),
                     reason="confirmed_requirement_changed",
-                    summary=render_confirmation_summary(state.requirement),
+                    summary=render_confirmation_summary(state.requirement, collection_version=state.schema_version),
                 ),
             )
 
@@ -604,7 +609,7 @@ class RequirementDomainService:
             NeedConfirmation(
                 requirement=state.requirement,
                 metadata=state.metadata,
-                summary=render_confirmation_summary(state.requirement),
+                summary=render_confirmation_summary(state.requirement, collection_version=state.schema_version),
             ),
         )
 

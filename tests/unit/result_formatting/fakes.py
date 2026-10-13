@@ -113,7 +113,7 @@ class Scenario:
     refs: dict[str, ArtifactRef]
 
 
-async def make_confirmed(days: int = 1, *, budget_total_cny: float | None = 10000.5):
+async def make_confirmed(days: int = 1, *, budget_total_cny: float | None = 10000.5, collection_version="1.0"):
     """Use real M01 confirmation; its digest deliberately has no prefix."""
     last = START_DATE + timedelta(days=days - 1)
     arrival = START_DATE - timedelta(days=1)
@@ -140,7 +140,12 @@ async def make_confirmed(days: int = 1, *, budget_total_cny: float | None = 1000
                         "daily_time_preferences": "晚一点出发", "free_text_notes": "带儿童同行",
                         "must_visit_places": [], "avoid_places": []},
     })
-    state = RequirementDomainState(requirement=requirement,
+    if collection_version == "1.1":
+        payload = tree(requirement)
+        payload.update(budget={}, party={}, rooms={}, constraints={}, inferred_scenarios=[])
+        payload["preferences"]["free_text_notes"] = "博物馆参观两小时"
+        requirement = parsed(TravelRequirement, payload)
+    state = RequirementDomainState(schema_version=collection_version, requirement=requirement,
                                    confirmation_status="awaiting_confirmation")
     service = RequirementDomainService(
         extractor=RecordingRequirementExtractor([]), evidence_sink=InMemoryEvidenceSink(),
@@ -183,6 +188,7 @@ async def make_scenario(
     budget_total_cny: float | None = 10000.5,
     transit_instructions: tuple[str, ...] | None = None,
     planning_version: str = "2.0",
+    collection_version: str = "1.0",
 ) -> Scenario:
     """Persist complete evidence; return request, itinerary, evidence and repository.
 
@@ -216,7 +222,7 @@ async def make_scenario(
         refs[key] = ref
         return ref
 
-    confirmation = await make_confirmed(days, budget_total_cny=budget_total_cny)
+    confirmation = await make_confirmed(days, budget_total_cny=budget_total_cny, collection_version=collection_version)
     confirmed = confirmation.outcome
     requirement_digest = digest(tree(confirmed))
     hotel_candidates = [{"schema_version": "1.0", "uid": f"hotel-{i}",

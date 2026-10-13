@@ -24,7 +24,7 @@ from app.requirement_extraction.events import (
     ExtractionInvocationEvent,
     ExtractionInvocationSink,
 )
-from app.requirement_extraction.prompt_loader import PROMPT_VERSION
+from app.requirement_extraction.prompt_loader import prompt_version_for
 from app.requirement_extraction.serialization import (
     serialize_extract_input,
     serialize_repair_input,
@@ -122,7 +122,7 @@ class DeepSeekRequirementExtractionSession:
             )
             event = ExtractionInvocationEvent(
                 turn_id=self._request.turn_id,
-                prompt_version=PROMPT_VERSION,
+                prompt_version=prompt_version_for(self._request.collection_version),
                 attempt_kind=attempt_kind,
                 outcome_kind="succeeded",
                 semantic_call_number=semantic_call_number,
@@ -146,7 +146,7 @@ class DeepSeekRequirementExtractionSession:
             )
             event = ExtractionInvocationEvent(
                 turn_id=self._request.turn_id,
-                prompt_version=PROMPT_VERSION,
+                prompt_version=prompt_version_for(self._request.collection_version),
                 attempt_kind=attempt_kind,
                 outcome_kind="repair_required",
                 semantic_call_number=semantic_call_number,
@@ -159,7 +159,7 @@ class DeepSeekRequirementExtractionSession:
 
         event = ExtractionInvocationEvent(
             turn_id=self._request.turn_id,
-            prompt_version=PROMPT_VERSION,
+            prompt_version=prompt_version_for(self._request.collection_version),
             attempt_kind=attempt_kind,
             outcome_kind="runtime_failure",
             semantic_call_number=semantic_call_number,

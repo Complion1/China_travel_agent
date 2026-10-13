@@ -30,6 +30,6 @@ class DeepSeekRequirementExtractor:
             request=request,
             operation=operation,
             sink=self._sink,
-            extract_prompt=load_extract_prompt(),
-            repair_prompt=load_repair_prompt(),
+            extract_prompt=load_extract_prompt(request.collection_version),
+            repair_prompt=load_repair_prompt(request.collection_version),
         )

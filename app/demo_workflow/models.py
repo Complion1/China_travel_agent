@@ -44,7 +44,7 @@ class DemoStartCommand(BaseModel):
     @model_validator(mode="after")
     def validate_turn(self):
         turn = fresh(self.turn, RequirementTurnInput)
-        if turn.intent is not RequirementIntent.INITIAL or turn.current != RequirementDomainState():
+        if turn.intent is not RequirementIntent.INITIAL or turn.current != RequirementDomainState(schema_version=turn.current.schema_version):
             raise ValueError("start requires initial requirements")
         object.__setattr__(self, "turn", turn)
         return self

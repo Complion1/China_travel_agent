@@ -2,7 +2,7 @@
 from app.demo_workflow import DemoControlArtifact
 from app.hotel_selection import HotelDiscoveryArtifact, HotelCandidatesReadyRecord
 from enum import Enum
-from app.requirements import NeedClarification, NeedConfirmation, RequirementInvalidated, RequirementFieldPath, FieldStatus
+from app.requirements import NeedClarification, NeedConfirmation, RequirementInvalidated, RequirementFieldPath, FieldStatus, deferred_field_paths
 from app.workflow_contracts import TravelSessionState, WorkflowPhase
 from .errors import WebApplicationDependencyError
 from .models import WebInteractionCard, WebHotelChoice, WebFact, WebClarificationOption, WebClarificationQuestion, fresh
@@ -50,7 +50,7 @@ def _field_value(requirement, path):
     return value
 
 
-def _clarification_details(outcome):
+def _clarification_details(outcome, *, collection_version="1.0"):
     requirement = outcome.requirement
     issue_fields = {issue.field_path.value for issue in outcome.issues}
     issue_fields.update(path.value for path, metadata in outcome.metadata.metadata.items()
@@ -61,6 +61,8 @@ def _clarification_details(outcome):
         issue_fields.add("preferences.pace")
     questions, recorded = [], []
     for field, label, kind, minimum, maximum in (*_REQUIRED_QUESTIONS, *_STYLE_QUESTIONS):
+        if field in deferred_field_paths(collection_version):
+            continue
         if requirement.destination and field in {"time_window.arrival.hub_name", "time_window.departure.hub_name"}:
             role = "到达" if field == "time_window.arrival.hub_name" else "离开"
             label = f"{role}{requirement.destination}的机场/车站"
@@ -86,10 +88,10 @@ def _clarification_details(outcome):
             if text:
                 recorded.append(WebFact(schema_version="1.0", label=f"目前记录：{label}", value=text))
     count = requirement.party.children_count
-    if count is not None and count > 0 and (not requirement.party.children_ages or "party.children_ages" in issue_fields):
+    if collection_version == "1.0" and count is not None and count > 0 and (not requirement.party.children_ages or "party.children_ages" in issue_fields):
         questions.append(WebClarificationQuestion(schema_version="1.0", field=RequirementFieldPath.CHILDREN_AGES,
             label="儿童年龄", kind="ages", minimum=0, maximum=17, item_count=count))
-    if "party.children_ages" in issue_fields and requirement.party.children_ages:
+    if collection_version == "1.0" and "party.children_ages" in issue_fields and requirement.party.children_ages:
         recorded.append(WebFact(schema_version="1.0", label="目前记录：儿童年龄",
             value="、".join(str(age) for age in requirement.party.children_ages)))
     return tuple(questions), tuple(recorded)
@@ -123,7 +125,7 @@ async def interaction_card(*, state, repository) -> WebInteractionCard:
     outcome = state.requirement_outcome
     if state.phase is WorkflowPhase.REQUIREMENTS:
         if type(outcome) is NeedClarification:
-            questions, recorded = _clarification_details(outcome)
+            questions, recorded = _clarification_details(outcome, collection_version=state.requirement_state.schema_version)
             return WebInteractionCard(schema_version="1.0", kind="clarification", title="补充旅行需求",
                 paragraphs=_paragraphs(outcome.message), facts=recorded, choices=(), questions=questions)
         if type(outcome) in {NeedConfirmation, RequirementInvalidated}:

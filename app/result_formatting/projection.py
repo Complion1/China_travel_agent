@@ -37,6 +37,7 @@ from .artifacts import (
     ResultTransfer, ResultTransitRoute, ResultVisit, fresh_model,
 )
 from .errors import ResultFormattingUsageError
+from .artifacts import ACTIVE_INPUTS_TEMPLATE_VERSION
 from .models import ResultFormattingFailureCode as Code, ResultFormattingRequest
 
 
@@ -83,8 +84,12 @@ def input_digest(request: ResultFormattingRequest) -> str:
                   "itinerary_ref": _json(request.itinerary_ref)}, normalize_zero=True)
 
 
+def template_version_for(request: ResultFormattingRequest) -> str:
+    return ACTIVE_INPUTS_TEMPLATE_VERSION if request.state.requirement_outcome.schema_version == "1.1" else "zh-guide-v1"
+
+
 def bundle_digest(request: ResultFormattingRequest, core: ResultCore, days: tuple[ResultDayData, ...]) -> str:
-    return _hash({"version": "result-bundle-v1", "template_version": "zh-guide-v1",
+    return _hash({"version": "result-bundle-v1", "template_version": template_version_for(request),
                   "input_digest": input_digest(request), "core": _json(core),
                   "days": [_json(day) for day in days]}, normalize_zero=True)
 
@@ -105,6 +110,12 @@ def require_ready(request: ResultFormattingRequest) -> None:
 def project_requirement(confirmed: ConfirmedTravelRequirement) -> ResultRequirement:
     requirement = confirmed.requirement
     window, party, preferences = requirement.time_window, requirement.party, requirement.preferences
+    legacy = confirmed.schema_version == "1.0"
+    if legacy:
+        _require(all(value is not None for value in (
+            party.adults_count, party.children_count, party.seniors_count,
+            party.total_people, requirement.rooms.room_count,
+        )), Code.INPUT_NOT_READY)
 
     def endpoint(value: Any) -> ResultEndpoint:
         _require(value.hub_type is not None, Code.INPUT_NOT_READY)
@@ -118,12 +129,14 @@ def project_requirement(confirmed: ConfirmedTravelRequirement) -> ResultRequirem
             sightseeing_end_date=date.fromisoformat(window.sightseeing_end_date), sightseeing_days=window.sightseeing_days,
             hotel_check_in_date=date.fromisoformat(window.hotel_check_in_date),
             hotel_check_out_date=date.fromisoformat(window.hotel_check_out_date), hotel_nights=window.hotel_nights,
-            adults_count=party.adults_count, children_count=party.children_count, children_ages=tuple(party.children_ages),
-            seniors_count=party.seniors_count, total_people=party.total_people, room_count=requirement.rooms.room_count,
-            budget_total_cny=requirement.budget.total_cny, budget_is_approximate=requirement.budget.is_approximate,
-            budget_scope=requirement.budget.scope, mobility_constraints=requirement.constraints.mobility_constraints,
-            dietary_restrictions=requirement.constraints.dietary_restrictions,
-            room_type_requirements=requirement.rooms.room_type_requirements, hotel_preferences=preferences.hotel_preferences,
+            adults_count=party.adults_count if legacy else None, children_count=party.children_count if legacy else None,
+            children_ages=tuple(party.children_ages) if legacy else (), seniors_count=party.seniors_count if legacy else None,
+            total_people=party.total_people if legacy else None, room_count=requirement.rooms.room_count if legacy else None,
+            budget_total_cny=requirement.budget.total_cny if legacy else None,
+            budget_is_approximate=requirement.budget.is_approximate if legacy else False,
+            budget_scope=requirement.budget.scope, mobility_constraints=requirement.constraints.mobility_constraints if legacy else None,
+            dietary_restrictions=requirement.constraints.dietary_restrictions if legacy else None,
+            room_type_requirements=requirement.rooms.room_type_requirements if legacy else None, hotel_preferences=preferences.hotel_preferences,
             transport_preferences=preferences.transport_preferences, daily_time_preferences=preferences.daily_time_preferences,
             free_text_notes=preferences.free_text_notes, must_visit_places=tuple(preferences.must_visit_places),
             avoid_places=tuple(preferences.avoid_places),

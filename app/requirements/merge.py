@@ -25,6 +25,7 @@ from app.requirements.normalization import (
     validate_rooms,
     validate_time_window,
 )
+from app.requirements.collection_policy import deferred_field_paths
 
 
 @dataclass(frozen=True)
@@ -300,7 +301,7 @@ class RequirementMerger:
         except ValueError:
             return None
 
-    def detect_missing_fields(self, req: TravelRequirement) -> list[str]:
+    def detect_missing_fields(self, req: TravelRequirement, *, collection_version="1.0") -> list[str]:
         missing: list[str] = []
         required_values = (
             ("destination", req.destination),
@@ -322,13 +323,15 @@ class RequirementMerger:
             ("constraints.dietary_restrictions", req.constraints.dietary_restrictions),
         )
         for path, value in required_values:
+            if path in deferred_field_paths(collection_version):
+                continue
             if value is None or isinstance(value, str) and not value.strip():
                 missing.append(path)
-        if (req.party.children_count or 0) > 0 and not req.party.children_ages:
+        if collection_version == "1.0" and (req.party.children_count or 0) > 0 and not req.party.children_ages:
             missing.append("party.children_ages")
         return missing
 
-    def detect_conflicts(self, req: TravelRequirement) -> list[RequirementIssue]:
+    def detect_conflicts(self, req: TravelRequirement, *, collection_version="1.0") -> list[RequirementIssue]:
         issues = [
             *validate_requirement_bounds(req),
             *validate_requirement_hubs(req),
@@ -336,7 +339,7 @@ class RequirementMerger:
             *validate_party(req.party.adults_count, req.party.children_count, req.party.children_ages, req.party.seniors_count),
             *validate_rooms(req.rooms.room_count, req.party.total_people or 0),
         ]
-        return issues
+        return [issue for issue in issues if issue.field_path.value not in deferred_field_paths(collection_version)]
 
     def detect_downstream_invalidation(
         self, before: TravelRequirement, after: TravelRequirement

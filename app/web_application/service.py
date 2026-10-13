@@ -314,7 +314,7 @@ class WebApplicationService:
                 raise DecisionError("service_closing")
             turn = RequirementTurnInput(schema_version="1.0", turn_id=turn_id, user_message=request.user_message,
                 session_date=utc(self._deps.clock.now()).astimezone(_SHANGHAI).date(), timezone="Asia/Shanghai",
-                intent=RequirementIntent.INITIAL, current=RequirementDomainState())
+                intent=RequirementIntent.INITIAL, current=RequirementDomainState(schema_version="1.1"))
             command = DemoStartCommand(schema_version="1.0", kind="start", turn=turn)
             self._deps.diagnostics.start_run(run_id=run_id, trace_id=trace_id)
             self._background(run_id=run_id, trace_id=trace_id, record=record,

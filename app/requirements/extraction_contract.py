@@ -177,6 +177,7 @@ class ExtractionInput(BaseModel):
     timezone: Literal["Asia/Shanghai"]
     current_requirement: TravelRequirement
     intent: RequirementIntent
+    collection_version: Literal["1.0", "1.1"] = "1.0"
 
 
 class RequirementExtractionSession(Protocol):

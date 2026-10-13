@@ -319,7 +319,7 @@
       const modeLabel=make("label",undefined,notesParent);modeLabel.className="check";
       manual=make("input",undefined,modeLabel);manual.type="checkbox";manual.id="clarify-manual-mode";
       make("span","用文字回答本轮问题",modeLabel);
-      make("p","特殊情况可在这里说明；选择文字回答后，请完整回答本轮需要补充的信息。",notesParent).className="muted";
+      make("p","可补充必去或避开的地点、酒店检索偏好，或修改旅行信息。选择文字回答后，请完整回答本轮问题。",notesParent).className="muted";
     }
     const label=make("label",questions.length?"补充说明":"回答本轮问题",notesParent);label.htmlFor="clarify-input";
     const notes=make("textarea",undefined,notesParent);notes.id="clarify-input";notes.maxLength=16000;notes.rows=4;notes.required=!questions.length;
@@ -361,9 +361,8 @@
     }else if(c.kind==="confirmation"){
       const label=make("label","希望修改的内容（选择修改时填写）",form);label.htmlFor="revision-input";
       const input=make("textarea",undefined,form);input.id="revision-input";input.maxLength=8000;
-      const mapLabel=make("label",undefined,form);const map=make("input",undefined,mapLabel);map.type="checkbox";map.id="map-requested";make("span","希望提供地图链接（信息足够时）",mapLabel);
       const actions=make("div",undefined,form);actions.className="form-actions";
-      const accept=make("button","确认需求",actions);accept.type="button";accept.addEventListener("click",()=>send("confirm",{pause_generation:view.run.pause_generation,decision:"accept",revision_text:null,map_requested:map.checked},view.run.run_id));
+      const accept=make("button","确认需求",actions);accept.type="button";accept.addEventListener("click",()=>send("confirm",{pause_generation:view.run.pause_generation,decision:"accept",revision_text:null,map_requested:false},view.run.run_id));
       const revise=make("button","修改需求",actions);revise.type="button";revise.className="secondary";revise.addEventListener("click",()=>{if(!input.value.trim()){message("请填写修改内容。");return;}send("confirm",{pause_generation:view.run.pause_generation,decision:"revise",revision_text:input.value,map_requested:false},view.run.run_id);});
     }else{
       const options=make("div",undefined,form);options.className="hotel-options";

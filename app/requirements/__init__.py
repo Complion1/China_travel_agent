@@ -52,11 +52,14 @@ from app.requirements.models import (
     VerifiedFieldEvidence,
 )
 from app.requirements.service import RequirementDomainService
+from app.requirements.collection_policy import ACTIVE_COLLECTION_VERSION, deferred_field_paths
 from app.requirements.normalization import validate_requirement_hubs
 
 from .interest_policy import interest_selection_error, pace_selection_error
 
 __all__ = [
+    "ACTIVE_COLLECTION_VERSION",
+    "deferred_field_paths",
     "interest_selection_error",
     "pace_selection_error",
     "Clock",

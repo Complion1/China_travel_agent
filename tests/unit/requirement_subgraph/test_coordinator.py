@@ -85,7 +85,7 @@ def _coordinator(
 
 
 def _waiting_state(initial, message: str = "请补充"):
-    domain_state = RequirementDomainState()
+    domain_state = RequirementDomainState(schema_version=initial.requirement_state.schema_version)
     transition = RequirementDomainTransition(
         state=domain_state,
         outcome=NeedClarification(
@@ -280,6 +280,21 @@ async def test_start_admits_once_emits_after_commit_and_resolves_once():
     assert [signal.signal_type for signal in sink.calls] == ["start_accepted"]
     assert coordinator._records[initial.run_id].status == "paused"
     assert coordinator._records[initial.run_id].latest_state == waiting
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["1.0", "1.1"])
+async def test_start_and_pause_keep_new_and_legacy_collection_versions(version):
+    from app.requirement_subgraph import RequirementCheckpointSerializer
+    coordinator, _, _ = _coordinator()
+    initial = make_initial_state().model_copy(update={"requirement_state": RequirementDomainState(schema_version=version)})
+    waiting, result = await _start_and_pause(coordinator, initial)
+    assert result.result_type == "paused"
+    assert waiting.requirement_state.schema_version == version
+    serializer = RequirementCheckpointSerializer()
+    encoded = serializer.dumps_typed(waiting)
+    restored = serializer.loads_typed(encoded)
+    assert restored == waiting and serializer.dumps_typed(restored) == encoded
 
 
 @pytest.mark.asyncio

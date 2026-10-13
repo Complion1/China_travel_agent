@@ -167,7 +167,7 @@ def test_parser_supports_agent_decides_flags():
 def test_parser_accumulates_version_duplicate_missing_order_unknown_and_trailing_errors():
     lines = serialize_manual_template(full_requirement()).content.splitlines()
     broken_lines = [
-        "模板版本：2",
+        "模板版本：3",
         lines[2],
         lines[1],
         lines[1],
@@ -176,7 +176,7 @@ def test_parser_accumulates_version_duplicate_missing_order_unknown_and_trailing
         "额外尾随文本",
     ]
     submission = ManualTemplateSubmission(
-        template_version="2",
+        template_version="3",
         content="\n".join(broken_lines),
     )
 
