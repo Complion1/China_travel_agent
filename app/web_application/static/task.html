@@ -4,8 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>旅行规划 · 我的任务</title>
-  <link rel="stylesheet" href="/static/site.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/site.css?v=m24-3">
+  <script src="/static/ui.js?v=m24-3" defer></script>
+  <script src="/static/guide.js?v=m24-3" defer></script>
+  <script src="/static/process.js?v=m24-3" defer></script>
+  <script src="/static/app.js?v=m24-3" defer></script>
 </head>
 <body data-page="task">
 <header class="site-header">
@@ -13,9 +16,12 @@
   <nav aria-label="主导航"><a href="/">开始规划</a><a href="/samples">完整样例</a><a href="/history" aria-current="page">我的任务</a></nav>
 </header>
 <main>
-  <div class="task-heading"><div><p class="eyebrow">你的旅行，正在成形</p><h1 id="task-title">旅行规划任务</h1><p id="task-status" role="status">正在读取真实任务状态…</p></div><a class="secondary button" href="/">新建任务</a></div>
+  <div class="task-heading"><div><p class="eyebrow">旅行工作区</p><h1 id="task-title">旅行规划任务</h1><p id="task-dates" class="muted" hidden></p><p id="task-status" role="status">正在读取真实任务状态…</p></div><div class="actions"><button id="refresh-task" class="secondary" type="button">重新读取状态</button><a class="secondary button" href="/">新建任务</a></div></div>
   <p id="message" aria-live="polite"></p>
   <button id="query-request" class="secondary" hidden>查询原请求</button>
+  <details id="process-overview" class="process-overview" open>
+  <summary>规划过程 <span id="process-summary-status" class="muted">正在读取</span></summary>
+  <div class="process-layout">
   <section id="workflow" aria-label="旅行规划流程" hidden>
     <div id="workflow-canvas" class="workflow-canvas">
       <svg id="workflow-edges" aria-hidden="true" focusable="false">
@@ -61,6 +67,15 @@
     </div>
     <div class="phase-detail"><div class="phase-detail-heading"><h2 id="phase-title"></h2><span id="phase-badge" class="phase-badge"></span></div><p id="phase-description"></p><p id="phase-next" class="muted"></p></div>
   </section>
+  <aside id="process-details" class="process-details" aria-labelledby="detail-title" hidden>
+    <div class="detail-heading"><h2 id="detail-title">阶段详情</h2><button id="close-details" class="secondary" type="button">关闭详情</button></div>
+    <p id="progress-state" role="status">仅展示已保存的业务处理记录。</p>
+    <button id="reload-progress" class="secondary" type="button">重新读取</button>
+    <p id="progress-empty">尚无已保存的处理记录。</p>
+    <div id="public-record-list"></div>
+  </aside>
+  </div>
+  </details>
   <section id="input-issues" class="panel input-issues" aria-live="polite" hidden></section>
   <section id="interaction" class="panel interaction-panel"></section>
   <div id="controls"></div>

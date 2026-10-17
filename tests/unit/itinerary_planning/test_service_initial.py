@@ -149,7 +149,7 @@ UTC_NOW = datetime(2026, 9, 3, tzinfo=timezone.utc)
 
 def _ref(run_id: UUID, artifact_type: str, phase: WorkflowPhase, step: str, content: str = "d") -> ArtifactRef:
     return ArtifactRef(
-        artifact_id=uuid4(), artifact_type=artifact_type, schema_version="3.0" if artifact_type == "itinerary_planning.itinerary" else "1.0",
+        artifact_id=uuid4(), artifact_type=artifact_type, schema_version="6.0" if artifact_type == "itinerary_planning.itinerary" else "1.0",
         content_hash="sha256:" + content * 64,
         operation_id=OperationId(run_id=run_id, phase=phase, logical_step=step.replace("-", "_")),
         created_at=UTC_NOW, size_bytes=1,
@@ -1296,7 +1296,7 @@ _R05_BOUNDARY_CASES = {
     "boundary_departure_touching": ("2026-09-02 08:00", "2026-09-02 08:30", "2026-09-03 20:30", "2026-09-03 19:00", True),
     "boundary_same_day_valid": ("2026-09-03 08:30", "2026-09-03 09:00", "2026-09-03 20:30", "2026-09-03 19:00", True),
     "boundary_same_day_overlap": ("2026-09-03 09:00", "2026-09-03 09:30", "2026-09-03 20:00", "2026-09-03 18:30", False),
-    "boundary_midnight_arrival": ("2026-09-02 23:00", "2026-09-02 23:30", "2026-09-04 20:00", "2026-09-04 18:30", True),
+    "boundary_midnight_arrival": ("2026-09-02 23:00", "2026-09-02 23:55", "2026-09-04 20:00", "2026-09-04 18:30", True),
     "boundary_midnight_departure": ("2026-09-02 08:00", "2026-09-02 08:30", "2026-09-04 01:00", "2026-09-03 23:30", True),
 }
 
@@ -1360,7 +1360,7 @@ _R16_POLICY_CASES = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ("supported", "patch_boundary_repair", "patch_revalidates", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
+@pytest.mark.parametrize("case", ("supported", "minute_schedule", "minute_conflict_repair", "minute_conflicts_repair", "patch_boundary_repair", "patch_revalidates", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
 async def test_service_completed_requires_main_plan_and_valid_optional_backups(case: str) -> None:
     service, request, _, operation, repository = _fixture()
     if case == "must_valid":
@@ -1658,7 +1658,9 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         visit_intents=__import__("tests.support.itinerary_planning_fakes", fromlist=["query_intents"]).query_intents(date(2026,9,3), tuple(f"candidate-handle-{i:04d}" for i in range(3)))))
 
     def route(leg_id: str, origin: str, destination: str, directions_handle: str, start_at: datetime, end_at: datetime) -> ProposedRouteLeg:
-        return ProposedRouteLeg(leg_id=leg_id, origin_handle=origin, destination_handle=destination, start_at=start_at, end_at=end_at, transport_semantic=TransportSemantic.WALKING, route_mode=TravelMode.WALKING, directions_handle=directions_handle, alternative_index=0)
+        return ProposedRouteLeg(leg_id=leg_id, origin_handle=origin, destination_handle=destination, start_at=start_at,
+            end_at=start_at + timedelta(minutes=10), transport_semantic=TransportSemantic.WALKING,
+            route_mode=TravelMode.WALKING, directions_handle=directions_handle, alternative_index=0)
 
     times = (
         ("e2e-arrival", "hub-location-arrival", "hotel-handle", datetime(2026, 9, 2, 8, 30, tzinfo=shanghai), datetime(2026, 9, 2, 9, tzinfo=shanghai)),
@@ -1698,17 +1700,17 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
     if case in _R05_BOUNDARY_CASES:
         for index, value in ((0, _R05_BOUNDARY_CASES[case][1]), (5, _R05_BOUNDARY_CASES[case][3])):
             start_at = datetime.fromisoformat(value).replace(tzinfo=shanghai)
-            route_values[index] = route_values[index].model_copy(update={"start_at": start_at, "end_at": start_at + timedelta(minutes=30)})
+            route_values[index] = route_values[index].model_copy(update={"start_at": start_at, "end_at": start_at + timedelta(minutes=10)})
     if case in {"unapproved_early_window", "r12_fake_user_anchor", "r12_fake_verified_anchor"}:
         visits = (visits[0].model_copy(update={"start_at": datetime(2026, 9, 3, 5, 30, tzinfo=shanghai), "end_at": datetime(2026, 9, 3, 6, 30, tzinfo=shanghai)}), *visits[1:])
         route_values[1] = route_values[1].model_copy(update={"start_at": datetime(2026, 9, 3, 5, tzinfo=shanghai), "end_at": datetime(2026, 9, 3, 5, 30, tzinfo=shanghai)})
     if case == "expanded_default_window":
         route_values[1] = route_values[1].model_copy(update={
             "start_at": datetime(2026, 9, 3, 7, 30, tzinfo=shanghai),
-            "end_at": datetime(2026, 9, 3, 8, 0, tzinfo=shanghai),
+            "end_at": datetime(2026, 9, 3, 7, 40, tzinfo=shanghai),
         })
         route_values[4] = route_values[4].model_copy(update={
-            "start_at": datetime(2026, 9, 3, 21, 30, tzinfo=shanghai),
+            "start_at": datetime(2026, 9, 3, 21, 50, tzinfo=shanghai),
             "end_at": datetime(2026, 9, 3, 22, 0, tzinfo=shanghai),
         })
     if case in _R07_MEAL_CASES:
@@ -1754,6 +1756,22 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             "days": tuple(day.model_copy(update={"route_legs": tuple(derived(leg) for leg in day.route_legs)}) for day in proposal.days),
         })
     submit = SubmitItineraryArgs(effective_policy=ProposedEffectivePlanningPolicy(effective_pace=TravelPace.RELAXED, daily_time_rules=(), time_sensitive_must=(), transport_rules=()), draft=proposal)
+    if case in {"minute_schedule", "minute_conflict_repair", "minute_conflicts_repair"}:
+        ranges = ((10, 7, 75), (11, 37, 65), (17, 43, 65))
+        new_visits = tuple(visit.model_copy(update={
+            "start_at": datetime(2026, 9, 3, hour, minute, tzinfo=shanghai),
+            "end_at": datetime(2026, 9, 3, hour, minute, tzinfo=shanghai) + timedelta(minutes=duration),
+        }) for visit, (hour, minute, duration) in zip(proposal.days[0].visits, ranges, strict=True))
+        starts = ((2, 8, 31), (3, 9, 53), (3, 11, 23), (3, 13, 3), (3, 18, 49), (4, 18, 37))
+        new_routes = tuple(value.model_copy(update={
+            "start_at": datetime(2026, 9, day, hour, minute, tzinfo=shanghai), "end_at": None,
+        }) for value, (day, hour, minute) in zip(route_values, starts, strict=True))
+        proposal = proposal.model_copy(update={
+            "arrival_transfer": proposal.arrival_transfer.model_copy(update={"route_leg": new_routes[0]}),
+            "departure_transfer": proposal.departure_transfer.model_copy(update={"route_leg": new_routes[-1]}),
+            "days": (proposal.days[0].model_copy(update={"visits": new_visits, "route_legs": new_routes[1:-1]}),),
+        })
+        submit = submit.model_copy(update={"draft": proposal})
     if case in _R12_ANCHOR_CASES:
         source, source_handle, _, anchor_hour, anchor_minute = _R12_ANCHOR_CASES[case]
         anchor = ProposedTimeSensitiveMustAnchor(
@@ -1912,6 +1930,23 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
             "days": (proposal.days[0].model_copy(update={"backups": proposal.days[0].backups[1:2]}),),
         })})
     submit_responses = [ToolCallsReady(calls=(ValidatedToolCall(call_id="e2e_submit", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=submit),), metadata=_metadata())]
+    if case in {"minute_conflict_repair", "minute_conflicts_repair"}:
+        original_day = proposal.days[0]
+        first_visit = original_day.visits[0].model_copy(update={
+            "start_at": datetime(2026, 9, 3, 10, 0, tzinfo=shanghai),
+            "end_at": datetime(2026, 9, 3, 11, 15, tzinfo=shanghai),
+        })
+        bad_day = original_day.model_copy(update={"visits": (first_visit, *original_day.visits[1:])})
+        bad = submit.model_copy(update={"draft": proposal.model_copy(update={"days": (bad_day,)})})
+        if case == "minute_conflicts_repair":
+            arrival = proposal.arrival_transfer.model_copy(update={"route_leg": proposal.arrival_transfer.route_leg.model_copy(
+                update={"start_at": datetime(2026, 9, 2, 8, 29, tzinfo=shanghai)})})
+            departure = proposal.departure_transfer.model_copy(update={"route_leg": proposal.departure_transfer.route_leg.model_copy(
+                update={"start_at": datetime(2026, 9, 4, 19, 50, tzinfo=shanghai)})})
+            bad = bad.model_copy(update={"draft": bad.draft.model_copy(update={
+                "arrival_transfer": arrival, "departure_transfer": departure})})
+        submit_responses.insert(0, ToolCallsReady(calls=(ValidatedToolCall(call_id="minute-conflict", tool_name="submit_itinerary",
+            arguments=bad),), metadata=_metadata()))
     if case.startswith("backup_slots_"):
         original_backups = proposal.days[0].backups
         bad_backups = {
@@ -2644,7 +2679,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         assert result.budgets.direction_calls_consumed == 6
         return
 
-    if case not in {"supported", "patch_boundary_repair", "patch_revalidates", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "must_valid"}:
+    if case not in {"supported", "minute_schedule", "minute_conflict_repair", "minute_conflicts_repair", "patch_boundary_repair", "patch_revalidates", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "must_valid"}:
         assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
         assert replay == result
         if case == "meal_intent_mismatch_feedback":
@@ -2675,6 +2710,25 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
     assert result.summary.transit_only_days == 0
     assert result.summary.lunch_count == 1 and result.summary.dinner_count == 1
     assert result.summary.backups == 3
+    if case in {"minute_schedule", "minute_conflict_repair", "minute_conflicts_repair"}:
+        stored = (await repository.get(result.itinerary_ref, expected_model=__import__("app.itinerary_planning", fromlist=["ItineraryPlanningArtifact"]).ItineraryPlanningArtifact)).content
+        assert stored.schema_version == "6.0"
+        assert stored.record.draft.days[0].visits[0].interval.start_at_utc.astimezone(shanghai).minute == 7
+        assert stored.record.draft.days[0].route_legs[0].scheduled_minutes == 10
+        assert result.budgets.format_repair_used == 0
+        assert result.budgets.model_invocations_consumed == (5 if case in {"minute_conflict_repair", "minute_conflicts_repair"} else 4)
+        if case in {"minute_conflict_repair", "minute_conflicts_repair"}:
+            feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+            assert feedback["reason"] == "route_visit_overlap"
+            issue = feedback["issues"][0]
+            assert issue["field"] == "draft.days[0].visits[0].start_at"
+            assert issue["actual"] == "2026-09-03T10:00:00+08:00"
+            assert issue["expected"] == {"not_before": "2026-09-03T10:03:00+08:00"}
+            if case == "minute_conflicts_repair":
+                assert {issue["rule"] for issue in feedback["issues"]} == {
+                    "route_visit_overlap", "arrival_processing_overlap", "departure_processing_overlap"}
+                assert len(feedback["issues"]) == 3
+                assert result.budgets.direction_calls_consumed == len(service._map_adapter.directions_calls) == 6
     if case in {"patch_boundary_repair", "patch_revalidates"}:
         assert result.budgets.model_invocations_consumed == operation.call_count == (6 if case == "patch_revalidates" else 5)
         assert result.budgets.direction_calls_consumed == len(service._map_adapter.directions_calls) == 6

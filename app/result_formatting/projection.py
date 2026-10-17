@@ -169,7 +169,7 @@ _READ_TYPES = {
     CandidateResearchModelActionArtifact: ("candidate_research.model_action", "candidate_research", ("1.0", "2.0")),
     CandidateResearchModelJudgmentArtifact: ("candidate_research.model_judgment", "candidate_research", "3.0"),
     CandidateResearchLegacyModelJudgmentArtifact: ("candidate_research.model_judgment", "candidate_research", ("1.0", "2.0")),
-    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", ("5.0", "6.0", "7.0")),
+    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", ("5.0", "6.0", "7.0", "8.0", "9.0")),
     ItineraryPlanningHubGeocodeObservationArtifact: ("itinerary_planning.hub_geocode_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningDirectionsObservationArtifact: ("itinerary_planning.directions_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningRouteMatrixObservationArtifact: ("itinerary_planning.route_matrix_observation", "itinerary_planning", "1.0"),

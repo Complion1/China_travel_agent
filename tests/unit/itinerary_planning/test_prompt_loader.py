@@ -15,11 +15,13 @@ from app.itinerary_planning.prompt_loader import (
 def test_previous_prompt_remains_immutable():
     previous = resources.files("app.itinerary_planning.prompts").joinpath("planning_v3.txt").read_bytes()
     assert hashlib.sha256(previous).hexdigest() == "cc9d5816a91fde13eeaea17d6925ffa5ea7794ba6041956913ce45f08f187934"
+    minute_prompt = resources.files("app.itinerary_planning.prompts").joinpath("planning_v8.txt").read_bytes()
+    assert hashlib.sha256(minute_prompt).hexdigest() == "4d3526665d1831cc06b14164bb8fcc1a166d04ac10e823077f24a509c7382f16"
 
 
 def test_planning_prompt_is_packaged_utf8_and_hash_locked() -> None:
     resource = load_planning_prompt()
-    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v7"
+    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v9"
     assert resource.sha256 == PLANNING_PROMPT_SHA256
     assert "普通日开放区间固定为当日 07:30–22:00" in resource.text
     assert "backup_distance_exceeded" in resource.text
@@ -32,6 +34,8 @@ def test_planning_prompt_is_packaged_utf8_and_hash_locked() -> None:
     assert "get_candidate_evidence" in resource.text
     assert "request_candidate_supplement" in resource.text
     assert "leg_id 必须原样复用该 directions_handle 所属 Observation 返回的 leg_id" in resource.text
+    assert "43分钟预留50分钟" in resource.text
+    assert "活动及路线出发时刻仍可使用任意整数分钟" in resource.text
 
 
 def test_prompt_does_not_contain_external_or_sensitive_instructions() -> None:

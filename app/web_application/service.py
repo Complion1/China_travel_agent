@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,13 +28,14 @@ from app.requirement_subgraph import RequirementClarificationResume, Requirement
 from app.hotel_selection import HotelSelectCommand, HotelDeclineCommand
 from app.result_formatting import (ResultFormattingService, ResultReadRequest, ResultFormattingLoaded)
 from app.workflow_contracts import UtcClock, TravelSessionState, DeliveryStatus
+from app.frontend_experience import PublicProgressRecorder, PublicProgressPage
 
 from .errors import (WebApplicationUsageError, WebApplicationDependencyError,
     WebApplicationError)
 from .models import (WebVisitorContext, WebSessionView, WebAdmissionView, WebStartRequest,
     WebClarifyRequest, WebConfirmRequest, WebHotelRequest, WebControlRequest,
     WebCommandReceipt, WebRunView, WebHistoryPage, WebResultView, WebResultDay,
-    WebSummaryView, WebSamplesView, WebInputIssue, fresh, utc)
+    WebSummaryView, WebSamplesView, WebInputIssue, WebDayReading, fresh, utc)
 from .settings import WebApplicationSettings
 from .security import ip_hash
 from .store import WebMetadataStore, DecisionError, RequestRecord
@@ -119,6 +120,7 @@ class WebApplicationDependencies:
     store: WebMetadataStore
     clock: UtcClock
     disk_probe: Callable[[], int]
+    progress: PublicProgressRecorder | None = None
 
 
 class WebApplicationService:
@@ -353,10 +355,60 @@ class WebApplicationService:
         raise DecisionError("admission_unconfirmed")
 
     async def _start_job(self, *, record, trace_id, turn_id, command):
-        with self._deps.diagnostics.operation(run_id=record.run_id, trace_id=trace_id, kind="initial", turn_id=turn_id):
+        with self._progress_operation(record.run_id, trace_id), self._deps.diagnostics.operation(run_id=record.run_id, trace_id=trace_id, kind="initial", turn_id=turn_id):
             with self._deps.extraction_sink.bind(run_id=record.run_id, trace_id=trace_id, kind="initial",
                     expected_turn_id=turn_id, allow_internal_turn=False):
                 return await self._deps.durable.start(run_id=record.run_id, trace_id=trace_id, command=command)
+
+    def _progress_operation(self, run_id, trace_id):
+        progress = self._deps.progress
+        return nullcontext() if progress is None else progress.operation(run_id=run_id, trace_id=trace_id,
+            valid=lambda: self._slot_run == run_id and self._slot_trace == trace_id
+                and self._slot_task is not None and not self._slot_task.done())
+
+    async def _save_public_requirement(self, view):
+        progress = self._deps.progress
+        if progress is None or not self._execution_stopped(view.run_id):
+            return
+        terminal = view.lifecycle == "closed" and view.activity == "terminal"
+        if not terminal and not (view.lifecycle == "open" and view.activity == "awaiting_user" and not view.cancel_requested):
+            return
+        def same(current):
+            return (current.run_id, current.trace_id, current.lifecycle, current.activity,
+                current.pause_generation, current.delivery_status, current.terminal_code, current.cancel_requested) == (
+                view.run_id, view.trace_id, view.lifecycle, view.activity, view.pause_generation,
+                view.delivery_status, view.terminal_code, view.cancel_requested)
+        try:
+            state = fresh(await self._deps.durable.get_state(run_id=view.run_id), TravelSessionState)
+            current = fresh(await self._deps.durable.get_run(run_id=view.run_id), DurableRunView)
+            if not self._execution_stopped(view.run_id) or not same(current) or (state.run_id, state.trace_id) != (view.run_id, view.trace_id):
+                return
+            if terminal and (state.terminal_code != view.terminal_code or state.delivery_status != view.delivery_status):
+                return
+            with progress.operation(run_id=view.run_id, trace_id=view.trace_id,
+                    valid=lambda: self._execution_stopped(view.run_id)):
+                delivery = view.delivery_status.value
+                await progress.record_requirement(state=state,
+                    confirmed=type(state.requirement_outcome) is ConfirmedTravelRequirement,
+                    event_key=f"requirement:{view.pause_generation or 0}:{delivery}:{view.terminal_code or 'pending'}")
+        except (DurableExecutionRunBusyError, DurableExecutionCancellationPendingError):
+            return
+        except Exception:
+            # Optional display records cannot affect terminal cleanup or a new pause.
+            try:
+                async with asyncio.timeout(0.04):
+                    await progress.store.mark_limited(run_id=view.run_id, trace_id=view.trace_id)
+            except Exception:
+                pass
+        if terminal:
+            try:
+                current = fresh(await self._deps.durable.get_run(run_id=view.run_id), DurableRunView)
+                if self._execution_stopped(view.run_id) and same(current):
+                    with progress.operation(run_id=view.run_id, trace_id=view.trace_id,
+                            valid=lambda: self._execution_stopped(view.run_id)):
+                        await progress.settle(run_id=view.run_id, trace_id=view.trace_id)
+            except Exception:
+                pass
 
     async def _owned_view(self, *, owner, run_id):
         await self._deps.store.owns(owner=owner, run_id=run_id)
@@ -386,6 +438,7 @@ class WebApplicationService:
             # owner's verified shutdown and stop admitting more executions.
             self._closing = True
             raise WebApplicationDependencyError() from None
+        await self._save_public_requirement(view)
         if view.lifecycle == "closed" and view.activity == "terminal":
             await self._summaries.begin(view=view, execution_stopped=self._execution_stopped(view.run_id))
         elif view.lifecycle == "blocked" or view.activity in {"blocked", "incompatible"}:
@@ -479,7 +532,7 @@ class WebApplicationService:
     async def _control_job(self, *, record, trace_id, operation, command=None, token=None, turn_id=None, internal=False):
         try:
             await self._deps.store.mark_request(record=record, status="dispatched")
-            with self._deps.diagnostics.operation(run_id=record.run_id, trace_id=trace_id, kind=operation, turn_id=turn_id):
+            with self._progress_operation(record.run_id, trace_id), self._deps.diagnostics.operation(run_id=record.run_id, trace_id=trace_id, kind=operation, turn_id=turn_id):
                 with self._deps.extraction_sink.bind(run_id=record.run_id, trace_id=trace_id, kind=operation,
                         expected_turn_id=turn_id, allow_internal_turn=internal):
                     if operation == "recover":
@@ -664,8 +717,16 @@ class WebApplicationService:
                 and view.phase is None and self._slot_run == view.run_id and self._slot_trace == view.trace_id
                 and self._slot_task is not None and not self._slot_task.done()):
             progress = self._deps.diagnostics.get_active_phase(run_id=view.run_id, trace_id=view.trace_id)
+        trip = None
+        if self._deps.progress is not None:
+            try:
+                async with asyncio.timeout(0.20):
+                    trip = await self._deps.progress.store.trip(run_id=view.run_id, trace_id=view.trace_id)
+            except Exception:
+                # Optional titles cannot change the task's status or available actions.
+                pass
         return WebRunView(schema_version="1.0", run=view, card=card, actions=tuple(actions),
-            result_available=available, summary_status=status, input_issues=input_issues, progress_phase=progress)
+            result_available=available, summary_status=status, input_issues=input_issues, progress_phase=progress, trip=trip)
 
     async def _input_issues(self, view):
         if not (view.lifecycle == "closed" and view.activity == "terminal"
@@ -690,6 +751,18 @@ class WebApplicationService:
         self._check()
         view = await self._owned_view(owner=owner, run_id=run_id)
         return await self._project(view=view, details=not self._snapshots.get())
+
+    async def read_progress(self, *, owner: WebVisitorContext, run_id: UUID, after: int = 0) -> PublicProgressPage:
+        self._check()
+        view = await self._owned_view(owner=owner, run_id=run_id)
+        if type(after) is not int or not 0 <= after <= 512:
+            raise DecisionError("invalid_request")
+        if self._deps.progress is None:
+            return PublicProgressPage(run_id=run_id, items=(), latest_sequence=0, coverage="unavailable")
+        try:
+            return await self._deps.progress.store.read(run_id=run_id, trace_id=view.trace_id, after=after)
+        except Exception:
+            raise WebApplicationDependencyError() from None
 
     async def list_runs(self, *, owner: WebVisitorContext, cursor: str | None = None) -> WebHistoryPage:
         self._check()
@@ -722,7 +795,10 @@ class WebApplicationService:
                 raise ValueError()
             loaded = fresh(loaded, ResultFormattingLoaded)
             return WebResultView(schema_version="1.0", result_schema_version="2.0", markdown=loaded.markdown,
-                days=tuple(WebResultDay(schema_version="1.0", ordinal=day.data.day_no, markdown=day.markdown) for day in loaded.days),
+                days=tuple(WebResultDay(schema_version="1.0", ordinal=day.data.day_no, markdown=day.markdown,
+                    reading=WebDayReading(date=day.data.date, theme=day.data.theme, visit_count=len(day.data.visits),
+                        route_count=len(day.data.route_legs),
+                        transport_minutes=sum(route.scheduled_minutes for route in day.data.route_legs))) for day in loaded.days),
                 delivery_status=state.delivery_status, terminal_code=state.terminal_code)
         except Exception:
             raise WebApplicationDependencyError() from None

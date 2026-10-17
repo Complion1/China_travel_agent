@@ -31,6 +31,8 @@ from app.durable_execution import (create_durable_execution_runtime,
     load_durable_execution_settings, DEMO_DURABLE_EXECUTION_LIMITS)
 from app.workflow_contracts import (ArtifactSchemaRegistry, ArtifactRepositoryLimits,
     SystemUtcClock, SystemMonotonicClock, RandomUUIDFactory, NoOpSafeWorkflowEventSink)
+from app.frontend_experience import (PublicProgressStore, PublicProgressRecorder,
+    ObservedArtifactRepository, verify_progress_schema)
 
 from .errors import WebApplicationConfigurationError, WebApplicationDependencyError
 from .models import fresh, utc
@@ -200,14 +202,19 @@ async def production_service(*, settings: WebApplicationSettings, environ=None):
         if await result.fetchone() != (True,):
             raise WebApplicationConfigurationError()
         await verify_schema(connection)
+        await verify_progress_schema(connection)
         store = WebMetadataStore(settings=settings, pool=pool, key=key, clock=clock)
         store._set_guard(guard)
         limits = ArtifactRepositoryLimits(max_artifact_bytes=1048576, max_artifacts=settings.artifact_max_count,
             max_total_content_bytes=settings.artifact_max_total_bytes)
-        registry = ArtifactSchemaRegistry(HOTEL_ARTIFACT_REGISTRATIONS + CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS +
+        registrations = (HOTEL_ARTIFACT_REGISTRATIONS + CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS +
             ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS + RESULT_FORMATTING_ARTIFACT_REGISTRATIONS + DEMO_ARTIFACT_REGISTRATIONS)
+        registry = ArtifactSchemaRegistry(registrations)
         artifacts = await create_artifact_persistence_runtime(settings=pg, registry=registry, limits=limits,
             interaction_limits=DEMO_INTERACTION_STORE_LIMITS, interaction_fallback_dir=None)
+        progress = PublicProgressRecorder(store=PublicProgressStore(pool=pool, clock=clock),
+            registrations=registrations, secrets=(pg.password.get_secret_value(),
+                model_settings.api_key.get_secret_value(), map_settings.api_key.get_secret_value()))
         model = DeepSeekRuntime(provider=LangChainDeepSeekAdapter(model_settings), sleeper=_Sleeper())
         maps = await map_stack.enter_async_context(create_baidu_map_runtime(settings=map_settings, clock=clock))
         adapter = _GuardedMapAdapter(maps.adapter, signal_fault)
@@ -227,7 +234,8 @@ async def production_service(*, settings: WebApplicationSettings, environ=None):
             planning_factory=lambda cap: ItineraryPlanningService(runtime=model, map_adapter=adapter,
                 artifact_repository=cap.artifact_repository, budget_manager=cap.execution_budget_manager)))
         durable = await create_durable_execution_runtime(settings=durable_settings,
-            artifact_repository=artifacts.repository, contract=definition.contract, command_codec=definition.command_codec,
+            artifact_repository=ObservedArtifactRepository(repository=artifacts.repository, recorder=progress),
+            contract=definition.contract, command_codec=definition.command_codec,
             budget_plan_provider=definition.budget_plan_provider, graph_factory=definition.graph_factory,
             limits=definition.durable_limits, pause_credential_sink=EncryptedPauseCredentialSink(store=store),
             cancellation_state_factory=definition.cancellation_state_factory)
@@ -237,7 +245,7 @@ async def production_service(*, settings: WebApplicationSettings, environ=None):
         service = WebApplicationService(settings=settings, dependencies=WebApplicationDependencies(
             artifacts=artifacts, durable=durable, definition=definition, diagnostics=diagnostics,
             extraction_sink=extraction, result_service=ResultFormattingService(artifact_repository=artifacts.repository),
-            store=store, clock=clock, disk_probe=disk_probe))
+            store=store, clock=clock, disk_probe=disk_probe, progress=progress))
         await service._startup_reconcile()
         await service._ready()
         monitor = asyncio.create_task(supervise())

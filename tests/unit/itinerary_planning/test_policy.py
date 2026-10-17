@@ -38,7 +38,7 @@ from app.itinerary_planning.policy import (
     boundary_processing_minutes,
     candidate_is_eligible,
     candidate_uid_is_allowed,
-    ceil_to_grid,
+    ceil_to_minute,
     default_open_interval,
     order_stop_reasons,
     route_mode_for_semantic,
@@ -108,7 +108,9 @@ def test_ambiguous_duration_is_not_an_explicit_authorization(expression):
 
 def test_explicit_duration_rounding_and_estimate_cannot_bypass_user_choice():
     from app.itinerary_planning.policy import validate_visit_duration
-    visit = _simple_visit().model_copy(update={"duration_source": "user_explicit"})
+    visit = _simple_visit().model_copy(update={"duration_source": "user_explicit", "interval": TimeInterval(
+        start_at=datetime(2026, 9, 3, 10, 0, tzinfo=SHANGHAI),
+        end_at=datetime(2026, 9, 3, 10, 45, tzinfo=SHANGHAI))})
     validate_visit_duration(visit, user_duration_minutes=45)
     for minutes in (None, 0, -30, 30, True):
         with pytest.raises(ValueError):
@@ -152,13 +154,13 @@ def _candidate_record(*, avoid: tuple[RequirementMatchState, ...] = (), state: C
 
 
 def test_grid_buffers_modes_and_raw_duration_ceiling() -> None:
-    assert ceil_to_grid(datetime(2026, 9, 3, 9, 1, tzinfo=SHANGHAI)).hour == 9
-    assert ceil_to_grid(datetime(2026, 9, 3, 9, 1, tzinfo=SHANGHAI)).minute == 30
+    assert ceil_to_minute(datetime(2026, 9, 3, 9, 1, tzinfo=SHANGHAI)).hour == 9
+    assert ceil_to_minute(datetime(2026, 9, 3, 9, 1, tzinfo=SHANGHAI)).minute == 1
     assert boundary_processing_minutes(HubType.AIRPORT, "arrival", is_approximate=True) == 60
     with pytest.raises(ValueError):
         boundary_processing_minutes(HubType.RAILWAY_STATION, "departure", is_approximate=False, user_minutes=10)
     assert route_scheduled_minutes(0) == 0
-    assert route_scheduled_minutes(1801) == 60
+    assert route_scheduled_minutes(1801) == 40
     assert route_mode_for_semantic(TransportSemantic.PUBLIC_TRANSIT) is TravelMode.TRANSIT
 
 
@@ -496,9 +498,9 @@ def test_locked_policy_binds_complete_confirmed_field_metadata() -> None:
 
 def test_policy_primitives_cover_invalid_time_meal_route_and_anchor_paths() -> None:
     with pytest.raises(ValueError):
-        ceil_to_grid(datetime(2026, 9, 3, 9, 0))
+        ceil_to_minute(datetime(2026, 9, 3, 9, 0))
     with pytest.raises(ValueError):
-        ceil_to_grid(datetime(2026, 9, 3, 9, 0, tzinfo=ZoneInfo("UTC")))
+        ceil_to_minute(datetime(2026, 9, 3, 9, 0, tzinfo=ZoneInfo("UTC")))
     assert boundary_processing_minutes(HubType.RAILWAY_STATION, "departure", is_approximate=False) == 60
     assert boundary_processing_minutes(HubType.AIRPORT, "arrival", is_approximate=False, user_minutes=60) == 60
     assert boundary_processing_minutes(HubType.RAILWAY_STATION, "departure", is_approximate=True) == 60

@@ -204,6 +204,7 @@ from .policy import (
     default_open_interval,
 )
 from .prompt_loader import PLANNING_PROMPT_VERSION, load_planning_prompt
+from .timing import boundary_time_issues, day_time_issues, endpoint_datetime, time_issue
 from app.llm_runtime import InteractionCallIdentity, interaction_call
 from .artifacts import PlanningRejectionSnapshot
 from .prompting import HandleDirectory, make_planning_prompt
@@ -708,7 +709,7 @@ class ItineraryPlanningService:
         if (
             lookup.ref.operation_id != plan.terminal_successor_operation_id
             or lookup.ref.artifact_type != "itinerary_planning.itinerary"
-            or lookup.ref.schema_version != "4.0"
+            or lookup.ref.schema_version != "6.0"
         ):
             return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
         try:
@@ -744,7 +745,7 @@ class ItineraryPlanningService:
             for operation_id, artifact_type, expected in operation_ids:
                 lookup = await self._repository.lookup(operation_id=operation_id)
                 if isinstance(lookup, ArtifactFound):
-                    expected_schema_version = "7.0" if artifact_type == "itinerary_planning.model_action" else "4.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
+                    expected_schema_version = "9.0" if artifact_type == "itinerary_planning.model_action" else "6.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
                     if lookup.ref.operation_id != operation_id or lookup.ref.schema_version != expected_schema_version or lookup.ref.artifact_type != artifact_type:
                         return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
                     read = await self._repository.get(lookup.ref, expected_model=expected)
@@ -1067,7 +1068,7 @@ class ItineraryPlanningService:
         return candidates, refs, requirement_group_states
 
     async def _read_upstream(self, ref: ArtifactRef, expected: type[BaseModel], artifact_type: str) -> BaseModel:
-        if type(ref) is not ArtifactRef or ref.artifact_type != artifact_type or ref.schema_version not in ({"2.0", "4.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0", "2.0", "3.0", "4.0"} if artifact_type == "candidate_research.candidate_set" else {"1.0"}):
+        if type(ref) is not ArtifactRef or ref.artifact_type != artifact_type or ref.schema_version not in ({"6.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0", "2.0", "3.0", "4.0"} if artifact_type == "candidate_research.candidate_set" else {"1.0"}):
             raise ValueError("upstream reference mismatch")
         lookup = await self._repository.lookup(operation_id=ref.operation_id)
         if not isinstance(lookup, ArtifactFound) or lookup.ref != ref:
@@ -1084,7 +1085,7 @@ class ItineraryPlanningService:
 
     def _directory_model(self, run: _Run) -> ArtifactRefDirectories:
         return ArtifactRefDirectories(
-            schema_version="3.0",
+            schema_version="5.0",
             hotel_selection_refs=(run.hotel_ref,), candidate_set_refs=tuple(run.candidate_set_refs),
             model_action_refs=tuple(run.action_refs), hub_geocode_refs=tuple(run.hub_refs),
             matrix_refs=tuple(run.matrix_refs), directions_refs=tuple(run.directions_refs),
@@ -1096,7 +1097,7 @@ class ItineraryPlanningService:
             raise ValueError("artifact operation phase mismatch")
         if type(content) is not expected:
             raise ValueError("artifact model mismatch")
-        artifact_schema_version = "7.0" if artifact_type == "itinerary_planning.model_action" else "4.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
+        artifact_schema_version = "9.0" if artifact_type == "itinerary_planning.model_action" else "6.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
         if content.schema_version != artifact_schema_version:
             raise ValueError("artifact envelope version mismatch")
         request = ArtifactWriteRequest(
@@ -1161,7 +1162,7 @@ class ItineraryPlanningService:
     async def _persist_action(self, run: _Run, calls: tuple[ValidatedToolCall, ...], metadata: InvocationMetadata | None, kind: str, disposition: str, request_stage: str, budget_category: str) -> ArtifactRef:
         operation_id = self._invocation_slot(run, run.invocation_count - 1).action_operation_id
         action = ItineraryPlanningModelActionArtifact(
-            schema_version="7.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
+            schema_version="9.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
             request_stage=request_stage, budget_category=budget_category,
             prompt_version=PLANNING_PROMPT_VERSION, prompt_hash=load_planning_prompt().sha256, action_kind=kind,
             call_summaries=tuple(self._action_summary(call, i) for i, call in enumerate(calls)),
@@ -1907,15 +1908,15 @@ class ItineraryPlanningService:
         state = await self._state_snapshot(run, pending=None)
         gaps = tuple(_to_gap_summary_snapshot(item) for item in self._current_gaps(run))
         record = InProgressItineraryRecord(schema_version="1.0", record_type="in_progress", state=state, gaps=gaps)
-        artifact = ItineraryPlanningArtifact(schema_version="4.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
+        artifact = ItineraryPlanningArtifact(schema_version="6.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
         slot = self._invocation_slot(run, run.invocation_count - 1)
         ref, _ = await self._persist(operation_id=slot.planning_state_operation_id, artifact_type="itinerary_planning.itinerary", content=artifact, expected=ItineraryPlanningArtifact)
         run.last_planning_ref = ref
         return ref
 
     async def _state_snapshot(self, run: _Run, *, pending: str | None) -> PlanningStateSnapshot:
-        from .artifacts import _PlanningStateSnapshotV4
-        return _PlanningStateSnapshotV4(schema_version="4.0", request_kind="resume" if run.resumed else "initial",
+        from .artifacts import _PlanningStateSnapshotV6
+        return _PlanningStateSnapshotV6(schema_version="6.0", request_kind="resume" if run.resumed else "initial",
             requirement_digest=_confirmed_digest(run.confirmed), effective_policy=None if run.policy is None else self._policy_snapshot(run.policy),
             draft=None if run.draft is None else _to_draft_snapshot(run.draft), budgets=_to_budget_snapshot(await self._budget_summary(run)),
             current_stage=run.current_stage, model_invocations_consumed=run.invocation_count, preparation_used=run.preparation_used,
@@ -2085,6 +2086,7 @@ class ItineraryPlanningService:
         return interval.start_at.date() == day_date and interval.end_at.date() in {day_date, next_date}
 
     def _materialize_draft(self, run: _Run, proposal: ProposedItineraryDraft, policy: EffectivePlanningPolicy) -> ItineraryDraft:
+        time_problems = []
         for proposed_day in proposal.days:
             main_handles = tuple(
                 visit.candidate_handle for visit in proposed_day.visits
@@ -2111,8 +2113,10 @@ class ItineraryPlanningService:
             minutes = route_scheduled_minutes(selected.duration_s)
             end_at = value.start_at + timedelta(minutes=minutes)
             if value.end_at is not None and value.end_at != end_at:
-                raise _BusinessRejected("route_end_time_mismatch", field + ".end_at")
-            return RouteLeg(schema_version="1.0", leg_id=value.leg_id, origin=origin, destination=destination, interval=RouteTimeInterval(start_at=value.start_at, end_at=end_at), transport_semantic=value.transport_semantic, route_mode=value.route_mode, directions_observation_index=directions_index, alternative_index=value.alternative_index, distance_m=selected.distance_m, duration_s=selected.duration_s, scheduled_minutes=minutes)
+                issue = time_issue("route_end_time_mismatch", field + ".end_at",
+                    value.end_at.isoformat(), end_at.isoformat(), day=value.start_at.date())
+                time_problems.append(issue)
+            return RouteLeg(schema_version="3.0", leg_id=value.leg_id, origin=origin, destination=destination, interval=RouteTimeInterval(start_at=value.start_at, end_at=end_at), transport_semantic=value.transport_semantic, route_mode=value.route_mode, directions_observation_index=directions_index, alternative_index=value.alternative_index, distance_m=selected.distance_m, duration_s=selected.duration_s, scheduled_minutes=minutes)
 
         def visit(value: Any) -> ScheduledVisit:
             location = cast(CandidateLocationRef, run.directory.require_location(value.candidate_handle).value)
@@ -2124,7 +2128,7 @@ class ItineraryPlanningService:
                 raise ValueError("compatible business hours require cited candidate evidence")
             return ScheduledVisit(schema_version="1.0", visit_id=value.visit_id, location=location, visit_kind=value.visit_kind, interval=TimeInterval(start_at=value.start_at, end_at=value.end_at), duration_source=value.duration_source, must_group_ids=value.must_group_ids, time_sensitive_anchor_ids=value.time_sensitive_anchor_ids, business_hours_state=value.business_hours_state, business_evidence_indexes=indexes, requires_verification=value.business_hours_state.value == "unknown")
 
-        def day(value: Any, day_index: int) -> DayPlan:
+        def day(value: Any, day_index: int) -> dict:
             def backup(item: Any) -> BackupOption:
                 matrix = cast(MatrixObservation, run.directory.require(item.matrix_handle, kind="matrix").value)
                 if item.matrix_mode is not MatrixTravelMode.WALKING or matrix.mode is not MatrixTravelMode.WALKING or matrix.status != "success":
@@ -2160,10 +2164,24 @@ class ItineraryPlanningService:
                 business_indexes = tuple(record.observation_indexes)
                 return BackupOption(schema_version="1.0", backup_kind=item.backup_kind, core_visit_id=item.core_visit_id, candidate=candidate, matrix_observation_index=matrix_index, matrix_mode=item.matrix_mode, distance_m=cell.distance_m, business_hours_state=BusinessHoursState.UNKNOWN, business_evidence_indexes=business_indexes, requires_verification=True)
             backups = tuple(backup(item) for item in value.backups)
-            return DayPlan(schema_version="1.0", date=value.date, day_kind=value.day_kind, theme=value.theme, open_intervals=value.open_intervals, visits=tuple(visit(item) for item in value.visits), route_legs=tuple(route(item, f"draft.days[{day_index}].route_legs[{index}]") for index, item in enumerate(value.route_legs)), backups=backups)
+            visits = tuple(visit(item) for item in value.visits)
+            routes = tuple(route(item, f"draft.days[{day_index}].route_legs[{index}]") for index, item in enumerate(value.route_legs))
+            issues = day_time_issues(value, field=f"draft.days[{day_index}]", visits=visits, routes=routes,
+                pace=policy.effective_pace)
+            time_problems.extend(issues)
+            return dict(schema_version="1.0", date=value.date, day_kind=value.day_kind, theme=value.theme,
+                open_intervals=value.open_intervals, visits=visits, route_legs=routes, backups=backups)
 
         arrival_route = route(proposal.arrival_transfer.route_leg, "draft.arrival_transfer.route_leg")
         departure_route = route(proposal.departure_transfer.route_leg, "draft.departure_transfer.route_leg")
+        days = tuple(day(value, index) for index, value in enumerate(proposal.days))
+        time_problems.extend(boundary_time_issues(
+            window=run.confirmed.requirement.time_window, arrival=arrival_route, departure=departure_route,
+            days=tuple((value["date"], value["route_legs"]) for value in days), pace=policy.effective_pace,
+        ))
+        if time_problems:
+            first = time_problems[0]
+            raise _BusinessRejected(first["rule"], first["field"], issues=tuple(time_problems))
         arrival_hub = cast(HubLocationRef, run.directory.require_location(proposal.arrival_transfer.hub_handle).value)
         departure_hub = cast(HubLocationRef, run.directory.require_location(proposal.departure_transfer.hub_handle).value)
         hotel = cast(HotelLocationRef, run.directory.require_location(proposal.arrival_transfer.hotel_handle).value)
@@ -2171,7 +2189,7 @@ class ItineraryPlanningService:
         departure_info = run.confirmed.requirement.time_window.departure
         arrival_minutes = boundary_processing_minutes(arrival_info.hub_type or HubType.RAILWAY_STATION, "arrival", is_approximate=arrival_info.is_approximate)
         departure_minutes = boundary_processing_minutes(departure_info.hub_type or HubType.RAILWAY_STATION, "departure", is_approximate=departure_info.is_approximate)
-        return ItineraryDraft(schema_version="1.0", requirement_digest=_confirmed_digest(run.confirmed), hotel_selection_ref=run.hotel_ref, candidate_set_ref=run.candidate_ref, effective_policy=policy, arrival_transfer=BoundaryTransfer(schema_version="1.0", transfer_kind="arrival", hub=arrival_hub, hotel=hotel, route_leg=arrival_route, processing_minutes=arrival_minutes, approximate_extra_minutes=30 if arrival_info.is_approximate else 0), days=tuple(day(item, index) for index, item in enumerate(proposal.days)), departure_transfer=BoundaryTransfer(schema_version="1.0", transfer_kind="departure", hub=departure_hub, hotel=hotel, route_leg=departure_route, processing_minutes=departure_minutes, approximate_extra_minutes=30 if departure_info.is_approximate else 0), upstream_gap_ids=proposal.upstream_gap_ids)
+        return ItineraryDraft(schema_version="1.0", requirement_digest=_confirmed_digest(run.confirmed), hotel_selection_ref=run.hotel_ref, candidate_set_ref=run.candidate_ref, effective_policy=policy, arrival_transfer=BoundaryTransfer(schema_version="1.0", transfer_kind="arrival", hub=arrival_hub, hotel=hotel, route_leg=arrival_route, processing_minutes=arrival_minutes, approximate_extra_minutes=30 if arrival_info.is_approximate else 0), days=tuple(DayPlan(**value) for value in days), departure_transfer=BoundaryTransfer(schema_version="1.0", transfer_kind="departure", hub=departure_hub, hotel=hotel, route_leg=departure_route, processing_minutes=departure_minutes, approximate_extra_minutes=30 if departure_info.is_approximate else 0), upstream_gap_ids=proposal.upstream_gap_ids)
 
     def _validate_draft(self, run: _Run, draft: ItineraryDraft, *, allow_prefix: bool = False, allow_missing_backups: bool = False) -> None:
         _check_business(validate_effective_policy, draft.effective_policy, field="effective_policy")
@@ -2239,21 +2257,8 @@ class ItineraryPlanningService:
         except ValueError:
             raise _BusinessRejected() from None
 
-        def endpoint_datetime(value: object) -> datetime | None:
-            if value is None:
-                return None
-            try:
-                parsed = datetime.fromisoformat(str(value))
-            except (TypeError, ValueError):
-                raise _BusinessRejected() from None
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-            return parsed.astimezone(ZoneInfo("Asia/Shanghai"))
-
         arrival_at = endpoint_datetime(window.arrival.local_datetime)
         departure_at = endpoint_datetime(window.departure.local_datetime)
-        arrival_minimum = None if arrival_at is None else arrival_at + timedelta(minutes=draft.arrival_transfer.processing_minutes + draft.arrival_transfer.approximate_extra_minutes)
-        departure_latest = None if departure_at is None else departure_at - timedelta(minutes=draft.departure_transfer.processing_minutes + draft.departure_transfer.approximate_extra_minutes)
         arrival_expected = boundary_processing_minutes(
             window.arrival.hub_type or HubType.RAILWAY_STATION,
             "arrival",
@@ -2271,10 +2276,13 @@ class ItineraryPlanningService:
             or draft.departure_transfer.approximate_extra_minutes != (30 if window.departure.is_approximate else 0)
         ):
             raise _BusinessRejected()
-        if arrival_minimum is not None and draft.arrival_transfer.route_leg.interval.start_at < arrival_minimum:
-            raise _BusinessRejected("arrival_processing_overlap", "draft.arrival_transfer.route_leg.start_at")
-        if departure_latest is not None and draft.departure_transfer.route_leg.interval.end_at > departure_latest:
-            raise _BusinessRejected("departure_processing_overlap", "draft.departure_transfer.route_leg.start_at")
+        boundary_issues = boundary_time_issues(
+            window=window, arrival=draft.arrival_transfer.route_leg, departure=draft.departure_transfer.route_leg,
+            days=tuple((day.date, day.route_legs) for day in draft.days), pace=draft.effective_policy.effective_pace,
+        )
+        if boundary_issues:
+            first = boundary_issues[0]
+            raise _BusinessRejected(first["rule"], first["field"], issues=boundary_issues)
         for day_index, day in enumerate(draft.days):
             derived_kind = self._day_kind_from_boundaries(draft, day)
             prefix_tail = allow_prefix and day_index == len(draft.days) - 1
@@ -2409,19 +2417,6 @@ class ItineraryPlanningService:
                 raise _BusinessRejected()
             if departure_at is not None and departure_at.date() in {item.date for item in draft.days} and departure_at.date() != last_day.date:
                 raise _BusinessRejected()
-            arrival_end = draft.arrival_transfer.route_leg.interval.end_at
-            departure_start = draft.departure_transfer.route_leg.interval.start_at
-            if arrival_end > departure_start:
-                raise _BusinessRejected("boundary_transfers_overlap", "draft.arrival_transfer")
-            previous_return = arrival_end
-            for day in draft.days:
-                if not day.route_legs:
-                    continue
-                outbound = day.route_legs[0].interval.start_at
-                returned = day.route_legs[-1].interval.end_at
-                if outbound < previous_return or returned > departure_start:
-                    raise _BusinessRejected("day_route_boundary_overlap", "draft.days.route_legs")
-                previous_return = returned
 
         must_groups = {
             group.group_id
@@ -2790,7 +2785,7 @@ class ItineraryPlanningService:
         return await self._finish_failed(run, failure)
 
     async def _persist_terminal(self, run: _Run, record: Any) -> ItineraryPlanningOutcome:
-        artifact = ItineraryPlanningArtifact(schema_version="4.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
+        artifact = ItineraryPlanningArtifact(schema_version="6.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
         try:
             ref, fresh = await self._persist(operation_id=run.plan.terminal_successor_operation_id, artifact_type="itinerary_planning.itinerary", content=artifact, expected=ItineraryPlanningArtifact)
         except ArtifactCapacityExceededError:
@@ -2839,7 +2834,7 @@ class ItineraryPlanningService:
             complete = complete and total.limit == 19 and total.consumed == run.invocation_count
         except Exception:
             complete = False
-        return PlanningBudgetSummary(schema_version="4.0", model_invocation_limit=19, model_invocations_consumed=run.invocation_count,
+        return PlanningBudgetSummary(schema_version="6.0", model_invocation_limit=19, model_invocations_consumed=run.invocation_count,
             normal_invocation_limit=17, format_repair_limit=2, format_repair_used=run.format_repair_used,
             preparation_limit=2, preparation_used=run.preparation_used, transport_limit=5, transport_used=run.transport_used,
             submit_repair_limit=5, submit_repair_used=run.submit_repair_used, supplement_request_limit=5, supplement_request_used=run.supplement_request_used,
@@ -2854,7 +2849,7 @@ class ItineraryPlanningService:
         if code is PlanningFailureCode.ARTIFACT_ERROR and possible_duplicate:
             retryable = False
         failure = ControlPlanningFailure(schema_version="1.0", failure_type="control", code=code, retryable=retryable, possible_duplicate=possible_duplicate)
-        version = budgets.schema_version if budgets is not None else last_ref.schema_version if last_ref is not None else "4.0"
+        version = budgets.schema_version if budgets is not None else last_ref.schema_version if last_ref is not None else "6.0"
         return ItineraryPlanningFailed(schema_version=version, outcome_type="failed", failure=failure, last_consistent_itinerary_ref=last_ref, failure_artifact_ref=None, budgets=budgets, retryable=retryable, possible_duplicate=possible_duplicate)
 
     def _outcome_from_terminal(self, ref: ArtifactRef, artifact: ItineraryPlanningArtifact) -> ItineraryPlanningOutcome:

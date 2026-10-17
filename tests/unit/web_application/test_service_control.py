@@ -59,7 +59,8 @@ async def test_dependencies_frozen_single_diagnostics_and_loop_lifecycle():
     sink=RunBoundExtractionInvocationSink(diagnostics=diagnostic)
     dependencies=WebApplicationDependencies(artifacts=None,durable=None,definition=None,diagnostics=diagnostic,
         extraction_sink=sink,result_service=None,store=None,clock=FixedClock(),disk_probe=lambda:10**10)
-    assert tuple(field.name for field in fields(dependencies)) == ("artifacts","durable","definition","diagnostics","extraction_sink","result_service","store","clock","disk_probe")
+    assert tuple(field.name for field in fields(dependencies)) == ("artifacts","durable","definition","diagnostics","extraction_sink","result_service","store","clock","disk_probe","progress")
+    assert dependencies.progress is None
     with pytest.raises(FrozenInstanceError): dependencies.store=None
     service=WebApplicationService(settings=web_settings(),dependencies=dependencies)
     async def cross_loop():
@@ -205,3 +206,40 @@ def test_progress_dto_rejects_nonactive_observation(changes):
         "card":None,"actions":[],"result_available":False,"summary_status":"not_finalized",
         "progress_phase":"candidate_research"}
     with pytest.raises(ValidationError): WebRunView.model_validate_json(json.dumps(view),strict=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_optional_trip_failure_keeps_original_actions_and_owner_boundary(failure):
+    from datetime import datetime, timezone, date
+    from app.durable_execution import DurableRunView
+    from app.frontend_experience import PublicTrip
+    from app.web_application import WebApplicationDependencyError
+    diagnostic = diagnostics()
+    view = DurableRunView(run_id=uuid4(), trace_id=uuid4(), created_at=datetime.now(timezone.utc),
+        finalized_at=None, lifecycle="open", activity="executing", phase=None, delivery_status=None,
+        terminal_code=None, pause_generation=0, cancel_requested=False)
+    trip = PublicTrip(city="合肥", start_date=date(2026,10,23), end_date=date(2026,10,25), days=3)
+    calls=[]
+    async def owns(**kwargs):
+        if kwargs["owner"]!="owner": raise DecisionError("not_found")
+    async def latest(**kwargs): return view
+    async def public_trip(**kwargs):
+        calls.append("trip")
+        if failure: raise RuntimeError("optional store failure")
+        return trip
+    async def public_read(**kwargs):
+        calls.append("read")
+        raise RuntimeError("required progress failure")
+    deps=WebApplicationDependencies(artifacts=None, durable=SimpleNamespace(get_run=latest), definition=None,
+        diagnostics=diagnostic, extraction_sink=RunBoundExtractionInvocationSink(diagnostics=diagnostic),
+        result_service=None, store=SimpleNamespace(owns=owns), clock=FixedClock(), disk_probe=lambda:10**10,
+        progress=SimpleNamespace(store=SimpleNamespace(trip=public_trip, read=public_read)))
+    service=WebApplicationService(settings=web_settings(), dependencies=deps)
+    projected=await service.get_run(owner="owner",run_id=view.run_id)
+    assert projected.run==view and projected.actions==("cancel",) and projected.trip==(None if failure else trip)
+    with pytest.raises(DecisionError): await service.read_progress(owner="foreign",run_id=view.run_id)
+    assert calls==["trip"]
+    with pytest.raises(WebApplicationDependencyError): await service.read_progress(owner="owner",run_id=view.run_id)
+    assert calls==["trip","read"]
+    await service.close()

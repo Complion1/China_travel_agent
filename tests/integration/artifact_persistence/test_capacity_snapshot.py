@@ -42,14 +42,14 @@ async def test_purpose_contract_versions_keep_canonical_bytes_hashes_after_reope
     import json
     from uuid import uuid4
     import psycopg
-    from app.workflow_contracts import ArtifactWriteRequest, OperationId, WorkflowPhase
+    from app.workflow_contracts import ArtifactWriteRequest, OperationId, UnsupportedArtifactVersionError, WorkflowPhase
     from app.candidate_research import CandidateResearchArtifact, CandidateResearchLegacyArtifact, CandidateResearchV3Artifact, CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS
     from app.itinerary_planning import ItineraryPlanningArtifact, ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS
     from app.itinerary_planning.artifacts import ItineraryPlanningModelActionArtifact
     from app.llm_runtime import ToolTurnCompleted
     from tests.unit.itinerary_planning.test_service_initial import _fixture, _upstream, _metadata
     from tests.contract.itinerary_planning.test_artifact_registration import _registered_artifacts
-    from tests.contract.itinerary_planning.test_recovery_version_compatibility import new_budget
+    from tests.unit.result_formatting.fakes import make_scenario
     new_candidate = _upstream(uuid4())[3]
     legacy = new_candidate.model_dump(mode="json")
     legacy["schema_version"] = "1.0"
@@ -67,19 +67,16 @@ async def test_purpose_contract_versions_keep_canonical_bytes_hashes_after_reope
         if version == "2.0":
             history.pop("correction_state")
         samples.append(("candidate_research.candidate_set",model.model_validate_json(json.dumps(history),strict=True),model))
-    legacy_artifacts = _registered_artifacts()
-    old_action, old_itinerary = legacy_artifacts[0][1],legacy_artifacts[-1][1]
-    action_v6 = old_action.model_dump(mode="json")
+    registered_artifacts = _registered_artifacts()
+    current_action, current_itinerary = registered_artifacts[0][1],registered_artifacts[-1][1]
+    action_v6 = current_action.model_dump(mode="json")
     action_v6.update(schema_version="6.0",prompt_version="planning-v6")
-    itinerary_v3 = old_itinerary.model_dump(mode="json")
-    itinerary_v3["schema_version"] = "3.0"
-    itinerary_v3["directories"]["schema_version"] = "2.0"
-    for ref in itinerary_v3["directories"]["model_action_refs"]: ref["schema_version"] = "6.0"
-    itinerary_v3["record"]["state"].update(schema_version="3.0",format_repair_used=0,budgets=new_budget().model_dump(mode="json"))
-    samples += [("itinerary_planning.model_action",old_action,ItineraryPlanningModelActionArtifact),
+    minute_itinerary = (await make_scenario(minute_schedule=True,run_id=uuid4())).itinerary
+    assert current_itinerary.schema_version == minute_itinerary.schema_version == "6.0"
+    samples += [("itinerary_planning.model_action",current_action,ItineraryPlanningModelActionArtifact),
         ("itinerary_planning.model_action",ItineraryPlanningModelActionArtifact.model_validate_json(json.dumps(action_v6),strict=True),ItineraryPlanningModelActionArtifact),
-        ("itinerary_planning.itinerary",old_itinerary,ItineraryPlanningArtifact),
-        ("itinerary_planning.itinerary",ItineraryPlanningArtifact.model_validate_json(json.dumps(itinerary_v3),strict=True),ItineraryPlanningArtifact)]
+        ("itinerary_planning.itinerary",current_itinerary,ItineraryPlanningArtifact),
+        ("itinerary_planning.itinerary",minute_itinerary,ItineraryPlanningArtifact)]
     planner,request,_,_,memory = _fixture(ToolTurnCompleted(final_text="结束",metadata=_metadata()))
     outcome = await planner.plan_initial(request)
     assert outcome.outcome_type == "incomplete"
@@ -88,6 +85,16 @@ async def test_purpose_contract_versions_keep_canonical_bytes_hashes_after_reope
             model = ItineraryPlanningModelActionArtifact if write.artifact_type.endswith("model_action") else ItineraryPlanningArtifact
             samples.append((write.artifact_type,model.model_validate_json(json.dumps(write.content),strict=True),model))
     registry = ArtifactSchemaRegistry((*CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS,*ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS))
+    for version in ("2.0","3.0","4.0","5.0"):
+        history = current_itinerary.model_dump(mode="json")
+        history["schema_version"] = version
+        with pytest.raises(ValueError):
+            ItineraryPlanningArtifact.model_validate_json(json.dumps(history),strict=True)
+        operation = OperationId(run_id=uuid4(),phase=WorkflowPhase.ITINERARY_PLANNING,
+            logical_step=f"unsupported_itinerary_{version.replace('.', '_')}")
+        with pytest.raises(UnsupportedArtifactVersionError):
+            registry.prepare(ArtifactWriteRequest(operation_id=operation,
+                artifact_type="itinerary_planning.itinerary",schema_version=version,content=history))
     runtime = await create_artifact_persistence_runtime(settings=artifact_persistence_settings,registry=registry,limits=TEST_REPOSITORY_LIMITS)
     stored = []
     try:

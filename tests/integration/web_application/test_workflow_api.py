@@ -158,7 +158,7 @@ async def test_generic_argument_recovery_real_graph_pg_and_read_only_reopen(pg_s
             # control's planning_ref continues to mean a consistent itinerary.
             assert control.planning_ref is None and control.last_outcome=="failed"
         planning=(await repository.get(planning_ref,expected_model=ItineraryPlanningArtifact)).content
-        assert planning.schema_version == planning_ref.schema_version == "4.0"
+        assert planning.schema_version == planning_ref.schema_version == "6.0"
         budget=planning.record.budgets
         assert budget.format_repair_used == min(bad_responses,2)
         assert budget.model_invocations_consumed == sum((budget.preparation_used,budget.transport_used,
@@ -241,7 +241,8 @@ async def test_http_real_workflow_all_owner_routes_strict_dtos_and_zero_call_rea
                 assert event.headers["cache-control"]=="no-store" and event.text.count("event: snapshot")==1
                 assert len((await client.get("/api/runs")).json()["items"])==1
                 assert (await client.get("/health/ready")).status_code==200
-                assert WebSamplesView.model_validate_json((await client.get("/api/samples")).content,strict=True).items[0].source_kind=="synthetic"
+                samples=WebSamplesView.model_validate_json((await client.get("/api/samples")).content,strict=True)
+                assert samples.items[0].source_kind=="validated_result" and samples.items[0].slug=="hefei-three-day-trip"
                 assert (provider.calls,maps.calls)==before
                 # Swap the cookie through the sole bootstrap route; every owner
                 # endpoint gives exactly the same unknown/unauthorized response.

@@ -1,4 +1,4 @@
-"""四版候选集按精确模型读取，历史内容不补造资格或覆盖。"""
+"""当前规划读取有用途证明的候选集，来源内容不补造资格或覆盖。"""
 
 import hashlib
 import json
@@ -125,7 +125,7 @@ async def test_exact_candidate_version_projection_preserves_canonical_bytes_and_
 
 
 async def version_scenario(version, mutation=None, source_error=None):
-    scenario = await make_scenario(planning_version="3.0")
+    scenario = await make_scenario()
     baseline = project_result(scenario.request, scenario.itinerary, scenario.evidence)
     original = {key: encoded(read.content) for key, read in scenario.evidence.items()}
     evidence, refs = dict(scenario.evidence), {}
@@ -139,6 +139,13 @@ async def version_scenario(version, mutation=None, source_error=None):
         refs[str(ref.artifact_id)] = ref
         evidence[ref.artifact_id] = ArtifactReadResult(ref=ref, content=content)
 
+    if version == "1.0":
+        data = scenario.itinerary.model_dump(mode="json")
+        data["directories"]["candidate_set_refs"][0]["schema_version"] = "1.0"
+        with pytest.raises(ValueError):
+            type(scenario.itinerary).model_validate_json(json.dumps(data), strict=True)
+        assert original == {key: encoded(read.content) for key, read in scenario.evidence.items()}
+        return
     if version != "1.0":
         current = evidence[scenario.refs["candidate_set"].artifact_id]
         data = current.content.model_dump(mode="json")
@@ -285,15 +292,15 @@ async def version_scenario(version, mutation=None, source_error=None):
         for read in tuple(evidence.values()):
             if read.ref.artifact_type == "itinerary_planning.model_action":
                 data = read.content.model_dump(mode="json")
-                data.update(schema_version="7.0", prompt_version="planning-v7")
+                data.update(schema_version="9.0", prompt_version="planning-v9")
                 update(read, data)
         for read in tuple(evidence.values()):
             if hasattr(read.content, "model_action_ref"):
                 update(read, replace_refs(read.content.model_dump(mode="json"), refs))
         data = replace_refs(scenario.itinerary.model_dump(mode="json"), refs)
-        data["schema_version"] = "4.0"
-        data["directories"]["schema_version"] = "3.0"
-        data["record"]["budgets"]["schema_version"] = "4.0"
+        data["schema_version"] = "6.0"
+        data["directories"]["schema_version"] = "5.0"
+        data["record"]["budgets"]["schema_version"] = "6.0"
         update(evidence[scenario.request.itinerary_ref.artifact_id], data)
         read = evidence[scenario.request.itinerary_ref.artifact_id]
         state = scenario.request.state.model_copy(update={"artifact_refs": (read.ref,)})

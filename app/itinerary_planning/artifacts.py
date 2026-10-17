@@ -78,6 +78,7 @@ from .models import (
     TransportSemantic,
     UpstreamResearchGapSummary,
     VisitKind,
+    _route_minutes,
 )
 from .models import PlanningTool
 from app.candidate_research import MealIntent, ResearchRole
@@ -223,7 +224,7 @@ class ArtifactEvidenceIndex(_ArtifactModel):
 
 
 class PersistedTimeInterval(_ArtifactModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     start_at_utc: datetime
     end_at_utc: datetime
     timezone: Literal["Asia/Shanghai"]
@@ -236,6 +237,8 @@ class PersistedTimeInterval(_ArtifactModel):
             raise ValueError("persisted start must be UTC")
         if self.end_at_utc.tzinfo is None or self.end_at_utc.utcoffset() != timedelta(0):
             raise ValueError("persisted end must be UTC")
+        if any(value.second or value.microsecond for value in (self.start_at_utc, self.end_at_utc)):
+            raise ValueError("persisted interval must use whole minutes")
         if self.start_at_utc >= self.end_at_utc:
             raise ValueError("persisted interval must be non-empty")
         if self.start_at_utc.astimezone(_SHANGHAI).date() != self.local_start_date:
@@ -246,7 +249,7 @@ class PersistedTimeInterval(_ArtifactModel):
 
 
 class PersistedRouteTimeInterval(_ArtifactModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     start_at_utc: datetime
     end_at_utc: datetime
     timezone: Literal["Asia/Shanghai"]
@@ -259,6 +262,8 @@ class PersistedRouteTimeInterval(_ArtifactModel):
             raise ValueError("persisted route start must be UTC")
         if self.end_at_utc.tzinfo is None or self.end_at_utc.utcoffset() != timedelta(0):
             raise ValueError("persisted route end must be UTC")
+        if any(value.second or value.microsecond for value in (self.start_at_utc, self.end_at_utc)):
+            raise ValueError("persisted route interval must use whole minutes")
         if self.start_at_utc > self.end_at_utc:
             raise ValueError("persisted route interval must be ordered")
         if self.start_at_utc.astimezone(_SHANGHAI).date() != self.local_start_date:
@@ -353,12 +358,8 @@ class ScheduledVisitSnapshot(_ArtifactModel):
         return self
 
 
-def _route_minutes(duration_s: int) -> int:
-    return 0 if duration_s == 0 else ((duration_s + 1799) // 1800) * 30
-
-
 class RouteLegSnapshot(_ArtifactModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["3.0"]
     leg_id: ArtifactStableId
     origin: PlanningLocationRefSnapshot
     destination: PlanningLocationRefSnapshot
@@ -776,7 +777,7 @@ class _PlanningBudgetSummarySnapshotV2(_ArtifactModel):
 
 
 class PlanningBudgetSummarySnapshot(_PlanningBudgetSummarySnapshotV2):
-    schema_version: Literal["3.0", "4.0"]
+    schema_version: Literal["3.0", "4.0", "5.0", "6.0"]
     model_invocation_limit: Literal[19]
     model_invocations_consumed: Annotated[int, Field(ge=0, le=19)]
     normal_invocation_limit: Literal[17]
@@ -911,7 +912,7 @@ class _PlanningStateSnapshotV2(_ArtifactModel):
 
     @model_validator(mode="after")
     def _counts(self):
-        keys = ("model_invocations_consumed", "preparation_used", "transport_used", "submit_repair_used", "supplement_request_used") + (("format_repair_used",) if self.schema_version in {"3.0", "4.0"} else ())
+        keys = ("model_invocations_consumed", "preparation_used", "transport_used", "submit_repair_used", "supplement_request_used") + (("format_repair_used",) if self.schema_version in {"3.0", "4.0", "5.0", "6.0"} else ())
         if any(getattr(self, key) != getattr(self.budgets, key) for key in keys):
             raise ValueError("state and budget counts differ")
         if self.budgets.budget_snapshot_complete and sum(getattr(self, key) for key in keys[1:]) != self.model_invocations_consumed:
@@ -936,7 +937,15 @@ class _PlanningStateSnapshotV4(PlanningStateSnapshot):
     last_proposal_fingerprint: ArtifactDigest | None
 
 
-PlanningState = Annotated[_PlanningStateSnapshotV4 | PlanningStateSnapshot | _PlanningStateSnapshotV2, Field(discriminator="schema_version")]
+class _PlanningStateSnapshotV5(_PlanningStateSnapshotV4):
+    schema_version: Literal["5.0"]
+
+
+class _PlanningStateSnapshotV6(_PlanningStateSnapshotV5):
+    schema_version: Literal["6.0"]
+
+
+PlanningState = Annotated[_PlanningStateSnapshotV6 | _PlanningStateSnapshotV5 | _PlanningStateSnapshotV4 | PlanningStateSnapshot | _PlanningStateSnapshotV2, Field(discriminator="schema_version")]
 
 
 class InProgressItineraryRecord(_ArtifactModel):
@@ -1016,12 +1025,12 @@ ItineraryRecord: TypeAlias = Annotated[
 
 
 class ItineraryPlanningModelActionArtifact(_ArtifactModel):
-    schema_version: Literal["5.0", "6.0", "7.0"]
+    schema_version: Literal["5.0", "6.0", "7.0", "8.0", "9.0"]
     request_digest: ArtifactDigest
     invocation_index: Annotated[int, Field(ge=0, le=18)]
     request_stage: Literal["preparation", "transport", "submit_repair"]
     budget_category: Literal["preparation", "transport", "submit_repair", "supplement_request", "format_repair"]
-    prompt_version: Literal["planning-v5", "planning-v6", "planning-v7"]
+    prompt_version: Literal["planning-v5", "planning-v6", "planning-v7", "planning-v8", "planning-v9"]
     prompt_hash: ArtifactDigest
     action_kind: Literal["tool_calls", "final_text", "llm_failure"]
     call_summaries: Annotated[tuple[ModelCallSummary, ...], Field(min_length=0, max_length=71)]
@@ -1035,6 +1044,10 @@ class ItineraryPlanningModelActionArtifact(_ArtifactModel):
         if self.schema_version == "6.0" and self.prompt_version != "planning-v6":
             raise ValueError("model action prompt version mismatch")
         if self.schema_version == "7.0" and self.prompt_version != "planning-v7":
+            raise ValueError("model action prompt version mismatch")
+        if self.schema_version == "8.0" and self.prompt_version != "planning-v8":
+            raise ValueError("model action prompt version mismatch")
+        if self.schema_version == "9.0" and self.prompt_version != "planning-v9":
             raise ValueError("model action prompt version mismatch")
         if self.action_kind == "tool_calls" and (not self.call_summaries or self.invocation_metadata is None):
             raise ValueError("tool-call action requires calls and metadata")
@@ -1060,7 +1073,7 @@ class ItineraryPlanningHubGeocodeObservationArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _observation(self) -> ItineraryPlanningHubGeocodeObservationArtifact:
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0", "7.0"}:
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0", "7.0", "8.0", "9.0"}:
             raise ValueError("observation must reference a model action")
         if self.observation_status == "success":
             if self.success_candidate is None or self.ambiguous_candidates or self.provenance is None or self.provenance.capability is not MapCapability.GEOCODING or not self.provenance.verified or self.map_failure is not None:
@@ -1095,7 +1108,7 @@ class ItineraryPlanningRouteMatrixObservationArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _observation(self) -> ItineraryPlanningRouteMatrixObservationArtifact:
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0", "7.0"}:
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0", "7.0", "8.0", "9.0"}:
             raise ValueError("observation must reference a model action")
         actual = tuple((cell.origin_index, cell.destination_index) for cell in self.cells)
         if self.observation_status == "success":
@@ -1153,7 +1166,7 @@ class ItineraryPlanningDirectionsObservationArtifact(_ArtifactModel):
     def _observation(self) -> ItineraryPlanningDirectionsObservationArtifact:
         if (self.route_mode is not TravelMode.TRANSIT or self.transport_semantic is not TransportSemantic.PUBLIC_TRANSIT) and any(isinstance(item, TransitRouteAlternativeSummarySnapshot) for item in self.alternatives):
             raise ValueError("instructions are only retained for transit")
-        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0", "7.0"}:
+        if self.model_action_ref.artifact_type != "itinerary_planning.model_action" or self.model_action_ref.schema_version not in {"5.0", "6.0", "7.0", "8.0", "9.0"}:
             raise ValueError("observation must reference a model action")
         if tuple(item.alternative_index for item in self.alternatives) != tuple(range(len(self.alternatives))):
             raise ValueError("directions alternatives must keep provider order")
@@ -1172,7 +1185,7 @@ class ItineraryPlanningDirectionsObservationArtifact(_ArtifactModel):
 
 
 class ArtifactRefDirectories(_ArtifactModel):
-    schema_version: Literal["1.0", "2.0", "3.0"]
+    schema_version: Literal["1.0", "2.0", "3.0", "4.0", "5.0"]
     hotel_selection_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=1, max_length=1)]
     candidate_set_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=1, max_length=6)]
     model_action_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=0, max_length=19)]
@@ -1210,8 +1223,8 @@ class ArtifactRefDirectories(_ArtifactModel):
                 raise ValueError(f"{name} refs must be unique")
             artifact_type, phase = expected[name]
             for ref in refs:
-                expected_schema_version = ("5.0" if self.schema_version == "1.0" else "7.0" if self.schema_version == "3.0" else "6.0") if name == "model_action" else "1.0"
-                candidate_versions = {"2.0", "3.0", "4.0"} if self.schema_version == "3.0" else {"1.0"}
+                expected_schema_version = {"1.0": "5.0", "2.0": "6.0", "3.0": "7.0", "4.0": "8.0", "5.0": "9.0"}[self.schema_version] if name == "model_action" else "1.0"
+                candidate_versions = {"2.0", "3.0", "4.0"} if self.schema_version in {"3.0", "4.0", "5.0"} else {"1.0"}
                 if ref.schema_version not in (candidate_versions if name == "candidate_set" else {expected_schema_version}) or ref.artifact_type != artifact_type or ref.operation_id.phase is not phase or ref.operation_id.run_id != run_id:
                     raise ValueError(f"{name} ref type/version/run mismatch")
             all_refs.extend(refs)
@@ -1225,7 +1238,7 @@ def _refs_for_directory(directories: ArtifactRefDirectories, directory: str) -> 
 
 
 def _validate_ref(ref: ArtifactRef, *, artifact_type: str, run_id) -> None:
-    versions = {"5.0", "6.0", "7.0"} if artifact_type == "itinerary_planning.model_action" else {"2.0", "3.0", "4.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0"}
+    versions = {"5.0", "6.0", "7.0", "8.0", "9.0"} if artifact_type == "itinerary_planning.model_action" else {"2.0", "3.0", "4.0", "5.0", "6.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0"}
     if ref.schema_version not in versions or ref.artifact_type != artifact_type or ref.operation_id.run_id != run_id:
         raise ValueError("artifact reference mismatch")
 
@@ -1249,7 +1262,7 @@ def _validate_indexes(value: object, directories: ArtifactRefDirectories) -> Non
 
 
 class ItineraryPlanningArtifact(_ArtifactModel):
-    schema_version: Literal["2.0", "3.0", "4.0"]
+    schema_version: Literal["6.0"]
     request_digest: ArtifactDigest
     parent_planning_ref: ArtifactRef | None
     directories: ArtifactRefDirectories
@@ -1257,20 +1270,16 @@ class ItineraryPlanningArtifact(_ArtifactModel):
 
     @model_validator(mode="after")
     def _artifact(self) -> ItineraryPlanningArtifact:
-        if self.directories.schema_version != ("1.0" if self.schema_version == "2.0" else "3.0" if self.schema_version == "4.0" else "2.0"):
+        if self.directories.schema_version != "5.0":
             raise ValueError("itinerary directory version mismatch")
         state = getattr(self.record, "state", None)
         budgets = state.budgets if state is not None else getattr(self.record, "budgets", None)
         if state is not None and state.schema_version != self.schema_version:
             raise ValueError("itinerary state version mismatch")
-        if self.schema_version != "4.0" and any(
-                isinstance(gap, CandidateSupplyGapSummarySnapshot) and gap.schema_version == "2.0"
-                for gap in getattr(self.record, "gaps", ())):
-            raise ValueError("new supply proof requires itinerary v4")
         if budgets is not None and budgets.schema_version != self.schema_version:
             raise ValueError("itinerary budget version mismatch")
         failure = getattr(self.record, "failure", None)
-        if isinstance(failure, LLMPlanningFailureSnapshot) and failure.schema_version != ("1.0" if self.schema_version == "2.0" else "2.0"):
+        if isinstance(failure, LLMPlanningFailureSnapshot) and failure.schema_version != "2.0":
             raise ValueError("itinerary failure version mismatch")
         run_id = self.directories.hotel_selection_refs[0].operation_id.run_id
         if self.parent_planning_ref is not None:
@@ -1400,28 +1409,28 @@ def _from_route_alternative_snapshot(value: RouteAlternativeSummarySnapshot) -> 
 def _to_persisted_interval(value: TimeInterval) -> PersistedTimeInterval:
     public = _fresh_public(value, TimeInterval)
     return PersistedTimeInterval(
-        schema_version="1.0", start_at_utc=public.start_at.astimezone(_UTC), end_at_utc=public.end_at.astimezone(_UTC),
+        schema_version="2.0", start_at_utc=public.start_at.astimezone(_UTC), end_at_utc=public.end_at.astimezone(_UTC),
         timezone="Asia/Shanghai", local_start_date=public.start_at.date(), local_end_date=public.end_at.date(),
     )
 
 
 def _from_persisted_interval(value: PersistedTimeInterval) -> TimeInterval:
     return _fresh_public(TimeInterval.model_validate({
-        "schema_version": "1.0", "start_at": value.start_at_utc.astimezone(_SHANGHAI), "end_at": value.end_at_utc.astimezone(_SHANGHAI),
+        "schema_version": "2.0", "start_at": value.start_at_utc.astimezone(_SHANGHAI), "end_at": value.end_at_utc.astimezone(_SHANGHAI),
     }, strict=True), TimeInterval)
 
 
 def _to_persisted_route_interval(value: RouteTimeInterval) -> PersistedRouteTimeInterval:
     public = _fresh_public(value, RouteTimeInterval)
     return PersistedRouteTimeInterval(
-        schema_version="1.0", start_at_utc=public.start_at.astimezone(_UTC), end_at_utc=public.end_at.astimezone(_UTC),
+        schema_version="2.0", start_at_utc=public.start_at.astimezone(_UTC), end_at_utc=public.end_at.astimezone(_UTC),
         timezone="Asia/Shanghai", local_start_date=public.start_at.date(), local_end_date=public.end_at.date(),
     )
 
 
 def _from_persisted_route_interval(value: PersistedRouteTimeInterval) -> RouteTimeInterval:
     return _fresh_public(RouteTimeInterval.model_validate({
-        "schema_version": "1.0", "start_at": value.start_at_utc.astimezone(_SHANGHAI), "end_at": value.end_at_utc.astimezone(_SHANGHAI),
+        "schema_version": "2.0", "start_at": value.start_at_utc.astimezone(_SHANGHAI), "end_at": value.end_at_utc.astimezone(_SHANGHAI),
     }, strict=True), RouteTimeInterval)
 
 
@@ -1514,7 +1523,7 @@ def _from_visit_snapshot(value: ScheduledVisitSnapshot) -> ScheduledVisit:
 def _to_route_snapshot(value: RouteLeg) -> RouteLegSnapshot:
     public = _fresh_public(value, RouteLeg)
     return RouteLegSnapshot(
-        schema_version="1.0", leg_id=public.leg_id, origin=_to_location_snapshot(public.origin), destination=_to_location_snapshot(public.destination),
+        schema_version="3.0", leg_id=public.leg_id, origin=_to_location_snapshot(public.origin), destination=_to_location_snapshot(public.destination),
         interval=_to_persisted_route_interval(public.interval), transport_semantic=public.transport_semantic, route_mode=public.route_mode,
         directions_observation_index=public.directions_observation_index, alternative_index=public.alternative_index,
         distance_m=public.distance_m, duration_s=public.duration_s, scheduled_minutes=public.scheduled_minutes,
@@ -1523,7 +1532,7 @@ def _to_route_snapshot(value: RouteLeg) -> RouteLegSnapshot:
 
 def _from_route_snapshot(value: RouteLegSnapshot) -> RouteLeg:
     return RouteLeg.model_validate({
-        "schema_version": "1.0", "leg_id": value.leg_id, "origin": _from_location_snapshot(value.origin), "destination": _from_location_snapshot(value.destination),
+        "schema_version": "3.0", "leg_id": value.leg_id, "origin": _from_location_snapshot(value.origin), "destination": _from_location_snapshot(value.destination),
         "interval": _from_persisted_route_interval(value.interval), "transport_semantic": value.transport_semantic, "route_mode": value.route_mode,
         "directions_observation_index": value.directions_observation_index, "alternative_index": value.alternative_index,
         "distance_m": value.distance_m, "duration_s": value.duration_s, "scheduled_minutes": value.scheduled_minutes,
@@ -1738,12 +1747,12 @@ ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS: tuple[ArtifactSchemaRegistration, ...
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="5.0", model=ItineraryPlanningModelActionArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="6.0", model=ItineraryPlanningModelActionArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="7.0", model=ItineraryPlanningModelActionArtifact),
+    ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="8.0", model=ItineraryPlanningModelActionArtifact),
+    ArtifactSchemaRegistration(artifact_type="itinerary_planning.model_action", schema_version="9.0", model=ItineraryPlanningModelActionArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.hub_geocode_observation", schema_version="1.0", model=ItineraryPlanningHubGeocodeObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.route_matrix_observation", schema_version="1.0", model=ItineraryPlanningRouteMatrixObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="itinerary_planning.directions_observation", schema_version="1.0", model=ItineraryPlanningDirectionsObservationArtifact),
-    ArtifactSchemaRegistration(artifact_type="itinerary_planning.itinerary", schema_version="2.0", model=ItineraryPlanningArtifact),
-    ArtifactSchemaRegistration(artifact_type="itinerary_planning.itinerary", schema_version="3.0", model=ItineraryPlanningArtifact),
-    ArtifactSchemaRegistration(artifact_type="itinerary_planning.itinerary", schema_version="4.0", model=ItineraryPlanningArtifact),
+    ArtifactSchemaRegistration(artifact_type="itinerary_planning.itinerary", schema_version="6.0", model=ItineraryPlanningArtifact),
 )
 
 

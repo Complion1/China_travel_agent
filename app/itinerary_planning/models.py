@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta
 from enum import Enum
-from math import ceil
 from typing import Annotated, Literal, TypeAlias
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -41,7 +40,7 @@ from app.workflow_contracts import (
 )
 
 
-ITINERARY_PLANNING_SCHEMA_VERSION: Literal["3.0", "4.0"] = "4.0"
+ITINERARY_PLANNING_SCHEMA_VERSION: Literal["6.0"] = "6.0"
 ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY = ExecutionBudgetKey(
     scope=ExecutionBudgetScope.PHASE,
     name="planning.model_invocation",
@@ -82,11 +81,10 @@ def _aware_shanghai(value: datetime, *, allow_utc: bool = False) -> bool:
     return value.utcoffset() == timedelta(hours=8)
 
 
-def _grid(value: datetime) -> bool:
+def _minute(value: datetime) -> bool:
     return (
         value.second == 0
         and value.microsecond == 0
-        and value.minute in (0, 30)
     )
 
 
@@ -100,7 +98,8 @@ def _contains(intervals: tuple[TimeInterval, ...], start: datetime, end: datetim
 
 
 def _route_minutes(duration_s: int) -> int:
-    return 0 if duration_s == 0 else ceil(duration_s / 1800) * 30
+    """交通总占用按10分钟向上取整，零耗时仍为零。"""
+    return ((duration_s + 599) // 600) * 10
 
 
 class PlanningDayKind(str, Enum):
@@ -169,7 +168,7 @@ class PlanningFailureCode(str, Enum):
 
 
 class PlanningInvocationOperationIds(_Model):
-    schema_version: Literal["3.0", "4.0"] = "4.0"
+    schema_version: Literal["6.0"] = "6.0"
     invocation_slot_index: Annotated[int, Field(ge=0, le=18)]
     action_operation_id: OperationId
     planning_state_operation_id: OperationId
@@ -187,7 +186,7 @@ class PlanningInvocationOperationIds(_Model):
 
 
 class ItineraryPlanningOperationPlan(_Model):
-    schema_version: Literal["3.0", "4.0"] = "4.0"
+    schema_version: Literal["6.0"] = "6.0"
     run_id: UUID
     invocation_slots: Annotated[tuple[PlanningInvocationOperationIds, ...], Field(min_length=0, max_length=19)]
     hub_geocode_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=0, max_length=2)]
@@ -218,7 +217,7 @@ class ItineraryPlanningOperationPlan(_Model):
 
 
 class ItineraryPlanningInitialRequest(_Model):
-    schema_version: Literal["3.0", "4.0"] = "4.0"
+    schema_version: Literal["6.0"] = "6.0"
     confirmed: ConfirmedTravelRequirement
     hotel_selection_ref: ArtifactRef
     candidate_set_ref: ArtifactRef
@@ -235,7 +234,7 @@ class ItineraryPlanningInitialRequest(_Model):
 
 
 class ItineraryPlanningResumeRequest(_Model):
-    schema_version: Literal["4.0"] = "4.0"
+    schema_version: Literal["6.0"] = "6.0"
     predecessor_planning_ref: ArtifactRef
     supplemented_candidate_set_ref: ArtifactRef
     operation_plan: ItineraryPlanningOperationPlan
@@ -253,7 +252,7 @@ class ItineraryPlanningResumeRequest(_Model):
 
 
 def _require_ref(ref: ArtifactRef, artifact_type: str, phase: WorkflowPhase, run_id: UUID) -> None:
-    if ref.artifact_type != artifact_type or ref.schema_version not in (("2.0", "3.0", "4.0") if artifact_type == "itinerary_planning.itinerary" else ("1.0", "2.0", "3.0", "4.0") if artifact_type == "candidate_research.candidate_set" else ("1.0",)):
+    if ref.artifact_type != artifact_type or ref.schema_version not in (("6.0",) if artifact_type == "itinerary_planning.itinerary" else ("1.0", "2.0", "3.0", "4.0") if artifact_type == "candidate_research.candidate_set" else ("1.0",)):
         raise ValueError("artifact reference type/version mismatch")
     if ref.operation_id.phase is not phase or ref.operation_id.run_id != run_id:
         raise ValueError("artifact reference run/phase mismatch")
@@ -264,7 +263,7 @@ def _require_itinerary_ref(ref: ArtifactRef | None, *, required: bool = False) -
         if required:
             raise ValueError("itinerary reference is required")
         return
-    if ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version not in {"2.0", "3.0", "4.0"} or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING:
+    if ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version != "6.0" or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING:
         raise ValueError("reference must point to an itinerary planning artifact")
 
 
@@ -295,7 +294,7 @@ PlanningLocationRef: TypeAlias = Annotated[
 
 
 class TimeInterval(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     start_at: datetime
     end_at: datetime
 
@@ -305,13 +304,13 @@ class TimeInterval(_Model):
             raise ValueError("time interval must use Asia/Shanghai aware datetimes")
         if self.start_at >= self.end_at:
             raise ValueError("time interval must be non-empty")
-        if not _grid(self.start_at) or not _grid(self.end_at):
-            raise ValueError("time interval must use the thirty-minute grid")
+        if not _minute(self.start_at) or not _minute(self.end_at):
+            raise ValueError("time interval must use whole minutes")
         return self
 
 
 class RouteTimeInterval(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     start_at: datetime
     end_at: datetime
 
@@ -321,8 +320,8 @@ class RouteTimeInterval(_Model):
             raise ValueError("route interval must use Asia/Shanghai aware datetimes")
         if self.start_at > self.end_at:
             raise ValueError("route interval must be ordered")
-        if self.start_at != self.end_at and (not _grid(self.start_at) or not _grid(self.end_at)):
-            raise ValueError("positive route interval must use the thirty-minute grid")
+        if not _minute(self.start_at) or not _minute(self.end_at):
+            raise ValueError("route interval must use whole minutes")
         return self
 
 
@@ -431,7 +430,7 @@ class RouteAlternativeSummary(_Model):
 
 
 class RouteLeg(_Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["3.0"] = "3.0"
     leg_id: StableId
     origin: PlanningLocationRef
     destination: PlanningLocationRef
@@ -456,8 +455,8 @@ class RouteLeg(_Model):
         if self.route_mode is not expected_mode:
             raise ValueError("transport semantic and route mode mismatch")
         expected = _route_minutes(self.duration_s)
-        if self.scheduled_minutes != expected or self.scheduled_minutes % 30 != 0:
-            raise ValueError("scheduled route minutes must be the exact thirty-minute ceiling")
+        if self.scheduled_minutes != expected:
+            raise ValueError("scheduled route minutes must be the exact ten-minute ceiling")
         actual = int((self.interval.end_at - self.interval.start_at).total_seconds() // 60)
         if actual != self.scheduled_minutes:
             raise ValueError("route interval length must match scheduled minutes")
@@ -611,8 +610,8 @@ class ProposedDailyTimeRule(_Model):
     def _interval(self) -> ProposedDailyTimeRule:
         if not _aware_shanghai(self.start_at) or not _aware_shanghai(self.end_at) or self.start_at >= self.end_at:
             raise ValueError("invalid proposed daily interval")
-        if not _grid(self.start_at) or not _grid(self.end_at):
-            raise ValueError("proposed daily interval must use grid")
+        if not _minute(self.start_at) or not _minute(self.end_at):
+            raise ValueError("proposed daily interval must use whole minutes")
         return self
 
 
@@ -668,8 +667,8 @@ class ProposedScheduledVisit(_Model):
     def _visit(self) -> ProposedScheduledVisit:
         if not _aware_shanghai(self.start_at) or not _aware_shanghai(self.end_at) or self.start_at >= self.end_at:
             raise ValueError("invalid proposed visit interval")
-        if not _grid(self.start_at) or not _grid(self.end_at):
-            raise ValueError("proposed visit interval must use grid")
+        if not _minute(self.start_at) or not _minute(self.end_at):
+            raise ValueError("proposed visit interval must use whole minutes")
         _unique(self.must_group_ids, "must ids")
         _unique(self.time_sensitive_anchor_ids, "anchor ids")
         _unique(self.business_evidence_handles, "business handles")
@@ -698,6 +697,8 @@ class ProposedRouteLeg(_Model):
     def _leg(self) -> ProposedRouteLeg:
         if not _aware_shanghai(self.start_at) or (self.end_at is not None and (not _aware_shanghai(self.end_at) or self.start_at > self.end_at)):
             raise ValueError("invalid proposed route interval")
+        if not _minute(self.start_at) or (self.end_at is not None and not _minute(self.end_at)):
+            raise ValueError("proposed route interval must use whole minutes")
         expected = {
             TransportSemantic.WALKING: TravelMode.WALKING,
             TransportSemantic.CYCLING: TravelMode.RIDING,
@@ -1380,7 +1381,7 @@ class _PlanningBudgetSummaryV2(_Model):
 
 
 class PlanningBudgetSummary(_PlanningBudgetSummaryV2):
-    schema_version: Literal["3.0", "4.0"]
+    schema_version: Literal["6.0"]
     model_invocation_limit: Literal[19]
     model_invocations_consumed: Annotated[int, Field(ge=0, le=19)]
     normal_invocation_limit: Literal[17]
@@ -1391,7 +1392,7 @@ class PlanningBudgetSummary(_PlanningBudgetSummaryV2):
     known_provider_attempts: Annotated[int, Field(ge=0, le=38)]
 
 
-PlanningBudget = Annotated[PlanningBudgetSummary | _PlanningBudgetSummaryV2, Field(discriminator="schema_version")]
+PlanningBudget = PlanningBudgetSummary
 
 
 class PlanningSummary(_Model):
@@ -1487,7 +1488,7 @@ PlanningFailure: TypeAlias = Annotated[
 
 
 class ItineraryPlanningCompleted(_Model):
-    schema_version: Literal["2.0", "3.0", "4.0"] = "4.0"
+    schema_version: Literal["6.0"] = "6.0"
     outcome_type: Literal["completed"] = "completed"
     itinerary_ref: ArtifactRef
     summary: PlanningSummary
@@ -1501,7 +1502,7 @@ class ItineraryPlanningCompleted(_Model):
 
 
 class ItineraryPlanningIncomplete(_Model):
-    schema_version: Literal["2.0", "3.0", "4.0"] = "4.0"
+    schema_version: Literal["6.0"] = "6.0"
     outcome_type: Literal["incomplete"] = "incomplete"
     itinerary_ref: ArtifactRef | None
     summary: PlanningSummary
@@ -1520,7 +1521,7 @@ class ItineraryPlanningIncomplete(_Model):
 
 
 class ItineraryPlanningCandidateSupplementRequested(_Model):
-    schema_version: Literal["2.0", "3.0", "4.0"] = "4.0"
+    schema_version: Literal["6.0"] = "6.0"
     outcome_type: Literal["candidate_supplement_requested"] = "candidate_supplement_requested"
     planning_ref: ArtifactRef
     candidate_set_ref: ArtifactRef
@@ -1540,7 +1541,7 @@ class ItineraryPlanningCandidateSupplementRequested(_Model):
 
 
 class ItineraryPlanningFailed(_Model):
-    schema_version: Literal["2.0", "3.0", "4.0"] = "4.0"
+    schema_version: Literal["6.0"] = "6.0"
     outcome_type: Literal["failed"] = "failed"
     failure: PlanningFailure
     last_consistent_itinerary_ref: ArtifactRef | None
@@ -1562,7 +1563,7 @@ class ItineraryPlanningFailed(_Model):
                 "itinerary_planning.itinerary",
             }
             expected_schema_version = (
-                ("5.0" if self.schema_version == "2.0" else "7.0" if self.schema_version == "4.0" else "6.0")
+                "9.0"
                 if self.failure_artifact_ref.artifact_type == "itinerary_planning.model_action"
                 else self.schema_version if self.failure_artifact_ref.artifact_type == "itinerary_planning.itinerary" else "1.0"
             )
@@ -1579,7 +1580,7 @@ def _validate_outcome_versions(outcome, ref):
     if ref is not None and ref.schema_version != outcome.schema_version:
         raise ValueError("outcome itinerary version mismatch")
     failure = getattr(outcome, "failure", None)
-    if isinstance(failure, LLMPlanningFailure) and failure.schema_version != ("1.0" if outcome.schema_version == "2.0" else "2.0"):
+    if isinstance(failure, LLMPlanningFailure) and failure.schema_version != "2.0":
         raise ValueError("outcome LLM failure version mismatch")
 
 

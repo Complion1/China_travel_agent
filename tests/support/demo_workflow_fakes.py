@@ -62,7 +62,7 @@ async def full_dependencies():
     from tests.support.candidate_research_fakes import FakeRuntime as ResearchRuntime
     from tests.support.itinerary_planning_fakes import FakeRuntime as PlanningRuntime
     from app.baidu_map import GeocodeSuccess, GeocodeCandidate, BaiduCoordinate, MapCapability
-    from tests.support.itinerary_planning_fakes import FakeMapAdapter, map_provenance
+    from tests.support.itinerary_planning_fakes import FakeMapAdapter, directions_success, map_provenance
     from uuid import uuid4
 
     confirmed = await make_confirmed(budget_total_cny=None)
@@ -88,9 +88,12 @@ async def full_dependencies():
     hotel_map = ScriptedBaiduMapAdapter([map_success(place("h1"), place("h2", index=1), place("h3", index=2))])
     research_model, research_map = research_boundaries()
     planning_model = PlanningModel()
+    planning_model.first_route_minutes = 50
     planning_map = FakeMapAdapter(geocode_factory=lambda request: GeocodeSuccess(result=GeocodeCandidate(
         formatted_address="杭州交通枢纽", coordinate=BaiduCoordinate(latitude=30.29, longitude=120.21), confidence=0.98),
         provenance=map_provenance(MapCapability.GEOCODING)))
+    planning_map.directions_factory = lambda _: directions_success(
+        duration_s=2580 if len(planning_map.directions_calls) == 2 else 600)
     diagnostic = diagnostics()
     deps = DemoWorkflowDependencies(domain_service=domain, diagnostics=diagnostic,
         hotel_factory=lambda cap: HotelCandidateSelectionService(hotel_map, cap.artifact_repository, cap.execution_budget_manager, FixedClock()),
@@ -165,6 +168,7 @@ class PlanningModel:
         self.supplement = False
         self.stage = 0
         self.stop_without_draft = False
+        self.first_route_minutes = 10
 
     def close(self):
         self.closed = True
@@ -230,7 +234,7 @@ class PlanningModel:
         return ToolTurnCompleted(final_text="完成", metadata=_metadata())
 
     def proposal(self, response):
-        from datetime import date, datetime
+        from datetime import date, datetime, timedelta
         from zoneinfo import ZoneInfo
         from app.itinerary_planning.models import (ProposedRouteLeg, ProposedScheduledVisit, VisitKind, BusinessHoursState,
             TransportSemantic, ProposedItineraryDraft, ProposedBoundaryTransfer, ProposedDayPlan, PlanningDayKind,
@@ -250,17 +254,17 @@ class PlanningModel:
                 for child in value:
                     walk(child)
         walk(response)
-        times = ((at(2,18,30), at(2,19)), (at(3,9,30), at(3,10)), (at(3,11), at(3,11,30)),
-            (at(3,13), at(3,13,30)), (at(3,18,30), at(3,19)), (at(4,14,30), at(4,15)))
+        starts = (at(2,18,31), at(3,10,3) - timedelta(minutes=self.first_route_minutes),
+            at(3,11,23), at(3,13,3), at(3,18,49), at(4,14,37))
         routes = tuple(ProposedRouteLeg(leg_id=f"leg{i}", origin_handle=a, destination_handle=b,
-            start_at=start, end_at=end, transport_semantic=TransportSemantic.WALKING, route_mode=TravelMode.WALKING,
-            directions_handle=found[f"leg{i}"], alternative_index=0) for i, ((a,b),(start,end)) in enumerate(zip(self.endpoints,times)))
+            start_at=start, end_at=None, transport_semantic=TransportSemantic.WALKING, route_mode=TravelMode.WALKING,
+            directions_handle=found[f"leg{i}"], alternative_index=0) for i, ((a,b),start) in enumerate(zip(self.endpoints,starts,strict=True)))
         visits = tuple(ProposedScheduledVisit(visit_id=f"visit{i}", candidate_handle=f"candidate-handle-{ordinal:04d}",
             visit_kind=kind, start_at=start, end_at=end, duration_source="planning_estimate", must_group_ids=(),
             time_sensitive_anchor_ids=(), business_hours_state=BusinessHoursState.COMPATIBLE if self.known_hours else BusinessHoursState.UNKNOWN,
             business_evidence_handles=(f"evidence-handle-{(8,14,15)[i]:04d}",) if self.known_hours else ())
-            for i, (ordinal,kind,start,end) in enumerate(((0,VisitKind.ATTRACTION,at(3,10),at(3,11)),
-                (6,VisitKind.LUNCH,at(3,11,30),at(3,12,30)),(7,VisitKind.DINNER,at(3,17,30),at(3,18,30)))))
+            for i, (ordinal,kind,start,end) in enumerate(((0,VisitKind.ATTRACTION,at(3,10,7),at(3,11,22)),
+                (6,VisitKind.LUNCH,at(3,11,37),at(3,12,42)),(7,VisitKind.DINNER,at(3,17,43),at(3,18,48)))))
         return SubmitItineraryArgs(effective_policy=ProposedEffectivePlanningPolicy(effective_pace=TravelPace.RELAXED,
             daily_time_rules=(), time_sensitive_must=(), transport_rules=()), draft=ProposedItineraryDraft(
                 arrival_transfer=ProposedBoundaryTransfer(transfer_kind="arrival", hub_handle="hub-location-arrival", hotel_handle="hotel-handle", route_leg=routes[0]),

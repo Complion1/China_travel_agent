@@ -1,11 +1,11 @@
-"""Old canonical bytes stay unchanged; new versions have closed 19/2 bounds."""
+"""当前记录规范字节稳定；旧时间规则在执行和仓储之前拒绝。"""
 import hashlib
 import json
 from uuid import uuid4
 
 import pytest
 
-from app.workflow_contracts import ArtifactSchemaRegistry, ArtifactRef
+from app.workflow_contracts import ArtifactSchemaRegistry, ArtifactRef, ArtifactWriteRequest, UnsupportedArtifactVersionError
 from app.itinerary_planning.artifacts import ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS, ItineraryPlanningModelActionArtifact
 from app.itinerary_planning import PlanningBudgetSummary
 from tests.contract.itinerary_planning.test_artifact_registration import _registered_artifacts, _budget
@@ -13,13 +13,13 @@ from tests.contract.itinerary_planning.test_artifact_registration import _regist
 
 def new_budget(**changes):
     tree = _budget().model_dump(mode="python")
-    tree.update(schema_version="3.0", model_invocation_limit=19, semantic_invocation_limit=19,
+    tree.update(schema_version="6.0", model_invocation_limit=19, semantic_invocation_limit=19,
         normal_invocation_limit=17, format_repair_limit=2, format_repair_used=0)
     tree.update(changes)
     return PlanningBudgetSummary.model_validate(tree, strict=True)
 
 
-def test_all_legacy_artifact_bytes_hashes_and_shapes_are_retained():
+def test_current_artifact_bytes_hashes_and_shapes_are_stable():
     registry = ArtifactSchemaRegistry(ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS)
     for kind, artifact, operation, model in _registered_artifacts():
         raw = json.dumps(artifact.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -29,7 +29,8 @@ def test_all_legacy_artifact_bytes_hashes_and_shapes_are_retained():
         decoded = registry.decode(ref=ref, canonical_bytes=raw, expected_model=model)
         assert json.dumps(decoded.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode() == raw
         if kind=="itinerary_planning.itinerary":
-            assert "format_repair_used" not in raw.decode()
+            assert artifact.schema_version == "6.0"
+            assert "format_repair_used" in raw.decode()
 
 
 @pytest.mark.parametrize("changes", [
@@ -46,8 +47,8 @@ def test_last_index_18_and_full_19_budget_are_legal_only_in_new_version():
         format_repair_used=2, model_invocations_consumed=19, semantic_invocations_consumed=19, known_provider_attempts=38)
     assert budget.model_invocations_consumed == 19
     old = _registered_artifacts()[0][1].model_dump(mode="python")
-    current = ItineraryPlanningModelActionArtifact.model_validate({**old, "schema_version":"6.0", "invocation_index":18,
-        "prompt_version":"planning-v6", "budget_category":"format_repair"}, strict=True)
+    current = ItineraryPlanningModelActionArtifact.model_validate({**old, "schema_version":"9.0", "invocation_index":18,
+        "prompt_version":"planning-v9", "budget_category":"format_repair"}, strict=True)
     assert current.invocation_index == 18
     for changes in ({"schema_version":"5.0"}, {"prompt_version":"planning-v5"}, {"invocation_index":19}):
         with pytest.raises(ValueError):
@@ -57,9 +58,13 @@ def test_last_index_18_and_full_19_budget_are_legal_only_in_new_version():
 def test_new_root_cannot_silently_wrap_old_state_or_action_directory():
     from app.itinerary_planning import ItineraryPlanningArtifact
     old = _registered_artifacts()[-1][1].model_dump(mode="python")
-    assert old["schema_version"] == "2.0"
+    assert old["schema_version"] == "6.0"
+    for version in ("2.0", "3.0", "4.0", "5.0"):
+        with pytest.raises(ValueError):
+            ItineraryPlanningArtifact.model_validate({**old, "schema_version": version}, strict=True)
+    stale = {**old, "directories": {**old["directories"], "schema_version": "3.0"}}
     with pytest.raises(ValueError):
-        ItineraryPlanningArtifact.model_validate({**old, "schema_version": "3.0"}, strict=True)
+        ItineraryPlanningArtifact.model_validate(stale, strict=True)
     budget = new_budget().model_dump(mode="python")
     for required in ("normal_invocation_limit", "format_repair_limit", "format_repair_used"):
         missing = {key: value for key, value in budget.items() if key != required}
@@ -67,19 +72,18 @@ def test_new_root_cannot_silently_wrap_old_state_or_action_directory():
             PlanningBudgetSummary.model_validate(missing, strict=True)
 
 
-def test_legacy_directory_cannot_claim_new_candidate_proof_and_v4_state_is_required():
-    from app.itinerary_planning.artifacts import ArtifactRefDirectories, _PlanningStateSnapshotV4
+def test_current_directory_and_v6_state_require_complete_proof():
+    from app.itinerary_planning.artifacts import ArtifactRefDirectories, _PlanningStateSnapshotV6
     from tests.contract.itinerary_planning.test_artifact_registration import _directories, _state
     old = _directories().model_dump(mode="python")
-    old["candidate_set_refs"] = tuple({**ref,"schema_version":"2.0"} for ref in old["candidate_set_refs"])
+    old["candidate_set_refs"] = tuple({**ref,"schema_version":"1.0"} for ref in old["candidate_set_refs"])
     with pytest.raises(ValueError): ArtifactRefDirectories.model_validate(old,strict=True)
     state = _state().model_dump(mode="python")
-    state.update(schema_version="4.0",format_repair_used=0,budgets=new_budget(schema_version="4.0").model_dump(mode="python"))
-    with pytest.raises(ValueError): _PlanningStateSnapshotV4.model_validate(state,strict=True)
-    state.update(correction_targets=(),correction_plan_fingerprints=(),correction_evidence_fingerprint=None,
-        correction_fact_fingerprints=(),correction_no_progress=0,last_proposal_fingerprint=None)
-    closed = _PlanningStateSnapshotV4.model_validate(state,strict=True)
-    assert closed.schema_version == "4.0"
+    for field in ("correction_targets", "correction_no_progress", "last_proposal_fingerprint"):
+        missing = {key: value for key, value in state.items() if key != field}
+        with pytest.raises(ValueError): _PlanningStateSnapshotV6.model_validate(missing,strict=True)
+    closed = _PlanningStateSnapshotV6.model_validate(state,strict=True)
+    assert closed.schema_version == "6.0"
 
 
 @pytest.mark.asyncio
@@ -91,5 +95,22 @@ async def test_new_writer_refuses_legacy_content_before_repository_io():
         if kind not in {"itinerary_planning.model_action", "itinerary_planning.itinerary"}:
             continue
         with pytest.raises(ValueError, match="envelope version"):
-            await service._persist(operation_id=operation, artifact_type=kind, content=artifact, expected=model)
+            legacy = artifact.model_copy(update={"schema_version": "4.0" if kind.endswith("itinerary") else "7.0"})
+            await service._persist(operation_id=operation, artifact_type=kind, content=legacy, expected=model)
     assert (len(repository.lookup_calls), len(repository.put_requests)) == before
+
+
+@pytest.mark.parametrize("version", ["2.0", "3.0", "4.0", "5.0"])
+def test_registry_rejects_old_itinerary_envelopes_with_minute_content(version):
+    registry = ArtifactSchemaRegistry(ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS)
+    kind, artifact, operation, model = _registered_artifacts()[-1]
+    tree = {**artifact.model_dump(mode="json"), "schema_version": version}
+    with pytest.raises(UnsupportedArtifactVersionError):
+        registry.prepare(ArtifactWriteRequest(operation_id=operation, artifact_type=kind,
+            schema_version=version, content=tree))
+    raw = json.dumps(tree, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ref = ArtifactRef(artifact_id=uuid4(), artifact_type=kind, schema_version=version,
+        content_hash="sha256:" + hashlib.sha256(raw).hexdigest(), size_bytes=len(raw), operation_id=operation,
+        created_at=__import__("datetime").datetime(2026, 9, 3, tzinfo=__import__("datetime").timezone.utc))
+    with pytest.raises(UnsupportedArtifactVersionError):
+        registry.decode(ref=ref, canonical_bytes=raw, expected_model=model)

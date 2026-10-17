@@ -166,6 +166,11 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     assert all(label not in expected for label in ("同行人员", "间房", "- 房型：", "- 行动限制：", "- 饮食禁忌："))
     assert page.locator("#result-markdown").text_content()==expected
     expect(page.locator("#result-days article")).to_have_count(1)
+    for value in ("10:07", "11:22", "11:37", "12:42", "17:43", "18:48", "09:13", "10:03"):
+        assert value in expected
+        expect(page.locator("#result-days")).to_contain_text(value)
+    assert "日程预留 50 分钟" in expected
+    expect(page.locator("#result-days")).to_contain_text("日程预留 50 分钟")
     page.screenshot(path=str(Path(os.environ["MODULE14_EVIDENCE_DIR"])/"browser-guide-main-chain.png"),full_page=True)
     assert "2026-09-02" in expected and "2026-09-04" in expected
     before=info(page,origin)
@@ -175,14 +180,25 @@ def test_ordinary_http_real_clarify_confirm_hotel_complete_summary_reload_copy_d
     expect(page.locator("#message")).not_to_contain_text("推送暂时中断")
     page.evaluate("ctaTestStreams[0].onerror(new Event('error'))")
     expect(page.locator("#message")).not_to_contain_text("推送暂时中断")
+    page.evaluate("""() => {
+        window.ctaCopiedMarkdown = null;
+        const original = document.execCommand.bind(document);
+        document.execCommand = (...args) => {
+            if (args[0] === 'copy') window.ctaCopiedMarkdown = document.activeElement.value;
+            return original(...args);
+        };
+    }""")
     page.locator("#copy-result").click()
     expect(page.locator("#message")).to_contain_text("复制")
+    assert page.evaluate("ctaCopiedMarkdown") == expected
     page.evaluate("ctaTestStreams[0].onerror(new Event('error'))")
     expect(page.locator("#message")).to_contain_text("复制")
     with page.expect_download() as download:
         page.locator("#download-result").click()
     path=Path(download.value.path());assert path.read_text(encoding="utf-8")==expected
     page.reload();expect(page.locator("#result")).to_be_visible()
+    assert page.locator("#result-markdown").text_content()==expected
+    expect(page.locator("#result-days")).to_contain_text("10:07")
     after=info(page,origin);assert (before["provider_calls"],before["map_calls"])==(after["provider_calls"],after["map_calls"])
     cookies=page.context.cookies();assert cookies[0]["httpOnly"] and cookies[0]["sameSite"]=="Lax" and not cookies[0]["secure"]
     assert not page.evaluate("Object.keys(localStorage).length")
@@ -374,7 +390,7 @@ def test_sse_terminal_races_preserve_message_ownership(page,origin,other_message
     view.update(actions=[],result_available=other_message=="result_error",summary_status="not_saved")
     WebRunView.model_validate_json(json.dumps(view),strict=True)
     page.evaluate("ctaTestStreams[0].dispatchEvent(new MessageEvent('snapshot', {data:'{}'}))")
-    expect(page.locator("#task-status")).to_contain_text("攻略已完成" if other_message=="result_error" else "规划失败")
+    expect(page.locator("#task-status")).to_contain_text("正在读取完整攻略" if other_message=="result_error" else "规划失败")
     expected={None:"", "uncertain_post":"合成提交结果未知", "result_error":"合成攻略读取失败"}[other_message]
     expect(page.locator("#message")).to_have_text(expected)
     # Deliver callbacks after close; no other message may be overwritten and no

@@ -47,7 +47,7 @@ async def test_bad_then_good_executes_once_and_accounts_each_call(invalid_count)
     for action in actions[:invalid_count]:
         assert action.content["action_kind"] == "llm_failure"
         assert not action.content["call_summaries"] and action.content["invocation_metadata"] is None
-    assert all(r.schema_version=="7.0" for r in actions)
+    assert all(r.schema_version=="9.0" for r in actions)
 
 
 @pytest.mark.asyncio

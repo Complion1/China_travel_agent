@@ -67,7 +67,7 @@ async def test_combined_meal_and_backups_keep_their_roles_and_directed_distances
     assert main.count("｜午餐：") == 0
     assert main.count("｜晚餐：") == 1
     assert "1201 米；10 分 1 秒（百度获取时路线估算）〔来源 " in main
-    assert "日程预留 30 分钟；费用未核验" in main
+    assert "日程预留 20 分钟；费用未核验" in main
     assert "活动时长 120 分钟（规划估算）" in main
     assert "规划时营业证据相容，实时营业仍请确认〔来源 " in main
     assert "营业文本：09\\:00\\-21\\:00〔来源 " in main
@@ -119,13 +119,13 @@ async def test_zero_time_route_order_uses_path_and_cross_midnight_has_dates(scen
 
     crossing_core, crossing_days = project(await make_scenario(cross_midnight=True))
     crossing = render_day(crossing_core, crossing_days[0])
-    assert "2026-09-04 00:00—2026-09-04 00:30（北京时间）" in crossing
+    assert "2026-09-04 00:00—2026-09-04 00:20（北京时间）" in crossing
     # Also exercise an interval spanning the date boundary without changing it.
     late_route = crossing_days[0].route_legs[-1]
-    spanning = ResultInterval(start_at_utc=late_route.interval.start_at_utc - timedelta(minutes=15),
-                              end_at_utc=late_route.interval.end_at_utc - timedelta(minutes=15), timezone="Asia/Shanghai")
+    spanning = ResultInterval(start_at_utc=late_route.interval.start_at_utc - timedelta(minutes=7),
+                              end_at_utc=late_route.interval.end_at_utc - timedelta(minutes=7), timezone="Asia/Shanghai")
     spanning_day = crossing_days[0].model_copy(update={"route_legs": (*crossing_days[0].route_legs[:-1], late_route.model_copy(update={"interval": spanning}))})
-    assert "2026-09-03 23:45—2026-09-04 00:15（北京时间）" in render_day(crossing_core, spanning_day)
+    assert "2026-09-03 23:53—2026-09-04 00:13（北京时间）" in render_day(crossing_core, spanning_day)
 
 
 @pytest.mark.asyncio

@@ -50,9 +50,9 @@ async def saved_bundle(scenario):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("planning_version", ["2.0", "3.0"])
-async def test_both_planning_versions_are_read_without_rewriting_source(planning_version):
-    scenario = await make_scenario(days=3, planning_version=planning_version)
+@pytest.mark.parametrize("minute_schedule", [False, True])
+async def test_minute_planning_is_read_without_rewriting_source(minute_schedule):
+    scenario = await make_scenario(days=3, minute_schedule=minute_schedule)
     source_ref = scenario.request.itinerary_ref
     source_before = tree(scenario.itinerary)
     prepared, _, index, index_ref = await saved_bundle(scenario)
@@ -63,22 +63,25 @@ async def test_both_planning_versions_are_read_without_rewriting_source(planning
     assert index.source_itinerary_ref == source_ref
     source_after = await scenario.repository.get(source_ref, expected_model=type(scenario.itinerary))
     assert source_after.ref == source_ref and tree(source_after.content) == source_before
-    assert ("format_repair_used" in source_before["record"]["budgets"]) == (planning_version == "3.0")
+    assert source_ref.schema_version == "6.0"
+    assert "format_repair_used" in source_before["record"]["budgets"]
+    if minute_schedule:
+        assert "11:37" in loaded.markdown and "13:12" in loaded.markdown
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("planning_version", ["2.0", "3.0"])
-async def test_source_ref_version_cannot_disagree_with_valid_content(planning_version):
-    scenario = await make_scenario(planning_version=planning_version)
+@pytest.mark.parametrize("planning_version", ["2.0", "4.0"])
+async def test_old_source_ref_is_rejected_before_repository_read(planning_version):
+    scenario = await make_scenario()
     ref = parsed(ArtifactRef, {**tree(scenario.request.itinerary_ref),
-        "schema_version": "3.0" if planning_version == "2.0" else "2.0"})
+        "schema_version": planning_version})
     state = TravelSessionState.model_validate({**scenario.request.state.model_dump(mode="python"),
         "artifact_refs": (ref,)}, strict=True)
     request = ResultFormattingRequest(schema_version="2.0", state=state, itinerary_ref=ref)
     repository = RecordingReadRepository(scenario.repository, fail_ref=ref,
         replacement=lambda actual_ref, expected_model: ArtifactReadResult(ref=actual_ref, content=scenario.itinerary))
-    assert_failed(await ResultFormattingService(artifact_repository=repository).prepare(request), "artifact_integrity_error")
-    assert len(repository.get_calls) == 1 and not repository.forbidden_calls
+    assert_failed(await ResultFormattingService(artifact_repository=repository).prepare(request), "artifact_contract_error")
+    assert not repository.get_calls and not repository.forbidden_calls
 
 
 @pytest.mark.asyncio

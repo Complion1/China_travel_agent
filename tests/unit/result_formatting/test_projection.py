@@ -44,8 +44,8 @@ async def test_saved_sources_preserve_facts_and_distinguish_route_estimate(scena
         "place_search", "place_details", "geocoding", "directions", "route_matrix",
     }
     route = days[0].route_legs[0]
-    assert (route.distance_m, route.duration_s, route.scheduled_minutes) == (1201, 601, 30)
-    assert route.interval.end_at_utc - route.interval.start_at_utc == timedelta(minutes=30)
+    assert (route.distance_m, route.duration_s, route.scheduled_minutes) == (1201, 601, 20)
+    assert route.interval.end_at_utc - route.interval.start_at_utc == timedelta(minutes=20)
     assert core.departure_transfer.processing_minutes == 120
     assert core.departure_transfer.approximate_extra_minutes == 30
 

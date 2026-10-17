@@ -264,6 +264,16 @@ def create_web_application(*,settings:WebApplicationSettings,service_factory:Cal
         cursor=request.query_params.get("cursor")
         if cursor is not None and len(cursor)>512: raise _HttpFailure("invalid_request")
         return _json(await app.state.service.list_runs(owner=owner,cursor=cursor),WebHistoryPage)
+    @app.get("/api/runs/{run_id}/progress")
+    async def progress(request: Request, run_id: str):
+        from app.frontend_experience import PublicProgressPage
+        owner = await _owner(request)
+        if set(request.query_params) - {"after"} or len(request.query_params.getlist("after")) > 1:
+            raise _HttpFailure("invalid_request")
+        value = request.query_params.get("after", "0")
+        if not value.isascii() or not value.isdecimal() or len(value) > 3 or int(value) > 512:
+            raise _HttpFailure("invalid_request")
+        return _json(await app.state.service.read_progress(owner=owner, run_id=_uuid(run_id), after=int(value)), PublicProgressPage)
     @app.get("/api/runs/{run_id}")
     async def run(request: Request,run_id: str):
         owner=await _owner(request)
@@ -339,7 +349,7 @@ def create_web_application(*,settings:WebApplicationSettings,service_factory:Cal
     async def sample_page(): return await page("samples.html")
     @app.get("/static/{filename}")
     async def asset(filename: str):
-        media={"app.js":"text/javascript","site.css":"text/css"}
+        media={"app.js":"text/javascript","ui.js":"text/javascript","guide.js":"text/javascript","process.js":"text/javascript","site.css":"text/css"}
         if filename not in media: raise _HttpFailure("not_found")
         return Response((_STATIC/filename).read_bytes(),media_type=media[filename],headers={"Cache-Control":"public, max-age=3600"})
     return app

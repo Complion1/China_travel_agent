@@ -75,10 +75,10 @@ async def test_incomplete_research_continues_but_no_draft_planning_stops_with_re
         plan=DemoBudgetPlanProvider().plan_for_phase(run_id=state.run_id, phase=state.phase, state=state),
         limits=DEMO_EXECUTION_BUDGET_MANAGER_LIMITS)
     artifact = scenario.itinerary.model_dump(mode="json")
-    artifact["schema_version"] = "4.0"
-    artifact["directories"].update(schema_version="3.0", candidate_set_refs=[current_ref.model_dump(mode="json")],
+    artifact["schema_version"] = "6.0"
+    artifact["directories"].update(schema_version="5.0", candidate_set_refs=[current_ref.model_dump(mode="json")],
         model_action_refs=[], hub_geocode_refs=[], matrix_refs=[], directions_refs=[])
-    artifact["record"]["budgets"].update(schema_version="4.0", model_invocation_limit=19, semantic_invocation_limit=19,
+    artifact["record"]["budgets"].update(schema_version="6.0", model_invocation_limit=19, semantic_invocation_limit=19,
         normal_invocation_limit=17, format_repair_limit=2, format_repair_used=0)
     artifact["record"].update(record_type="incomplete", draft=None, stop_reasons=["no_legal_action"],
         gaps=[dict(schema_version="1.0", summary_type="planning_process", gap_id="stop", evidence_indexes=[], process_reason="no_legal_action")])
@@ -89,9 +89,9 @@ async def test_incomplete_research_continues_but_no_draft_planning_stops_with_re
         hotel_selection_ref=scenario.refs["hotel_selection"],candidate_set_ref=current_ref,operation_plan=plan))
     incomplete = ItineraryPlanningArtifact.model_validate_json(canonical(artifact), strict=True)
     terminal_ref = await cap.artifact_repository.put(ArtifactWriteRequest(operation_id=plan.terminal_successor_operation_id,
-        artifact_type="itinerary_planning.itinerary", schema_version="4.0", content=incomplete.model_dump(mode="json")))
+        artifact_type="itinerary_planning.itinerary", schema_version="6.0", content=incomplete.model_dump(mode="json")))
     planning_result = ItineraryPlanningIncomplete.model_validate_json(canonical(dict(
-        schema_version="4.0",
+        schema_version="6.0",
         itinerary_ref=None, summary=incomplete.record.summary.model_dump(mode="json"), budgets=incomplete.record.budgets.model_dump(mode="json"),
         stop_reasons=["no_legal_action"], gaps=[dict(gap_type="planning_process", gap_id="stop", evidence_refs=[], process_reason="no_legal_action")])), strict=True)
     async def planning(request):

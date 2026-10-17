@@ -162,7 +162,14 @@ def problem_counts(issues):
                 else:
                     counts[key] += 1
         else:
-            family = "business_hours" if rule.startswith("business_hours") else rule
+            time_families = {
+                "visit_overlap": "time_overlap", "route_visit_overlap": "time_overlap",
+                "boundary_transfers_overlap": "time_overlap", "day_route_boundary_overlap": "time_overlap",
+                "arrival_processing_overlap": "time_boundary", "departure_processing_overlap": "time_boundary",
+                "default_daily_window": "time_window", "outside_open_intervals": "time_window",
+                "meal_start_window": "time_window",
+            }
+            family = "business_hours" if rule.startswith("business_hours") else time_families.get(rule, rule)
             counts[(family, identity, purpose)] += 1
     for key, deficit in deficits.items():
         counts[key] = max(counts[key], deficit)

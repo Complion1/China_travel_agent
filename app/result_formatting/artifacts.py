@@ -280,7 +280,7 @@ class ResultDayEntry(_ResultArtifactModel):
 
 def _check_itinerary_ref(ref: ArtifactRef, run_id: UUID) -> None:
     if (ref.operation_id.run_id != run_id or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING
-            or ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version not in {"2.0", "3.0", "4.0"}):
+            or ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version not in {"2.0", "3.0", "4.0", "5.0", "6.0"}):
         raise ValueError("source itinerary reference mismatch")
 
 

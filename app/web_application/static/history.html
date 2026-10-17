@@ -4,8 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>旅行规划 · 历史任务</title>
-  <link rel="stylesheet" href="/static/site.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/site.css?v=m24-3">
+  <script src="/static/ui.js?v=m24-3" defer></script>
+  <script src="/static/guide.js?v=m24-3" defer></script>
+  <script src="/static/process.js?v=m24-3" defer></script>
+  <script src="/static/app.js?v=m24-3" defer></script>
 </head>
 <body data-page="history">
 <header class="site-header">
@@ -19,6 +22,9 @@
   </div>
   <p class="context-note">仅显示当前浏览器的任务，每页最多 20 条。Cookie 从首次签发起 30 天有效；换设备、清除 Cookie 或到期后无法找回。</p>
   <p id="message" role="status" aria-live="polite"></p>
+  <div class="history-tools"><label for="history-filter">筛选当前页</label><select id="history-filter"><option value="all">全部任务</option><option value="executing">正在执行</option><option value="waiting">等待操作</option><option value="completed">已完成</option><option value="failed">未完成</option><option value="cancelled">已取消</option></select></div>
+  <p id="history-state" class="muted" role="status">正在读取当前页…</p>
+  <button id="history-retry" class="secondary" type="button" hidden>重新读取本页</button>
   <div id="history-list" class="history-list" aria-label="任务列表"></div>
   <button id="history-next" class="secondary" hidden>下一页</button>
 </main>

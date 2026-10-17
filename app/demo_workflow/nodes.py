@@ -295,7 +295,7 @@ class Nodes:
             planning_ref = found.ref
             saved = (await cap.read_only_artifact_repository.get(planning_ref, expected_model=ItineraryPlanningArtifact)).content
             if (planning_ref.operation_id != plan.terminal_successor_operation_id
-                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "4.0" or saved.schema_version != planning_ref.schema_version
+                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "6.0" or saved.schema_version != planning_ref.schema_version
                 or saved.request_digest != planning_request_digest(request)
                 or saved.record.record_type != "incomplete" or saved.record.stop_reasons != value.stop_reasons
                 or restore_gaps(saved) != value.gaps or saved.directories.candidate_set_refs[-1] != control.candidate_set_ref

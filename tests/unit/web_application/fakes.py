@@ -31,8 +31,13 @@ class OfflineProvider:
 
     def reset(self):
         from tests.support.demo_workflow_fakes import research_boundaries, PlanningModel
+        from tests.support.itinerary_planning_fakes import directions_success
         self.research, research_map = research_boundaries()
         self.planning = PlanningModel()
+        self.planning.first_route_minutes = 50
+        direction_offset = len(self.maps.planning.directions_calls)
+        self.maps.planning.directions_factory = lambda _: directions_success(
+            duration_s=2580 if len(self.maps.planning.directions_calls) == direction_offset + 2 else 600)
         self.maps.research = research_map
 
     @staticmethod
@@ -236,6 +241,21 @@ def offline_factory(*, monkeypatch, settings, pg_settings, provider, maps, disk_
     @asynccontextmanager
     async def factory():
         with monkeypatch.context() as context:
+            # Existing browser/integration suites still enter the real production root.
+            # Prepare the independently owned schema only in their verified test DB.
+            import asyncio
+            import os
+            from pathlib import Path
+            from alembic import command
+            from alembic.config import Config
+            from app.frontend_experience import migrate as progress_migrate
+            prefix = os.environ.get("MODULE14_TEST_PREFIX", "")
+            if not prefix.startswith("cta-m14-") or os.environ.get("MODULE14_TEST_IDENTITY_TOKEN") != prefix + "-identity" or prefix.replace("-", "_") not in pg_settings.database:
+                raise AssertionError("verified isolated M14 database required")
+            for name, value in environment.items():
+                if name.startswith("POSTGRES_"):
+                    context.setenv(name, value)
+            await asyncio.to_thread(command.upgrade, Config(str(Path(progress_migrate.__file__).with_name("alembic.ini"))), "head")
             context.setattr(assembly, "LangChainDeepSeekAdapter", lambda settings: provider)
             context.setattr(assembly, "create_baidu_map_runtime", map_factory)
             context.setattr(assembly, "SystemUtcClock", lambda: clock or FixedClock(datetime(2026,8,20,tzinfo=timezone.utc)))

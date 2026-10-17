@@ -12,7 +12,6 @@ import re
 from decimal import Decimal
 from datetime import date, datetime, time, timedelta
 from enum import Enum
-from math import ceil
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -35,6 +34,7 @@ from .models import (
     TimeSensitiveMustAnchor,
     TransportSemantic,
     VisitKind,
+    _route_minutes,
 )
 
 
@@ -85,14 +85,24 @@ SINGLE_LEG_LIMIT_SECONDS = {
     TravelPace.INTENSE: 120 * 60,
 }
 
+VISIT_DURATION_BOUNDS = {
+    VisitKind.ATTRACTION: (60, 240), VisitKind.LUNCH: (60, 120), VisitKind.DINNER: (60, 120),
+    VisitKind.ATTRACTION_LUNCH: (90, 240), VisitKind.ATTRACTION_DINNER: (90, 240),
+}
+MEAL_START_WINDOWS = {
+    VisitKind.LUNCH: (time(11, 30), time(13, 30)),
+    VisitKind.ATTRACTION_LUNCH: (time(11, 30), time(13, 30)),
+    VisitKind.DINNER: (time(17, 30), time(19, 30)),
+    VisitKind.ATTRACTION_DINNER: (time(17, 30), time(19, 30)),
+}
 
-def ceil_to_grid(value: datetime) -> datetime:
-    """把下一可排活动起点向上吸附到上海时区的半小时网格。"""
+
+def ceil_to_minute(value: datetime) -> datetime:
+    """最早可排时间向上取整到分钟，保留抵离余量。"""
     if value.tzinfo is None or value.utcoffset() != timedelta(hours=8):
-        raise ValueError("grid value must be Asia/Shanghai aware")
-    value = value.replace(second=0, microsecond=0)
-    extra = (30 - value.minute % 30) % 30
-    return value + timedelta(minutes=extra)
+        raise ValueError("time must be Asia/Shanghai aware")
+    rounded = value.replace(second=0, microsecond=0)
+    return rounded if rounded == value else rounded + timedelta(minutes=1)
 
 
 def default_open_interval(day: date):
@@ -124,7 +134,7 @@ def boundary_processing_minutes(
 def route_scheduled_minutes(duration_s: int) -> int:
     if type(duration_s) is not int or duration_s < 0:
         raise ValueError("duration must be a non-negative integer")
-    return 0 if duration_s == 0 else ceil(duration_s / 1800) * 30
+    return _route_minutes(duration_s)
 
 
 def route_mode_for_semantic(semantic: TransportSemantic) -> TravelMode:
@@ -199,12 +209,9 @@ def validate_meal_slots(
             if not visit.interval.start_at <= explicit_meal_anchors[0].event_at < visit.interval.end_at:
                 raise ValueError("meal must cover its explicit user time")
             continue
-        if visit.visit_kind in {VisitKind.LUNCH, VisitKind.ATTRACTION_LUNCH}:
-            if not time(11, 30) <= visit.interval.start_at.timetz().replace(tzinfo=None) <= time(13, 30):
-                raise ValueError("lunch must start in the 11:30-13:30 window")
-        if visit.visit_kind in {VisitKind.DINNER, VisitKind.ATTRACTION_DINNER}:
-            if not time(17, 30) <= visit.interval.start_at.timetz().replace(tzinfo=None) <= time(19, 30):
-                raise ValueError("dinner must start in the 17:30-19:30 window")
+        lower, upper = MEAL_START_WINDOWS[visit.visit_kind]
+        if not lower <= visit.interval.start_at.timetz().replace(tzinfo=None) <= upper:
+            raise ValueError("meal must start in its allowed window")
 
 
 _MEAL_TIME_PATTERN = re.compile(
@@ -561,26 +568,19 @@ def confirmed_visit_duration(name: str, names: tuple[str, ...], sources: tuple[s
 
 def validate_visit_duration(visit: ScheduledVisit, *, user_duration_minutes: int | None = None) -> None:
     """Validate the deterministic stay-duration bounds from the planning contract."""
-    # Retain the confirmed quantity for comparison; only its scheduled
-    # occupancy is rounded up. A model marker alone is not user evidence.
+    # 停留时长按确认值精确比较，不套用交通预留的取整规则。
     minutes = int((visit.interval.end_at - visit.interval.start_at).total_seconds() // 60)
     if visit.duration_source == "user_explicit" or user_duration_minutes is not None:
         if (
             type(user_duration_minutes) is not int or user_duration_minutes <= 0
             or visit.duration_source != "user_explicit"
-            or route_scheduled_minutes(user_duration_minutes * 60) != minutes
+            or user_duration_minutes != minutes
         ):
             raise ValueError("user duration requires matching confirmed evidence")
         return
-    bounds = {
-        VisitKind.ATTRACTION: (60, 240),
-        VisitKind.LUNCH: (60, 120),
-        VisitKind.DINNER: (60, 120),
-        VisitKind.ATTRACTION_LUNCH: (90, 240),
-        VisitKind.ATTRACTION_DINNER: (90, 240),
-    }[visit.visit_kind]
-    if minutes % 30 != 0 or not bounds[0] <= minutes <= bounds[1]:
-        raise ValueError("visit duration violates the planning bounds or grid")
+    bounds = VISIT_DURATION_BOUNDS[visit.visit_kind]
+    if not bounds[0] <= minutes <= bounds[1]:
+        raise ValueError("visit duration violates the planning bounds")
 
 
 def validate_route_capacity(

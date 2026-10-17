@@ -20,7 +20,7 @@ from tests.unit.result_formatting.fakes import (
 
 
 def checked_itinerary_canonical(artifact, ref):
-    """Check either registered source version without using a result writer."""
+    """核对当前分钟记录的规范字节，不借助结果写入方。"""
     assert ref.artifact_type == "itinerary_planning.itinerary"
     assert artifact.schema_version == ref.schema_version
     prepared = make_registry().prepare(ArtifactWriteRequest(
@@ -35,14 +35,14 @@ def checked_itinerary_canonical(artifact, ref):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_transit_steps", [False, True])
-@pytest.mark.parametrize("planning_version", ["2.0", "3.0"])
-async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory, database_snapshot, with_transit_steps, planning_version):
+@pytest.mark.parametrize("minute_schedule", [False, True])
+async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory, database_snapshot, with_transit_steps, minute_schedule):
     run_id = UUID(int=UUID("12000000-0000-4000-8000-00000000c201").int
-                  + (16 if with_transit_steps else 0) + (1 if planning_version == "3.0" else 0))
+                  + (16 if with_transit_steps else 0) + (1 if minute_schedule else 0))
     runtime = await runtime_factory()
     instructions = ("步行到合成甲站", "乘坐合成1号线至乙站", "换乘合成20路至丙站") if with_transit_steps else None
     scenario = await make_scenario(repository=runtime.repository, days=3, run_id=run_id,
-                                   transit_instructions=instructions, planning_version=planning_version)
+                                   transit_instructions=instructions, minute_schedule=minute_schedule)
     service = ResultFormattingService(artifact_repository=runtime.repository)
     prepared = await service.prepare(scenario.request)
     assert type(prepared) is ResultFormattingPrepared
@@ -53,6 +53,12 @@ async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory
     request_json = make_read_request(scenario, index_ref).model_dump_json()
     first = await service.load(ResultReadRequest.model_validate_json(request_json, strict=True))
     assert type(first) is ResultFormattingLoaded
+    if minute_schedule:
+        assert "11:37" in first.markdown and "13:12" in first.markdown
+        for day in scenario.itinerary.record.draft.days:
+            assert day.visits[0].interval.schema_version == "2.0"
+            for route in day.route_legs:
+                assert route.scheduled_minutes == ((route.duration_s + 599) // 600) * 10 == 20
     if with_transit_steps:
         assert "1. 步行到合成甲站\n  2. 乘坐合成1号线至乙站\n  3. 换乘合成20路至丙站" in first.markdown
         assert "未选中方案" not in first.markdown
@@ -89,7 +95,7 @@ async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory
     source_after = await restarted.repository.get(source_ref, expected_model=type(scenario.itinerary))
     assert source_after.ref == source_ref
     assert checked_itinerary_canonical(source_after.content, source_ref) == source_before
-    assert source_after.content.schema_version == planning_version
+    assert source_after.content.schema_version == "6.0"
     assert await database_snapshot(run_id) == before_database
 
 

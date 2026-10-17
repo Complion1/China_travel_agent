@@ -17,8 +17,8 @@ def test_resume_v2_requires_actual_upstream_plan_and_preserves_other_versions():
         supplemental_operation_plan=_supplemental_plan(run_id))
     request = ItineraryPlanningResumeRequest(**fields)
     assert tuple(type(request).model_fields) == ("schema_version", "predecessor_planning_ref", "supplemented_candidate_set_ref", "operation_plan", "supplemental_operation_plan")
-    assert request.schema_version == "4.0"
-    assert request.operation_plan.schema_version == ITINERARY_PLANNING_SCHEMA_VERSION == "4.0"
+    assert request.schema_version == "6.0"
+    assert request.operation_plan.schema_version == ITINERARY_PLANNING_SCHEMA_VERSION == "6.0"
     assert request.supplemental_operation_plan.schema_version == "1.0"
     assert ItineraryPlanningResumeRequest.model_validate_json(request.model_dump_json(), strict=True) == request
     with pytest.raises(ValidationError):
@@ -106,7 +106,7 @@ def _leg(origin, destination, start, end, *, seconds=0) -> RouteLeg:
         alternative_index=0,
         distance_m=0,
         duration_s=seconds,
-        scheduled_minutes=0,
+        scheduled_minutes=int((end - start).total_seconds() // 60),
     )
 
 
@@ -149,7 +149,7 @@ def test_strict_time_and_route_contracts() -> None:
     assert interval.model_validate_json(interval.model_dump_json()) == interval
     with pytest.raises(ValueError):
         TimeInterval(
-            start_at=datetime(2026, 9, 3, 9, 15, tzinfo=SHANGHAI),
+            start_at=datetime(2026, 9, 3, 9, 15, 1, tzinfo=SHANGHAI),
             end_at=datetime(2026, 9, 3, 10, 0, tzinfo=SHANGHAI),
         )
     with pytest.raises(ValueError):
@@ -294,7 +294,7 @@ def test_public_proposal_and_tool_dtos_have_versioned_first_field() -> None:
     for name in names:
         model = getattr(models, name)
         assert tuple(model.model_fields) [0] == "schema_version"
-        assert model.model_fields["schema_version"].default == ("2.0" if name in {"CalculateRouteMatrixArgs", "PlanDirectionsArgs", "SubmitItineraryArgs"} else "1.0")
+        assert model.model_fields["schema_version"].default == ("3.0" if name == "RouteLeg" else "2.0" if name in {"TimeInterval", "RouteTimeInterval", "CalculateRouteMatrixArgs", "PlanDirectionsArgs", "SubmitItineraryArgs"} else "1.0")
         assert dict(model.model_config) == {
             "strict": True, "frozen": True, "extra": "forbid", "validate_default": True,
         }
@@ -347,7 +347,7 @@ def test_model_validator_matrix_covers_public_boundary_and_tool_rejections() -> 
         )
     with pytest.raises(ValueError):
         TimeInterval(
-            start_at=datetime(2026, 9, 3, 9, 15, tzinfo=SHANGHAI),
+            start_at=datetime(2026, 9, 3, 9, 15, 1, tzinfo=SHANGHAI),
             end_at=datetime(2026, 9, 3, 10, tzinfo=SHANGHAI),
         )
     with pytest.raises(ValueError):
@@ -357,7 +357,7 @@ def test_model_validator_matrix_covers_public_boundary_and_tool_rejections() -> 
         )
     with pytest.raises(ValueError):
         RouteTimeInterval(
-            start_at=datetime(2026, 9, 3, 10, 15, tzinfo=SHANGHAI),
+            start_at=datetime(2026, 9, 3, 10, 15, 1, tzinfo=SHANGHAI),
             end_at=datetime(2026, 9, 3, 10, 45, tzinfo=SHANGHAI),
         )
 
@@ -442,7 +442,7 @@ def test_model_validator_matrix_covers_public_boundary_and_tool_rejections() -> 
 
     with pytest.raises(ValueError):
         models.ProposedDailyTimeRule(
-            rule_id="p", date=None, start_at=datetime(2026, 9, 3, 9, 15, tzinfo=SHANGHAI),
+            rule_id="p", date=None, start_at=datetime(2026, 9, 3, 9, 15, 1, tzinfo=SHANGHAI),
             end_at=datetime(2026, 9, 3, 10, tzinfo=SHANGHAI), strength="hard", source_field="preferences.daily_time_preferences",
         )
     with pytest.raises(ValueError):

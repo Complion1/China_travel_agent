@@ -7,6 +7,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstra
 from app.durable_execution import DurableRunView
 from app.requirements import RequirementFieldPath
 from app.workflow_contracts import DeliveryStatus, RunSummary, TerminalCode, WorkflowPhase
+from app.frontend_experience import PublicTrip
 
 MAX_SAFE = 2**53 - 1
 Nonnegative = Annotated[int, Field(ge=0, le=MAX_SAFE)]
@@ -221,6 +222,7 @@ class WebRunView(WebModel):
     summary_status: SummaryStatus
     input_issues: tuple[WebInputIssue, ...] = Field(default=(), max_length=6)
     progress_phase: WorkflowPhase | None = None
+    trip: PublicTrip | None = None
     @model_validator(mode="after")
     def copy_run(self):
         object.__setattr__(self, "run", DurableRunView.model_validate_json(self.run.model_dump_json(), strict=True))
@@ -247,9 +249,19 @@ class WebHistoryPage(WebModel):
             raise ValueError("history has no cards")
         return self
 
+class WebDayReading(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid", revalidate_instances="always")
+    date: date
+    theme: str = Field(min_length=1, max_length=40)
+    visit_count: int = Field(ge=0, le=6)
+    route_count: int = Field(ge=0, le=7)
+    transport_minutes: Nonnegative
+
+
 class WebResultDay(WebModel):
     ordinal: Positive
     markdown: str
+    reading: WebDayReading | None = None
 
 class WebResultView(WebModel):
     result_schema_version: Literal["2.0"]

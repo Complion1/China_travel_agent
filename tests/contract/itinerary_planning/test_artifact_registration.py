@@ -46,14 +46,14 @@ def _op(step: str, phase: WorkflowPhase = WorkflowPhase.ITINERARY_PLANNING, run_
 
 def _ref(number: int, artifact_type: str, phase: WorkflowPhase, step: str, run_id: UUID = RUN_ID, schema_version: str | None = None) -> ArtifactRef:
     return ArtifactRef(
-        artifact_id=UUID(int=number), artifact_type=artifact_type, schema_version=schema_version or ("5.0" if artifact_type == "itinerary_planning.model_action" else "2.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"),
+        artifact_id=UUID(int=number), artifact_type=artifact_type, schema_version=schema_version or ("9.0" if artifact_type == "itinerary_planning.model_action" else "6.0" if artifact_type == "itinerary_planning.itinerary" else "4.0" if artifact_type == "candidate_research.candidate_set" else "1.0"),
         content_hash=DIGEST, operation_id=_op(step, phase, run_id), created_at=UTC, size_bytes=1,
     )
 
 
 def _directories() -> local.ArtifactRefDirectories:
     return local.ArtifactRefDirectories(
-        schema_version="1.0",
+        schema_version="5.0",
         hotel_selection_refs=(_ref(1, "hotel.selection", WorkflowPhase.HOTEL_SELECTION, "hotel"),),
         candidate_set_refs=(_ref(2, "candidate_research.candidate_set", WorkflowPhase.CANDIDATE_RESEARCH, "candidate_set"),),
         model_action_refs=(_ref(3, "itinerary_planning.model_action", WorkflowPhase.ITINERARY_PLANNING, "model_action"),),
@@ -64,10 +64,11 @@ def _directories() -> local.ArtifactRefDirectories:
     )
 
 
-def _budget() -> local._PlanningBudgetSummarySnapshotV2:
-    return local._PlanningBudgetSummarySnapshotV2(
-        schema_version='2.0', model_invocation_limit=17, model_invocations_consumed=0, direction_call_limit=2,
-        direction_calls_consumed=0, budget_snapshot_complete=True, semantic_invocation_limit=17,
+def _budget() -> local.PlanningBudgetSummarySnapshot:
+    return local.PlanningBudgetSummarySnapshot(
+        schema_version='6.0', model_invocation_limit=19, model_invocations_consumed=0, direction_call_limit=2,
+        normal_invocation_limit=17, format_repair_limit=2, format_repair_used=0,
+        direction_calls_consumed=0, budget_snapshot_complete=True, semantic_invocation_limit=19,
         semantic_invocations_consumed=0, known_provider_attempts=0, provider_attempts_complete=True,
         known_usage=LLMUsage(
             prompt_tokens=1, completion_tokens=0, total_tokens=1, reasoning_tokens=0,
@@ -76,13 +77,16 @@ def _budget() -> local._PlanningBudgetSummarySnapshotV2:
         preparation_limit=2, preparation_used=min(2, 0), transport_limit=5, transport_used=max(0, 0 - 2), submit_repair_limit=5, submit_repair_used=0, supplement_request_limit=5, supplement_request_used=0)
 
 
-def _state(*, pending: str | None = None, request_kind: str = "initial") -> local._PlanningStateSnapshotV2:
-    return local._PlanningStateSnapshotV2(
-        schema_version='2.0', request_kind=request_kind, requirement_digest=DIGEST,
+def _state(*, pending: str | None = None, request_kind: str = "initial") -> local._PlanningStateSnapshotV6:
+    return local._PlanningStateSnapshotV6(
+        schema_version='6.0', request_kind=request_kind, requirement_digest=DIGEST,
         effective_policy=None, draft=None, budgets=_budget(), model_invocations_consumed=0,
         no_progress_streak=0,
         supplement_fingerprints=(), pending_call_id=pending,
-        current_stage='preparation', preparation_used=0, transport_used=0, submit_repair_used=0, supplement_request_used=0, last_rejection=None)
+        current_stage='preparation', preparation_used=0, transport_used=0, submit_repair_used=0,
+        supplement_request_used=0, format_repair_used=0, last_rejection=None,
+        correction_targets=(), correction_plan_fingerprints=(), correction_evidence_fingerprint=None,
+        correction_fact_fingerprints=(), correction_no_progress=0, last_proposal_fingerprint=None)
 
 
 def _summary_gap() -> local.PlanningProcessGapSummarySnapshot:
@@ -124,9 +128,9 @@ def _draft(directories: local.ArtifactRefDirectories) -> local.ItineraryDraftSna
     arrival_hub = local.HubLocationRefSnapshot(schema_version="1.0", ref_type="hub", endpoint_kind="arrival", geocode_observation_index=0)
     departure_hub = local.HubLocationRefSnapshot(schema_version="1.0", ref_type="hub", endpoint_kind="departure", geocode_observation_index=0)
     arrival_leg = local.RouteLegSnapshot(
-        schema_version="1.0", leg_id="arrival-leg", origin=arrival_hub, destination=hotel,
+        schema_version="3.0", leg_id="arrival-leg", origin=arrival_hub, destination=hotel,
         interval=local.PersistedRouteTimeInterval(
-            schema_version="1.0", start_at_utc=UTC, end_at_utc=UTC, timezone="Asia/Shanghai",
+            schema_version="2.0", start_at_utc=UTC, end_at_utc=UTC, timezone="Asia/Shanghai",
             local_start_date=UTC.astimezone(timezone.utc).date(), local_end_date=UTC.astimezone(timezone.utc).date(),
         ), transport_semantic=TransportSemantic.WALKING, route_mode=TravelMode.WALKING, directions_observation_index=0,
         alternative_index=0, distance_m=0, duration_s=0, scheduled_minutes=0,
@@ -155,14 +159,14 @@ def _draft(directories: local.ArtifactRefDirectories) -> local.ItineraryDraftSna
 
 def _persisted_interval(start_at_utc: datetime, end_at_utc: datetime) -> local.PersistedTimeInterval:
     return local.PersistedTimeInterval(
-        schema_version="1.0", start_at_utc=start_at_utc, end_at_utc=end_at_utc,
+        schema_version="2.0", start_at_utc=start_at_utc, end_at_utc=end_at_utc,
         timezone="Asia/Shanghai", local_start_date=date(2026, 9, 3), local_end_date=date(2026, 9, 3),
     )
 
 
 def _persisted_route_interval(at_utc: datetime) -> local.PersistedRouteTimeInterval:
     return local.PersistedRouteTimeInterval(
-        schema_version="1.0", start_at_utc=at_utc, end_at_utc=at_utc,
+        schema_version="2.0", start_at_utc=at_utc, end_at_utc=at_utc,
         timezone="Asia/Shanghai", local_start_date=date(2026, 9, 3), local_end_date=date(2026, 9, 3),
     )
 
@@ -192,7 +196,7 @@ def _non_transit_day(visit_count: int) -> local.DayPlanSnapshot:
     route_refs = (hotel, *candidates, hotel)
     route_legs = tuple(
         local.RouteLegSnapshot(
-            schema_version="1.0", leg_id=f"leg-{index + 1}", origin=route_refs[index], destination=route_refs[index + 1],
+            schema_version="3.0", leg_id=f"leg-{index + 1}", origin=route_refs[index], destination=route_refs[index + 1],
             interval=_persisted_route_interval(route_points[index]), transport_semantic=TransportSemantic.WALKING,
             route_mode=TravelMode.WALKING, directions_observation_index=0, alternative_index=0,
             distance_m=0, duration_s=0, scheduled_minutes=0,
@@ -228,9 +232,9 @@ def test_cross_midnight_day_snapshot_round_trips_public_dto_and_hotel_closure() 
     data["open_intervals"][0]["end_at"] = "2026-09-04T00:30:00+08:00"
     data["route_legs"][-1]["interval"].update(
         start_at="2026-09-04T00:00:00+08:00",
-        end_at="2026-09-04T00:30:00+08:00",
+        end_at="2026-09-04T00:10:00+08:00",
     )
-    data["route_legs"][-1].update(duration_s=600, scheduled_minutes=30)
+    data["route_legs"][-1].update(duration_s=600, scheduled_minutes=10)
 
     cross_midnight = local.DayPlan.model_validate_json(
         __import__("json").dumps(data, ensure_ascii=False), strict=True
@@ -279,14 +283,14 @@ def test_completed_non_transit_artifact_round_trips_through_real_registry(visit_
         boundary_transfers=2, route_legs=visit_count + 3, backups=0, unknown_hours=0,
     )
     artifact = ItineraryPlanningArtifact(
-        schema_version='2.0', request_digest=DIGEST, parent_planning_ref=None, directories=directories,
+        schema_version="6.0", request_digest=DIGEST, parent_planning_ref=None, directories=directories,
         record=local.CompletedItineraryRecord(
             schema_version="1.0", record_type="completed", draft=draft, summary=summary, budgets=_budget(),
         ),
     )
     registry = ArtifactSchemaRegistry(ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS)
     request = ArtifactWriteRequest(
-        operation_id=_op("non_transit_write"), artifact_type="itinerary_planning.itinerary", schema_version="2.0",
+        operation_id=_op("non_transit_write"), artifact_type="itinerary_planning.itinerary", schema_version="6.0",
         content=artifact.model_dump(mode="json"),
     )
     prepared = registry.prepare(request)
@@ -310,7 +314,7 @@ def test_all_five_record_branches_are_constructible_and_pending_rules_hold() -> 
     )
     completed = local.CompletedItineraryRecord(schema_version="1.0", record_type="completed", draft=draft, summary=summary, budgets=_budget())
     assert completed.record_type == "completed"
-    artifact = ItineraryPlanningArtifact(schema_version='2.0', request_digest=DIGEST, parent_planning_ref=None, directories=directories, record=completed)
+    artifact = ItineraryPlanningArtifact(schema_version="6.0", request_digest=DIGEST, parent_planning_ref=None, directories=directories, record=completed)
     assert artifact.record.draft.hotel_selection_ref == directories.hotel_selection_refs[0]
 
 
@@ -331,7 +335,7 @@ def _registered_artifacts() -> tuple[tuple[str, BaseModel, OperationId, type[Bas
     hotel = local.HotelLocationRefSnapshot(schema_version="1.0", ref_type="hotel", hotel_selection_ref_index=0)
     action_ref = directories.model_action_refs[0]
     action = ItineraryPlanningModelActionArtifact(
-        schema_version='5.0', request_digest=DIGEST, invocation_index=0, prompt_version='planning-v5',
+        schema_version='9.0', request_digest=DIGEST, invocation_index=0, prompt_version='planning-v9',
         prompt_hash=DIGEST, action_kind="final_text", call_summaries=(), invocation_metadata=_metadata(), disposition="accepted",
         request_stage='preparation', budget_category='preparation')
     geocode = ItineraryPlanningHubGeocodeObservationArtifact(
@@ -351,7 +355,7 @@ def _registered_artifacts() -> tuple[tuple[str, BaseModel, OperationId, type[Bas
         observation_status="not_issued", alternatives=(), provenance=None, map_failure=None,
     )
     itinerary = ItineraryPlanningArtifact(
-        schema_version='2.0', request_digest=DIGEST, parent_planning_ref=None, directories=directories,
+        schema_version="6.0", request_digest=DIGEST, parent_planning_ref=None, directories=directories,
         record=_record_variants()[0],
     )
     return (
@@ -426,7 +430,7 @@ def test_registry_rejects_extra_coercion_forged_branch_and_unknown_version() -> 
     registry = ArtifactSchemaRegistry(ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS)
     artifact = _registered_artifacts()[0][1]
     request = ArtifactWriteRequest(
-        operation_id=_op("security_write"), artifact_type="itinerary_planning.model_action", schema_version="5.0",
+        operation_id=_op("security_write"), artifact_type="itinerary_planning.model_action", schema_version="9.0",
         content=artifact.model_dump(mode="json"),
     )
     with pytest.raises(ArtifactRequestValidationError):
@@ -449,7 +453,7 @@ def test_registry_rejects_extra_coercion_forged_branch_and_unknown_version() -> 
 def test_directories_cross_run_and_pending_zero_prefix_contracts() -> None:
     directories = _directories()
     artifact = ItineraryPlanningArtifact(
-        schema_version='2.0', request_digest=DIGEST, parent_planning_ref=None,
+        schema_version="6.0", request_digest=DIGEST, parent_planning_ref=None,
         directories=directories, record=_record_variants()[1],
     )
     assert artifact.record.state.draft is None

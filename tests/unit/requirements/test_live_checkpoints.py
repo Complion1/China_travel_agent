@@ -109,7 +109,7 @@ async def test_formatting_from_persisted_itinerary_never_creates_api_runtime(mon
     monkeypatch.setattr(worker, "scenario_matches", lambda requirement: None)
     await repo.put(worker.context_write(scenario.request.state))
     await repo.put(ArtifactWriteRequest(operation_id=worker.op(WorkflowPhase.ITINERARY_PLANNING, "plan_terminal"),
-        artifact_type="itinerary_planning.itinerary", schema_version="2.0", content=scenario.itinerary.model_dump(mode="json")))
+        artifact_type="itinerary_planning.itinerary", schema_version=scenario.itinerary.schema_version, content=scenario.itinerary.model_dump(mode="json")))
     def forbidden(*args, **kwargs):
         raise AssertionError("formatting must not construct an API runtime")
     monkeypatch.setattr(worker, "DeepSeekRuntime", forbidden)
