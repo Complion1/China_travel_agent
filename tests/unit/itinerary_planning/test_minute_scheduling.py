@@ -123,15 +123,15 @@ async def test_old_or_mixed_requests_are_rejected_before_any_side_effect(level):
     await service.aclose()
 
 
-def test_current_failure_accepts_action_v9_and_rejects_v8():
+def test_current_failure_accepts_action_v11_and_rejects_v10():
     from app.itinerary_planning import ControlPlanningFailure, ItineraryPlanningFailed, PlanningFailureCode
     from tests.contract.itinerary_planning.test_artifact_registration import _directories
 
-    ref = _directories().model_action_refs[0]
+    ref = _directories().model_action_refs[0].model_copy(update={"schema_version": "11.0"})
     failure = ControlPlanningFailure(code=PlanningFailureCode.MODEL_CONTRACT_INVALID, retryable=False, possible_duplicate=False)
     result = ItineraryPlanningFailed(failure=failure, last_consistent_itinerary_ref=None,
         failure_artifact_ref=ref, budgets=None, retryable=False, possible_duplicate=False)
-    assert result.failure_artifact_ref.schema_version == "9.0"
+    assert result.failure_artifact_ref.schema_version == "11.0"
     with pytest.raises(ValueError):
         ItineraryPlanningFailed(failure=failure, last_consistent_itinerary_ref=None,
             failure_artifact_ref=ref.model_copy(update={"schema_version": "8.0"}), budgets=None,

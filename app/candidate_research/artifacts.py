@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 import re
 from typing import Annotated, ClassVar, Literal, TypeAlias
 from uuid import UUID
@@ -775,6 +776,7 @@ class ArtifactResearchCoverageSummarySnapshot(ArtifactSnapshotModel):
 
 
 class ArtifactResearchBudgetSummarySnapshot(ArtifactSnapshotModel):
+    allow_unknown_admission: ClassVar[bool] = False
     iteration_limit: Literal[6]
     iterations_consumed: Annotated[int, Field(ge=0, le=6)]
     place_call_limit: Literal[48]
@@ -796,7 +798,7 @@ class ArtifactResearchBudgetSummarySnapshot(ArtifactSnapshotModel):
         if self.provider_attempts_complete and self.known_provider_attempts < self.semantic_invocations_consumed:
             raise ValueError("complete provider attempts must cover semantic invocations")
         if self.semantic_invocations_consumed == 0:
-            if self.known_provider_attempts != 0 or not self.provider_attempts_complete or not self.usage_complete:
+            if self.known_provider_attempts != 0 or (not self.allow_unknown_admission and (not self.provider_attempts_complete or not self.usage_complete)):
                 raise ValueError("zero semantic calls require complete zero usage")
             if any(getattr(usage, name) != 0 for name in ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens")):
                 raise ValueError("zero semantic calls require zero usage")
@@ -844,6 +846,7 @@ class ArtifactMealCoverageMissingSummary(ArtifactSnapshotModel):
 
 
 class ArtifactMealCountShortfallSummary(ArtifactMealCoverageMissingSummary):
+    source_versions: ClassVar[tuple[str, ...]] = ("2.0", "3.0", "4.0")
     gap_type: Literal["meal_count_shortfall"]
     current_count: Annotated[int, Field(ge=0)]
     target_count: Annotated[int, Field(ge=1)]
@@ -852,7 +855,7 @@ class ArtifactMealCountShortfallSummary(ArtifactMealCoverageMissingSummary):
     @model_validator(mode="after")
     def _source(self):
         ref = self.source_candidate_set_ref
-        if ref.artifact_type != "candidate_research.candidate_set" or ref.schema_version not in {"2.0", "3.0", "4.0"} or self.evidence_indexes:
+        if ref.artifact_type != "candidate_research.candidate_set" or ref.schema_version not in self.source_versions or self.evidence_indexes:
             raise ValueError("meal quota uses predecessor state proof, not observation indexes")
         if self.current_count >= self.target_count:
             raise ValueError("meal quota already satisfied")
@@ -952,6 +955,8 @@ class SearchCoverageState(ArtifactSnapshotModel):
 
 class CandidateSetStateSnapshot(ArtifactSnapshotModel):
     qualified_supply: ClassVar[bool] = False
+    action_versions: ClassVar[tuple[str, ...]] = ("1.0", "2.0")
+    judgment_versions: ClassVar[tuple[str, ...]] = ("1.0", "2.0", "3.0")
     confirmed_requirement_digest: ContentDigest
     hotel_selection_ref: ArtifactRef
     effective_interests: Annotated[tuple[InterestTag, ...], Field(min_length=1, max_length=4)]
@@ -986,7 +991,7 @@ class CandidateSetStateSnapshot(ArtifactSnapshotModel):
             raise ValueError("artifact ref operation ids must be unique")
         for refs, expected_type in ref_groups:
             for ref in refs:
-                if ref.artifact_type != expected_type or ref.schema_version not in ({"1.0", "2.0", "3.0"} if expected_type == "candidate_research.model_judgment" else {"1.0", "2.0"} if expected_type == "candidate_research.model_action" else {"1.0"}):
+                if ref.artifact_type != expected_type or ref.schema_version not in (self.judgment_versions if expected_type == "candidate_research.model_judgment" else self.action_versions if expected_type == "candidate_research.model_action" else ("1.0",)):
                     raise ValueError("artifact ref directory type/version mismatch")
                 if ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
                     raise ValueError("candidate research refs must use candidate_research phase")
@@ -1299,6 +1304,9 @@ CandidateResearchFailureSnapshot: TypeAlias = Annotated[
 
 
 class FailedCandidateSetRecord(ArtifactSnapshotModel):
+    candidate_versions: ClassVar[tuple[str, ...]] = ("1.0", "2.0", "3.0", "4.0")
+    action_versions: ClassVar[tuple[str, ...]] = ("1.0", "2.0")
+    judgment_versions: ClassVar[tuple[str, ...]] = ("1.0", "2.0", "3.0")
     record_type: Literal["failed"]
     state: CandidateSetStateSnapshot | None
     failure: CandidateResearchFailureSnapshot
@@ -1334,7 +1342,10 @@ class FailedCandidateSetRecord(ArtifactSnapshotModel):
                 if ref is not None and state_runs and ref.operation_id.run_id not in state_runs:
                     raise ValueError("failed ref run differs from state directory")
         for ref in (self.last_consistent_candidate_set_ref, self.failure_artifact_ref):
-            if ref is not None and (ref.schema_version not in ({"1.0", "2.0", "3.0", "4.0"} if ref.artifact_type == "candidate_research.candidate_set" else {"1.0", "2.0", "3.0"} if ref.artifact_type == "candidate_research.model_judgment" else {"1.0", "2.0"} if ref.artifact_type == "candidate_research.model_action" else {"1.0"}) or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH):
+            versions = (self.candidate_versions if ref is not None and ref.artifact_type == "candidate_research.candidate_set"
+                        else self.judgment_versions if ref is not None and ref.artifact_type == "candidate_research.model_judgment"
+                        else self.action_versions if ref is not None and ref.artifact_type == "candidate_research.model_action" else ("1.0",))
+            if ref is not None and (ref.schema_version not in versions or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH):
                 raise ValueError("failure ref schema mismatch")
         failure_refs = [
             ref for ref in (self.last_consistent_candidate_set_ref, self.failure_artifact_ref)
@@ -1584,9 +1595,11 @@ class CandidateResearchLegacyArtifact(ArtifactSnapshotModel):
     record: CandidateSetRecord
     @model_validator(mode="after")
     def _run_and_predecessor(self) -> "CandidateResearchArtifact":
-        if self.schema_version != "4.0" and CandidateResearchStopReason.SEMANTIC_BUDGET_INSUFFICIENT in getattr(self.record, "stop_reasons", ()):
+        if self.schema_version not in {"4.0", "5.0"} and CandidateResearchStopReason.SEMANTIC_BUDGET_INSUFFICIENT in getattr(self.record, "stop_reasons", ()):
             raise ValueError("semantic budget stop requires candidate set version 4")
-        if self.schema_version not in {"3.0", "4.0"} and isinstance(self.record, CompletedCandidateSetRecord) and not _candidate_set_state_complete(self.record.state):
+        if self.schema_version != "5.0" and CandidateResearchStopReason.CORRECTION_LIMIT_REACHED in getattr(self.record, "stop_reasons", ()):
+            raise ValueError("correction stop requires candidate set version 5")
+        if self.schema_version not in {"3.0", "4.0", "5.0"} and isinstance(self.record, CompletedCandidateSetRecord) and not _candidate_set_state_complete(self.record.state):
             raise ValueError("legacy completion gate failed")
         if self.predecessor_ref is None:
             if self.mode is not ResearchMode.INITIAL:
@@ -1600,12 +1613,12 @@ class CandidateResearchLegacyArtifact(ArtifactSnapshotModel):
                 raise ValueError("predecessor ref run mismatch")
         state = getattr(self.record, "state", None)
         for gap in (*getattr(self.record, "gaps", ()), *getattr(state, "pending_gaps", ())):
-            if isinstance(gap, ArtifactMealCountShortfallSummary) and (self.schema_version not in {"2.0", "3.0", "4.0"} or gap.source_candidate_set_ref != self.predecessor_ref):
+            if isinstance(gap, ArtifactMealCountShortfallSummary) and (self.schema_version not in {"2.0", "3.0", "4.0", "5.0"} or gap.source_candidate_set_ref != self.predecessor_ref):
                 raise ValueError("meal quota proof must reference exact v2 predecessor")
         if state is not None:
-            if self.schema_version not in {"3.0", "4.0"} and any(ref.schema_version != "1.0" for ref in (*state.model_action_refs, *state.model_judgment_refs)):
+            if self.schema_version not in {"3.0", "4.0", "5.0"} and any(ref.schema_version != "1.0" for ref in (*state.model_action_refs, *state.model_judgment_refs)):
                 raise ValueError("legacy candidate set has incompatible model refs")
-            if self.schema_version not in {"3.0", "4.0"} and len(state.effective_interests) < 2:
+            if self.schema_version not in {"3.0", "4.0", "5.0"} and len(state.effective_interests) < 2:
                 raise ValueError("legacy candidate sets require at least two interests")
             if any(item.schema_version != ("1.0" if self.schema_version == "1.0" else "2.0") for item in state.candidates):
                 raise ValueError("candidate version must match candidate set")
@@ -1645,6 +1658,8 @@ class CandidateResearchArtifact(CandidateResearchV3Artifact):
     schema_version: Literal["4.0"]
     record: QualifiedCandidateSetRecord
     qualification_state: "QualificationState"
+    action_version: ClassVar[str] = "2.0"
+    judgment_version: ClassVar[str] = "3.0"
 
     @model_validator(mode="after")
     def _qualification(self):
@@ -1653,8 +1668,8 @@ class CandidateResearchArtifact(CandidateResearchV3Artifact):
             if self.qualification_state.assessments or self.qualification_state.steps:
                 raise ValueError("empty failed state cannot have qualification history")
             return self
-        if (any(ref.schema_version != "2.0" for ref in state.model_action_refs)
-                or any(ref.schema_version != "3.0" for ref in state.model_judgment_refs)):
+        if (any(ref.schema_version != self.action_version for ref in state.model_action_refs)
+                or any(ref.schema_version != self.judgment_version for ref in state.model_judgment_refs)):
             raise ValueError("current candidate model reference versions incompatible")
         candidates = {item.admission_ordinal: item for item in state.candidates}
         groups = {item.group_id: item.requirement_kind for item in state.requirement_group_states}
@@ -1684,17 +1699,238 @@ CandidateResearchModelJudgmentArtifact.model_rebuild()
 CandidateResearchArtifact.model_rebuild()
 
 
+CandidateResearchV4Artifact = CandidateResearchArtifact
+CandidateResearchV2ModelActionArtifact = CandidateResearchModelActionArtifact
+CandidateResearchV3ModelJudgmentArtifact = CandidateResearchModelJudgmentArtifact
+
+
+class CorrectableResearchBudgetSnapshot(ArtifactResearchBudgetSummarySnapshot):
+    allow_unknown_admission: ClassVar[bool] = True
+    correction_limit: Literal[2]
+    corrections_consumed: Annotated[int, Field(ge=0, le=2)]
+
+    @model_validator(mode="after")
+    def _paid_correction_bound(self):
+        if self.corrections_consumed > self.semantic_invocations_consumed:
+            raise ValueError("paid corrections cannot exceed admitted semantic invocations")
+        return self
+
+
+class CorrectableMealCountShortfallSummary(ArtifactMealCountShortfallSummary):
+    source_versions: ClassVar[tuple[str, ...]] = ("5.0",)
+
+
+CorrectableResearchGapSummary: TypeAlias = Annotated[
+    ArtifactCandidateCountShortfallSummary | ArtifactInterestCoverageMissingSummary | ArtifactAreaCoverageMissingSummary
+    | ArtifactMealCoverageMissingSummary | CorrectableMealCountShortfallSummary | ArtifactMustVisitResolutionMissingSummary
+    | ArtifactAvoidResolutionMissingSummary | ArtifactCandidateDetailsMissingSummary | ArtifactReplacementCandidateNeededSummary,
+    Field(discriminator="gap_type"),
+]
+
+
+class CorrectableCandidateSetStateSnapshot(QualifiedCandidateSetStateSnapshot):
+    action_versions: ClassVar[tuple[str, ...]] = ("3.0",)
+    judgment_versions: ClassVar[tuple[str, ...]] = ("4.0",)
+    budgets: CorrectableResearchBudgetSnapshot
+    pending_gaps: Annotated[tuple[CorrectableResearchGapSummary, ...], Field(max_length=128)]
+
+
+class CorrectableInProgressCandidateSetRecord(QualifiedInProgressCandidateSetRecord):
+    state: CorrectableCandidateSetStateSnapshot
+
+
+class CorrectableCompletedCandidateSetRecord(QualifiedCompletedCandidateSetRecord):
+    state: CorrectableCandidateSetStateSnapshot
+    budgets: CorrectableResearchBudgetSnapshot
+
+
+class CorrectableIncompleteCandidateSetRecord(QualifiedIncompleteCandidateSetRecord):
+    state: CorrectableCandidateSetStateSnapshot
+    budgets: CorrectableResearchBudgetSnapshot
+    gaps: Annotated[tuple[CorrectableResearchGapSummary, ...], Field(min_length=1, max_length=128)]
+    stop_reasons: Annotated[tuple[CandidateResearchStopReason, ...], Field(min_length=1, max_length=8)]
+
+
+class CorrectableFailedCandidateSetRecord(QualifiedFailedCandidateSetRecord):
+    candidate_versions: ClassVar[tuple[str, ...]] = ("5.0",)
+    action_versions: ClassVar[tuple[str, ...]] = ("3.0",)
+    judgment_versions: ClassVar[tuple[str, ...]] = ("4.0",)
+    state: CorrectableCandidateSetStateSnapshot | None
+    budgets: CorrectableResearchBudgetSnapshot
+
+
+class AttemptActionResult(ArtifactSnapshotModel):
+    result_type: Literal["action_result"]
+    record: ModelActionRecord
+
+
+class AttemptJudgmentResult(ArtifactSnapshotModel):
+    result_type: Literal["judgment_result"]
+    record: ModelJudgmentRecord
+
+
+class AttemptControlFailure(ArtifactSnapshotModel):
+    result_type: Literal["control_failure", "indeterminate"]
+    code: CandidateResearchControlFailureCode
+    metadata: ArtifactInvocationMetadataSnapshot | None
+
+
+class CandidateResearchInvocationAttemptArtifact(ArtifactSnapshotModel):
+    schema_version: Literal["1.0"]
+    run_id: UUID
+    mode: ResearchMode
+    main_operation_id: OperationId
+    kind: Literal["action", "judgment"]
+    invocation_slot_index: Annotated[int, Field(ge=0, le=5)]
+    iteration_index: Annotated[int, Field(ge=0, le=5)]
+    attempt_index: Annotated[int, Field(ge=0, le=2)]
+    semantic_index: Annotated[int, Field(ge=0, le=12)]
+    semantic_cost: Literal[0, 1] | None
+    is_correction: bool
+    correction_number: Annotated[int, Field(ge=1, le=2)] | None
+    trigger_ref: ArtifactRef | None
+    recovery_code: Literal["highest_priority_objective_ignored", "objective_parameters", "duplicate",
+                           "details_already_requested", "no_useful_action_invalid", "structured_output_invalid",
+                           "output_truncated", "judgment_evidence_mismatch", "judgment_required_missing"] | None
+    result: Annotated[AttemptActionResult | AttemptJudgmentResult | AttemptControlFailure,
+                      Field(discriminator="result_type")]
+
+    @model_validator(mode="after")
+    def _attempt_identity(self):
+        if self.main_operation_id.run_id != self.run_id or self.main_operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
+            raise ValueError("attempt must belong to its research run")
+        if self.is_correction != (self.attempt_index > 0):
+            raise ValueError("attempt index must identify correction")
+        if self.is_correction != (self.correction_number is not None and self.trigger_ref is not None):
+            raise ValueError("correction must retain its trigger and number")
+        if not self.is_correction and (self.trigger_ref is not None or self.correction_number is not None):
+            raise ValueError("original invocation cannot have a correction trigger")
+        if self.trigger_ref is not None:
+            ref = self.trigger_ref
+            if ref.artifact_type != "candidate_research.invocation_attempt" or ref.schema_version != "1.0" or ref.operation_id.run_id != self.run_id or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
+                raise ValueError("correction trigger identity mismatch")
+        if self.semantic_cost is None and self.result.result_type != "indeterminate":
+            raise ValueError("unknown invocation cost requires an indeterminate result")
+        if self.semantic_cost == 1 and self.semantic_index >= 12:
+            raise ValueError("admitted invocation exceeds model budget")
+        if self.result.result_type in {"action_result", "judgment_result"}:
+            if self.result.result_type != self.kind + "_result":
+                raise ValueError("attempt result kind mismatch")
+            record = self.result.record
+            metadata = getattr(record, "metadata", None)
+        else:
+            metadata = self.result.metadata
+        if metadata is not None and self.semantic_cost != 1:
+            raise ValueError("model success metadata requires an admitted invocation")
+        return self
+
+
+def _main_attempt_refs(artifact):
+    refs = artifact.attempt_refs
+    if len(set(refs)) != len(refs):
+        raise ValueError("main invocation attempt references must be unique")
+    if any(ref.artifact_type != "candidate_research.invocation_attempt" or ref.schema_version != "1.0"
+           or ref.operation_id.run_id != artifact.run_id or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH
+           for ref in refs):
+        raise ValueError("main invocation attempt reference identity mismatch")
+
+
+class CandidateResearchModelActionArtifact(CandidateResearchV2ModelActionArtifact):
+    schema_version: Literal["3.0"]
+    prompt_version: Literal["action-v2"]
+    attempt_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=1, max_length=3)]
+    result: ModelActionRecord
+
+    @model_validator(mode="after")
+    def _identity(self):
+        data = self.model_dump(mode="json", exclude={"attempt_refs"})
+        data["schema_version"] = "2.0"
+        CandidateResearchV2ModelActionArtifact.model_validate_json(json.dumps(data), strict=True)
+        _main_attempt_refs(self)
+        return self
+
+
+class CandidateResearchModelJudgmentArtifact(CandidateResearchV3ModelJudgmentArtifact):
+    schema_version: Literal["4.0"]
+    attempt_refs: Annotated[tuple[ArtifactRef, ...], Field(min_length=1, max_length=3)]
+    result: ModelJudgmentRecord
+
+    @model_validator(mode="after")
+    def _evidence_directory(self):
+        data = self.model_dump(mode="json", exclude={"attempt_refs", "job"})
+        data["schema_version"] = "3.0"
+        data["job"] = self.job.model_dump(mode="json")
+        CandidateResearchV3ModelJudgmentArtifact.model_validate_json(json.dumps(data), strict=True)
+        _main_attempt_refs(self)
+        return self
+
+
+class CorrectableActionCorrectionState(ArtifactActionCorrectionState):
+    attempts: Annotated[int, Field(ge=1, le=12)]
+
+
+class CandidateResearchArtifact(CandidateResearchV4Artifact):
+    schema_version: Literal["5.0"]
+    action_version: ClassVar[str] = "3.0"
+    judgment_version: ClassVar[str] = "4.0"
+    record: Annotated[CorrectableInProgressCandidateSetRecord | CorrectableCompletedCandidateSetRecord |
+                      CorrectableIncompleteCandidateSetRecord | CorrectableFailedCandidateSetRecord,
+                      Field(discriminator="record_type")]
+    correction_state: Annotated[tuple[CorrectableActionCorrectionState, ...], Field(max_length=6)]
+    invocation_attempt_refs: Annotated[tuple[ArtifactRef, ...], Field(max_length=14)]
+
+    @model_validator(mode="after")
+    def _attempt_directory(self):
+        refs = self.invocation_attempt_refs
+        if len(set(refs)) != len(refs) or any(ref.artifact_type != "candidate_research.invocation_attempt"
+                or ref.schema_version != "1.0" or ref.operation_id.run_id != self.run_id
+                or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH for ref in refs):
+            raise ValueError("candidate invocation attempt directory mismatch")
+        return self
+
+
+def candidate_artifact_model(version: str):
+    models = {"1.0": CandidateResearchLegacyArtifact, "2.0": CandidateResearchLegacyArtifact,
+              "3.0": CandidateResearchV3Artifact, "4.0": CandidateResearchV4Artifact,
+              "5.0": CandidateResearchArtifact}
+    if version not in models:
+        raise ValueError("unsupported candidate artifact version")
+    return models[version]
+
+
+def action_artifact_model(version: str):
+    if version in {"1.0", "2.0"}:
+        return CandidateResearchV2ModelActionArtifact
+    if version == "3.0":
+        return CandidateResearchModelActionArtifact
+    raise ValueError("unsupported research action version")
+
+
+def judgment_artifact_model(version: str):
+    if version in {"1.0", "2.0"}:
+        return CandidateResearchLegacyModelJudgmentArtifact
+    if version == "3.0":
+        return CandidateResearchV3ModelJudgmentArtifact
+    if version == "4.0":
+        return CandidateResearchModelJudgmentArtifact
+    raise ValueError("unsupported research judgment version")
+
+
 CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS: tuple[ArtifactSchemaRegistration, ...] = (
-    ArtifactSchemaRegistration(artifact_type="candidate_research.model_action", schema_version="1.0", model=CandidateResearchModelActionArtifact),
-    ArtifactSchemaRegistration(artifact_type="candidate_research.model_action", schema_version="2.0", model=CandidateResearchModelActionArtifact),
+    ArtifactSchemaRegistration(artifact_type="candidate_research.model_action", schema_version="1.0", model=CandidateResearchV2ModelActionArtifact),
+    ArtifactSchemaRegistration(artifact_type="candidate_research.model_action", schema_version="2.0", model=CandidateResearchV2ModelActionArtifact),
+    ArtifactSchemaRegistration(artifact_type="candidate_research.model_action", schema_version="3.0", model=CandidateResearchModelActionArtifact),
     ArtifactSchemaRegistration(artifact_type="candidate_research.model_judgment", schema_version="1.0", model=CandidateResearchLegacyModelJudgmentArtifact),
     ArtifactSchemaRegistration(artifact_type="candidate_research.model_judgment", schema_version="2.0", model=CandidateResearchLegacyModelJudgmentArtifact),
-    ArtifactSchemaRegistration(artifact_type="candidate_research.model_judgment", schema_version="3.0", model=CandidateResearchModelJudgmentArtifact),
+    ArtifactSchemaRegistration(artifact_type="candidate_research.model_judgment", schema_version="3.0", model=CandidateResearchV3ModelJudgmentArtifact),
+    ArtifactSchemaRegistration(artifact_type="candidate_research.model_judgment", schema_version="4.0", model=CandidateResearchModelJudgmentArtifact),
+    ArtifactSchemaRegistration(artifact_type="candidate_research.invocation_attempt", schema_version="1.0", model=CandidateResearchInvocationAttemptArtifact),
     ArtifactSchemaRegistration(artifact_type="candidate_research.place_observation", schema_version="1.0", model=CandidateResearchPlaceObservationArtifact),
     ArtifactSchemaRegistration(artifact_type="candidate_research.candidate_set", schema_version="1.0", model=CandidateResearchLegacyArtifact),
     ArtifactSchemaRegistration(artifact_type="candidate_research.candidate_set", schema_version="2.0", model=CandidateResearchLegacyArtifact),
     ArtifactSchemaRegistration(artifact_type="candidate_research.candidate_set", schema_version="3.0", model=CandidateResearchV3Artifact),
-    ArtifactSchemaRegistration(artifact_type="candidate_research.candidate_set", schema_version="4.0", model=CandidateResearchArtifact),
+    ArtifactSchemaRegistration(artifact_type="candidate_research.candidate_set", schema_version="4.0", model=CandidateResearchV4Artifact),
+    ArtifactSchemaRegistration(artifact_type="candidate_research.candidate_set", schema_version="5.0", model=CandidateResearchArtifact),
 )
 
 # Resolve the two forward references before the registry walks the graph.
@@ -1704,10 +1940,11 @@ ProposedSearchActionSnapshot.model_rebuild()
 
 def _artifact_write_request(*, operation_id: OperationId, artifact_type: ArtifactType, artifact: ArtifactSnapshotModel) -> ArtifactWriteRequest:
     expected = {
-        "candidate_research.model_action": CandidateResearchModelActionArtifact,
+        "candidate_research.model_action": CandidateResearchV2ModelActionArtifact,
         "candidate_research.model_judgment": CandidateResearchLegacyModelJudgmentArtifact,
         "candidate_research.place_observation": CandidateResearchPlaceObservationArtifact,
         "candidate_research.candidate_set": CandidateResearchLegacyArtifact,
+        "candidate_research.invocation_attempt": CandidateResearchInvocationAttemptArtifact,
     }.get(artifact_type)
     if expected is None or not isinstance(artifact, expected):
         from .errors import CandidateResearchUsageError

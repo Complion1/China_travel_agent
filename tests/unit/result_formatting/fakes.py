@@ -198,7 +198,7 @@ async def make_scenario(
     """
     if type(days) is not int or not 1 <= days <= 60:
         raise ValueError("scenario days must be between one and sixty")
-    if planning_version != "6.0":
+    if planning_version not in {"6.0", "7.0", "8.0"}:
         raise ValueError("unsupported planning fixture version")
     if repository is None:
         repository = InMemoryArtifactRepository(
@@ -331,9 +331,9 @@ async def make_scenario(
     planning_digest = digest("planning-original-request")
     action = await save("planning_action", ItineraryPlanningModelActionArtifact,
                         "itinerary_planning.model_action", WorkflowPhase.ITINERARY_PLANNING, {
-        "schema_version": "9.0", "request_digest": planning_digest, "invocation_index": 0,
+        "schema_version": {"6.0": "9.0", "7.0": "10.0", "8.0": "11.0"}[planning_version], "request_digest": planning_digest, "invocation_index": 0,
         "request_stage": "preparation", "budget_category": "preparation",
-        "prompt_version": "planning-v9", "prompt_hash": digest("synthetic-prompt"),
+        "prompt_version": {"6.0": "planning-v9", "7.0": "planning-v10", "8.0": "planning-v11"}[planning_version], "prompt_hash": digest("synthetic-prompt"),
         "action_kind": "tool_calls", "call_summaries": [{"schema_version": "1.0",
             "call_id": "synthetic-geocode", "ordinal": 0, "tool": "geocode_hub",
             "arguments_fingerprint": digest("arguments"), "handle_count": 0,
@@ -448,7 +448,9 @@ async def make_scenario(
                               visits=visits, route_legs=legs, backups=backups))
     departure_route = await route("departure_route", hotel_location, hubs[1],
                                   local_time(START_DATE + timedelta(days=days), 15))
-    directories = dict(schema_version="5.0", hotel_selection_refs=[tree(hotel)],
+    if planning_version in {"7.0", "8.0"}:
+        plan_days = [{**day, "schema_version": "2.0", "planned_breaks": [], "quality_issues": []} for day in plan_days]
+    directories = dict(schema_version={"6.0": "5.0", "7.0": "6.0", "8.0": "7.0"}[planning_version], hotel_selection_refs=[tree(hotel)],
                        candidate_set_refs=[tree(candidate_set)], model_action_refs=[tree(action)],
                        hub_geocode_refs=[tree(ref) for ref in hub_refs], matrix_refs=[tree(ref) for ref in matrix_refs],
                        directions_refs=[tree(ref) for ref in direction_refs],
@@ -457,7 +459,7 @@ async def make_scenario(
                   "route_leg": leg, "processing_minutes": 30 if i == 0 else 120,
                   "approximate_extra_minutes": 0 if i == 0 else 30}
                  for i, (kind, leg) in enumerate((("arrival", arrival_route), ("departure", departure_route)))]
-    draft = dict(schema_version="1.0", requirement_digest=requirement_digest, hotel_selection_ref=tree(hotel),
+    draft = dict(schema_version="2.0" if planning_version in {"7.0", "8.0"} else "1.0", requirement_digest=requirement_digest, hotel_selection_ref=tree(hotel),
                  candidate_set_ref=tree(candidate_set), effective_policy=dict(schema_version="1.0", effective_pace="标准",
                  daily_time_rules=[], time_sensitive_must=[], transport_rules=[], locked=True),
                  arrival_transfer=transfers[0], days=plan_days, departure_transfer=transfers[1], upstream_gap_ids=[])

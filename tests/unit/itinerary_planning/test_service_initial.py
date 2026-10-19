@@ -23,7 +23,7 @@ from app.baidu_map import (
 )
 from app.candidate_research import (
     CandidateState,
-    CandidateResearchArtifact,
+    CandidateResearchV4Artifact as CandidateResearchArtifact,
     MealIntent,
     MatchVerdict,
     ResearchMode,
@@ -149,7 +149,7 @@ UTC_NOW = datetime(2026, 9, 3, tzinfo=timezone.utc)
 
 def _ref(run_id: UUID, artifact_type: str, phase: WorkflowPhase, step: str, content: str = "d") -> ArtifactRef:
     return ArtifactRef(
-        artifact_id=uuid4(), artifact_type=artifact_type, schema_version="6.0" if artifact_type == "itinerary_planning.itinerary" else "1.0",
+        artifact_id=uuid4(), artifact_type=artifact_type, schema_version="8.0" if artifact_type == "itinerary_planning.itinerary" else "1.0",
         content_hash="sha256:" + content * 64,
         operation_id=OperationId(run_id=run_id, phase=phase, logical_step=step.replace("-", "_")),
         created_at=UTC_NOW, size_bytes=1,
@@ -338,7 +338,8 @@ def _fixture(*responses: object, declare_query_intents: bool = True):
             arguments=GeocodeHubArgs(endpoint_kind=endpoint)) for endpoint in ("arrival", "departure")), metadata=_metadata()))
     operation = FakeModelOperation(responses)
     runtime = FakeRuntime(operation)
-    service = ItineraryPlanningService(
+    from tests.support.itinerary_planning_fakes import PlanningServiceWithTrustedSyntheticResearch
+    service = PlanningServiceWithTrustedSyntheticResearch(
         runtime=runtime, map_adapter=FakeMapAdapter(geocode_factory=lambda _: GeocodeSuccess(
             result=GeocodeCandidate(formatted_address="合成测试枢纽", coordinate=BaiduCoordinate(latitude=31.2, longitude=121.5), confidence=0.98),
             provenance=map_provenance(MapCapability.GEOCODING))), artifact_repository=repository,
@@ -774,7 +775,7 @@ async def test_service_dispatches_matrix_and_directions_then_persists_both_obser
         tool_name=PlanningTool.PLAN_DIRECTIONS.value,
         arguments=__import__("app.itinerary_planning.models", fromlist=["PlanDirectionsArgs", "DirectionLegIntent"]).PlanDirectionsArgs(legs=(
             __import__("app.itinerary_planning.models", fromlist=["DirectionLegIntent"]).DirectionLegIntent(
-                leg_id="leg-0", origin_handle="candidate-handle-0000", destination_handle="hotel-handle",
+                leg_id="leg-0", origin_handle="hub-location-arrival", destination_handle="hotel-handle",
                 transport_semantic=TransportSemantic.WALKING, route_mode=TravelMode.WALKING, alternatives_limit=1,
             ),
         )),
@@ -1055,9 +1056,15 @@ async def test_public_initial_accepts_cross_midnight_hotel_closure_and_marks_nex
         ),
         draft=proposal,
     )
+    from tests.support.itinerary_planning_fakes import split_boundary_fixture, remap_fixture_handles
+    specs = tuple((identity, locations[origin], location_coordinates[origin],
+        locations[destination], location_coordinates[destination]) for identity, origin, destination, _, _ in route_specs)
+    request, boundary_call, directions_call, new_handles = split_boundary_fixture(
+        request, directions_call, context, specs, direction_ids)
+    submit = remap_fixture_handles(submit, new_handles)
     operation.responses.extend((
         ToolCallsReady(calls=geocode_calls, metadata=_metadata()),
-        ToolCallsReady(calls=matrix_calls, metadata=_metadata()),
+        ToolCallsReady(calls=(*matrix_calls, boundary_call), metadata=_metadata()),
         ToolCallsReady(calls=(directions_call,), metadata=_metadata()),
         ToolCallsReady(calls=(ValidatedToolCall(call_id="cross_submit", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=submit),), metadata=_metadata()),
         ToolTurnCompleted(final_text="延迟规则首版不启用", metadata=_metadata()),
@@ -1115,8 +1122,8 @@ async def test_invalid_submit_is_rejected_as_business_feedback_and_consumes_one_
     assert operation.call_count == 3
     diagnostic = next(json.loads(r.message) for r in caplog.records if r.name == "app.error_location" and json.loads(r.message)["event"] == "planning_submit_rejected")
     assert diagnostic["budget_category"] == "submit_repair"
-    assert diagnostic["reason"] == "required_visit_missing"
-    assert diagnostic["field"] == "draft.days.visits"
+    assert diagnostic["reason"] == "proposal_structure_or_reference_invalid"
+    assert diagnostic["field"] == "draft"
     assert diagnostic["run_id"] == str(request.operation_plan.run_id)
     assert diagnostic["location"]
     assert "空白日" not in caplog.text and "hotel-handle" not in caplog.text
@@ -1363,7 +1370,7 @@ _R16_POLICY_CASES = {
 @pytest.mark.parametrize("case", ("supported", "minute_schedule", "minute_conflict_repair", "minute_conflicts_repair", "patch_boundary_repair", "patch_revalidates", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "meal_intent_mismatch_feedback", "must_valid", "missing_hours", "unproven_duration", "unapproved_early_window", "prefix_3_to_1", "prefix_1_to_3", "missing_backups", "resume_metadata", "resume_coordinate", *_R05_DURATION_CASES, *_R05_BOUNDARY_CASES, *_R07_MEAL_CASES, *_R08_MEAL_CASES, *_R09_MEAL_SOURCE_CASES, *_R10_MEAL_SOURCE_CASES, *_R11_MEAL_SOURCE_CASES, *_R12_ANCHOR_CASES, *_R14_POLICY_CASES, *_R15_POLICY_CASES, *_R16_POLICY_CASES))
 async def test_service_completed_requires_main_plan_and_valid_optional_backups(case: str) -> None:
     service, request, _, operation, repository = _fixture()
-    if case == "must_valid":
+    if case in {"must_valid", "daily_unified_missing_must"}:
         preferences = request.confirmed.requirement.preferences.model_copy(update={"must_visit_places": ["杭州候选1"]})
         request = request.model_copy(update={"confirmed": request.confirmed.model_copy(update={
             "requirement": request.confirmed.requirement.model_copy(update={"preferences": preferences}),
@@ -1462,7 +1469,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         "coverage": expanded_coverage,
         "observation_refs": tuple(evidence_refs),
     })
-    if case == "must_valid":
+    if case in {"must_valid", "daily_unified_missing_must"}:
         must_group = _expected_must_groups(request.confirmed)[0].model_copy(update={
             "evaluated_candidate_ordinals": (0,),
             "default_verdict": MatchVerdict.CONFIRMED,
@@ -1586,6 +1593,18 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         arrival_raw, _, departure_raw, _, _ = _R05_BOUNDARY_CASES[case]
         request.confirmed.requirement.time_window.arrival.local_datetime = arrival_raw
         request.confirmed.requirement.time_window.departure.local_datetime = departure_raw
+    if case.startswith("boundary_quality_"):
+        request.confirmed.requirement.time_window.arrival.local_datetime = "2026-09-03 08:00"
+        request.confirmed.requirement.time_window.departure.local_datetime = "2026-09-03 20:00"
+        if case == "boundary_quality_multiday_patch":
+            request.confirmed.requirement.time_window.departure.local_datetime = "2026-09-04 20:00"
+            request.confirmed.requirement.time_window.sightseeing_end_date = "2026-09-04"
+            request.confirmed.requirement.time_window.sightseeing_days = 2
+            service._budget = make_planning_budget_manager(request.operation_plan.run_id, direction_limit=18)
+    if case.startswith("daily_unified_"):
+        request.confirmed.requirement.time_window.sightseeing_end_date = "2026-09-04"
+        request.confirmed.requirement.time_window.sightseeing_days = 2
+        service._budget = make_planning_budget_manager(request.operation_plan.run_id, direction_limit=18)
     service._map_adapter = FakeMapAdapter(geocode_factory=lambda _: GeocodeSuccess(
         result=GeocodeCandidate(
             formatted_address="杭州东站",
@@ -1743,7 +1762,10 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
     day_open_end = datetime(2026, 9, 3, 22, tzinfo=shanghai) if case == "expanded_default_window" or case in _R07_MEAL_CASES or case in _R08_MEAL_CASES or case in _R09_MEAL_SOURCE_CASES or case in _R10_MEAL_SOURCE_CASES or case in _R11_MEAL_SOURCE_CASES else datetime(2026, 9, 3, 21, tzinfo=shanghai)
     proposal = ProposedItineraryDraft(
         arrival_transfer=ProposedBoundaryTransfer(transfer_kind="arrival", hub_handle="hub-location-arrival", hotel_handle="hotel-handle", route_leg=route_values[0]),
-            days=(ProposedDayPlan(date=date(2026, 9, 3), day_kind=PlanningDayKind.PARTIAL if case in _R05_BOUNDARY_CASES else PlanningDayKind.FULL, theme="杭州文化慢游", open_intervals=(TimeInterval(start_at=day_open_start, end_at=day_open_end),), visits=visits, route_legs=tuple(route_values[1:5]), backups=backup_values),),
+            days=(ProposedDayPlan(date=date(2026, 9, 3), day_kind=PlanningDayKind.PARTIAL if case in _R05_BOUNDARY_CASES else PlanningDayKind.FULL, theme="杭州文化慢游", open_intervals=(TimeInterval(start_at=day_open_start, end_at=day_open_end),), visits=visits, route_legs=tuple(route_values[1:5]), backups=backup_values,
+                planned_breaks=(__import__("app.itinerary_planning.models", fromlist=["PlannedBreak"]).PlannedBreak(
+                    break_id="afternoon-rest", kind="rest", start_at=datetime(2026,9,3,14,tzinfo=shanghai),
+                    end_at=datetime(2026,9,3,16,tzinfo=shanghai), reason="午后休息"),)),),
         departure_transfer=ProposedBoundaryTransfer(transfer_kind="departure", hub_handle="hub-location-departure", hotel_handle="hotel-handle", route_leg=route_values[5]),
         upstream_gap_ids=(),
     )
@@ -2097,15 +2119,35 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         elif case.endswith("_missing_submit"):
             submit_responses = [ToolCallsReady(calls=(ValidatedToolCall(call_id="r16_missing_source", tool_name=PlanningTool.SUBMIT_ITINERARY.value, arguments=submit),), metadata=_metadata())]
     terminal_response = () if case in {"r15_f02_supplement_evidence", "r15_f02_supplement_locked_mismatch"} or (case in _R16_POLICY_CASES and case.endswith("_supplement")) else (ToolTurnCompleted(final_text="结束", metadata=_metadata()),)
+    from tests.support.itinerary_planning_fakes import split_boundary_fixture, remap_fixture_handles
+    request, boundary_call, direction_call, new_handles = split_boundary_fixture(
+        request, direction_call, context, route_specs, direction_ids)
+    if case == "must_valid":
+        outline = direction_call.arguments.daily_outline[0]
+        outlined_visit = outline.visits[0].model_copy(update={"must_group_ids": submit.draft.days[0].visits[0].must_group_ids})
+        direction_call = direction_call.model_copy(update={"arguments": direction_call.arguments.model_copy(update={
+            "daily_outline": (outline.model_copy(update={"visits": (outlined_visit,)}),)})})
+    matrix_batch, daily_batch = (matrix_call, boundary_call), (direction_call,)
+    if case == "query_declaration_compatible":
+        precise = direction_call.arguments.visit_intents[0].model_copy(update={
+            "interval": TimeInterval(start_at=datetime(2026,9,3,10,tzinfo=shanghai), end_at=datetime(2026,9,3,11,tzinfo=shanghai))})
+        direction_call = direction_call.model_copy(update={"arguments": direction_call.arguments.model_copy(update={
+            "visit_intents": (precise, *direction_call.arguments.visit_intents[1:])})})
+        matrix_batch, daily_batch = (boundary_call,), (matrix_call, direction_call)
+    submit_responses = remap_fixture_handles(submit_responses, new_handles)
+    submit = remap_fixture_handles(submit, new_handles)
+    proposal = remap_fixture_handles(proposal, new_handles)
+    route_values = remap_fixture_handles(route_values, new_handles)
     operation.responses.extend((
         ToolCallsReady(calls=calls, metadata=_metadata()),
-        ToolCallsReady(calls=(matrix_call,), metadata=_metadata()),
-        ToolCallsReady(calls=(direction_call,), metadata=_metadata()),
+        ToolCallsReady(calls=matrix_batch, metadata=_metadata()),
+        ToolCallsReady(calls=daily_batch, metadata=_metadata()),
         *submit_responses,
         *terminal_response,
     ))
     if case.startswith("prefix_"):
-        one_day = proposal.days[0].model_copy(update={"visits": visits[:1], "backups": (),
+        three = remap_fixture_handles(three, new_handles)
+        one_day = proposal.days[0].model_copy(update={"day_kind": PlanningDayKind.PARTIAL, "visits": visits[:1], "backups": (), "planned_breaks": (),
             "route_legs": (route_values[1], route_values[6]),
             "open_intervals": (TimeInterval(start_at=datetime(2026, 9, 3, 9, tzinfo=shanghai), end_at=datetime(2026, 9, 3, 11, 30, tzinfo=shanghai)),)})
         one = three.model_copy(update={"draft": proposal.model_copy(update={"days": (one_day,)})})
@@ -2232,6 +2274,14 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         assert (terminal.draft is None) == (case == "resume_coordinate")
         return
 
+    if case.startswith("boundary_quality_"):
+        from tests.unit.itinerary_planning.test_boundary_quality import exercise_public_quality
+        return await exercise_public_quality(case, service, request, operation, repository, submit)
+
+    if case.startswith("daily_unified_"):
+        from tests.unit.itinerary_planning.test_daily_planning import exercise_daily_planning
+        return await exercise_daily_planning(case, service, request, operation, repository, submit)
+
     result = await service.plan_initial(request)
     replay = None if case == "r12_fake_verified_anchor" or case in _R14_POLICY_CASES or case in _R15_POLICY_CASES else await service.plan_initial(request)
 
@@ -2293,8 +2343,14 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         expected = True if case == "duration_estimate_bypass" else (_R05_DURATION_CASES[case] if case in _R05_DURATION_CASES else _R05_BOUNDARY_CASES[case])[-1]
         assert isinstance(result, ItineraryPlanningCompleted if expected else ItineraryPlanningIncomplete), result.model_dump(mode="json")
         assert replay == result
-        assert operation.call_count == (4 if expected else 5)
-        assert result.budgets.model_invocations_consumed == (4 if expected else 5)
+        quality_review = service._runs[base.run_id].quality_review_used
+        expected_calls = (5 if quality_review else 4) if expected else 5
+        assert operation.call_count == expected_calls
+        assert result.budgets.model_invocations_consumed == expected_calls
+        if quality_review:
+            feedback = json.loads(operation.continuations[-1][0].content)["tool_result"]
+            assert feedback["status"] == "quality_review_requested"
+            assert feedback["code"] == "daily_plan_quality_review"
         assert result.budgets.direction_calls_consumed == 6
         assert len(service._map_adapter.directions_calls) == 6
         terminal_ref = repository.refs[request.operation_plan.terminal_successor_operation_id]
@@ -2679,7 +2735,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
         assert result.budgets.direction_calls_consumed == 6
         return
 
-    if case not in {"supported", "minute_schedule", "minute_conflict_repair", "minute_conflicts_repair", "patch_boundary_repair", "patch_revalidates", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "must_valid"}:
+    if case not in {"query_declaration_compatible", "supported", "minute_schedule", "minute_conflict_repair", "minute_conflicts_repair", "patch_boundary_repair", "patch_revalidates", "derived_route_times", "expanded_default_window", "split_role_and_hours_evidence", "runtime_supported", "route_rebind_repair", "route_end_mismatch_repair", "backup_distance_repair", "duplicate_main_repair", "duplicate_backup_repair", "partial_backups", "backup_slots_order_repair", "backup_slots_duplicate_repair", "must_valid"}:
         assert isinstance(result, ItineraryPlanningIncomplete), result.model_dump(mode="json")
         assert replay == result
         if case == "meal_intent_mismatch_feedback":
@@ -2712,7 +2768,7 @@ async def test_service_completed_requires_main_plan_and_valid_optional_backups(c
     assert result.summary.backups == 3
     if case in {"minute_schedule", "minute_conflict_repair", "minute_conflicts_repair"}:
         stored = (await repository.get(result.itinerary_ref, expected_model=__import__("app.itinerary_planning", fromlist=["ItineraryPlanningArtifact"]).ItineraryPlanningArtifact)).content
-        assert stored.schema_version == "6.0"
+        assert stored.schema_version == "8.0"
         assert stored.record.draft.days[0].visits[0].interval.start_at_utc.astimezone(shanghai).minute == 7
         assert stored.record.draft.days[0].route_legs[0].scheduled_minutes == 10
         assert result.budgets.format_repair_used == 0
@@ -2854,7 +2910,7 @@ def test_rejected_prefix_accepts_a_later_attraction_as_the_backup_core() -> None
             ),
         ),
     )
-    run = SimpleNamespace(draft=None, pending_gaps=[])
+    run = SimpleNamespace(draft=None, pending_gaps=[], quality_review_used=False)
 
     assert service._retain_prefix(run, prefix) is True
     assert run.draft is prefix

@@ -97,7 +97,7 @@ async def _initial_with_predecessor() -> tuple[CandidateResearchService, Candida
     run_id = uuid4()
     def op(name):
         return OperationId(run_id=run_id, phase=WorkflowPhase.CANDIDATE_RESEARCH, logical_step=name)
-    slots = tuple(ResearchIterationOperationIds(invocation_slot_index=index, action_operation_id=op(f"a{index}"), judgment_operation_id=op(f"j{index}"), candidate_set_operation_id=op(f"c{index}"), place_observation_operation_ids=(op(f"o{index}"),)) for index in range(6))
+    slots = tuple(ResearchIterationOperationIds(invocation_slot_index=index, action_operation_id=op(f"a{index}"), judgment_operation_id=op(f"j{index}"), candidate_set_operation_id=op(f"c{index}"), place_observation_operation_ids=(op(f"o{index}"),), action_attempt_operation_ids=tuple(op(f"a{index}_attempt_{j}") for j in range(3)), judgment_attempt_operation_ids=tuple(op(f"j{index}_attempt_{j}") for j in range(3))) for index in range(6))
     confirmed = __import__("tests.unit.candidate_research.test_service_initial", fromlist=["_request"])._request(run_id)[0].confirmed
     hotel_ref, hotel_artifact = __import__("tests.support.candidate_research_fakes", fromlist=["hotel_selection"]).hotel_selection(run_id)
     initial = __import__("app.candidate_research", fromlist=["CandidateResearchInitialRequest"]).CandidateResearchInitialRequest(confirmed=confirmed, hotel_selection_ref=hotel_ref, operation_plan=CandidateResearchOperationPlan(run_id=run_id, iteration_slots=slots, terminal_successor_operation_id=op("terminal")))
@@ -144,6 +144,8 @@ def _slots(run_id, *, count: int, prefix: str, place_width: int = 1) -> tuple[Re
     return tuple(
         ResearchIterationOperationIds(
             invocation_slot_index=index,
+            action_attempt_operation_ids=tuple(op(f"{prefix}a{index}_attempt_{j}") for j in range(3)),
+            judgment_attempt_operation_ids=tuple(op(f"{prefix}j{index}_attempt_{j}") for j in range(3)),
             action_operation_id=op(f"{prefix}_action_{index}"),
             judgment_operation_id=op(f"{prefix}_judgment_{index}"),
             candidate_set_operation_id=op(f"{prefix}_candidate_{index}"),

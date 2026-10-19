@@ -42,12 +42,15 @@ async def test_actual_action_context_keeps_multiple_names_and_duplicate_item_ide
         assert [item['confirmed_name'] for item in directory] == ['某博物馆', '另一博物馆', '某公园']
         assert len(directory[0]['requirement_item_ids']) == 2
         assert len({item['requirement_group_id'] for item in directory}) == 3
-        assert result.candidate_set_ref.schema_version == '4.0'
+        assert result.candidate_set_ref.schema_version == '5.0'
         artifact = (await repository.get(result.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
         assert artifact.record.state.effective_interests == (InterestTag.CULTURE,)
         data = artifact.model_dump(mode='json')
         data.pop("correction_state")
         data.pop("qualification_state")
+        data.pop("invocation_attempt_refs")
+        for budget in (data['record']['budgets'], data['record']['state']['budgets']):
+            budget.pop('correction_limit'); budget.pop('corrections_consumed')
         for ref in data['record']['state']['model_action_refs']:
             ref['schema_version'] = '1.0'
         for legacy in ('1.0', '2.0'):

@@ -158,6 +158,8 @@ def _plan(run_id, slots=0):
                 "judgment_operation_id": _op(run_id, f"j{index}"),
                 "candidate_set_operation_id": _op(run_id, f"c{index}"),
                 "place_observation_operation_ids": (),
+                "action_attempt_operation_ids": tuple(_op(run_id, f"a{index}_attempt_{j}") for j in range(3)),
+                "judgment_attempt_operation_ids": tuple(_op(run_id, f"j{index}_attempt_{j}") for j in range(3)),
             }
             for index in range(slots)
         ),
@@ -181,6 +183,8 @@ def test_operation_plan_contiguous_unique_and_same_run():
                     "judgment_operation_id": _op(run_id, "j"),
                     "candidate_set_operation_id": _op(run_id, "c"),
                     "place_observation_operation_ids": (),
+                    "action_attempt_operation_ids": tuple(_op(run_id, f"a1_attempt_{j}") for j in range(3)),
+                    "judgment_attempt_operation_ids": tuple(_op(run_id, f"j1_attempt_{j}") for j in range(3)),
                 },
             ),
             terminal_successor_operation_id=_op(run_id, "terminal"),

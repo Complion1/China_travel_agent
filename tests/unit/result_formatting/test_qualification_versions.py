@@ -7,8 +7,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.candidate_research import (CandidateResearchArtifact, CandidateResearchLegacyArtifact,
-    CandidateResearchV3Artifact, CandidateResearchModelActionArtifact, CandidateResearchModelJudgmentArtifact)
+from app.candidate_research import (CandidateResearchV4Artifact as CandidateResearchArtifact, CandidateResearchLegacyArtifact,
+    CandidateResearchV3Artifact, CandidateResearchV2ModelActionArtifact as CandidateResearchModelActionArtifact, CandidateResearchV3ModelJudgmentArtifact as CandidateResearchModelJudgmentArtifact)
 from app.candidate_research.qualification import (observation_context, candidate_observation,
     evidence_digest, validate_qualification_sources)
 from app.result_formatting.projection import project_result, ProjectionFailure

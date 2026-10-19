@@ -5,6 +5,11 @@ from .artifacts import (
     CandidateResearchArtifact,
     CandidateResearchLegacyArtifact,
     CandidateResearchV3Artifact,
+    CandidateResearchV4Artifact,
+    CandidateResearchV2ModelActionArtifact,
+    CandidateResearchV3ModelJudgmentArtifact,
+    CandidateResearchInvocationAttemptArtifact,
+    candidate_artifact_model, action_artifact_model, judgment_artifact_model,
     CandidateResearchLegacyModelJudgmentArtifact,
     CandidateResearchModelActionArtifact,
     CandidateResearchModelJudgmentArtifact,
@@ -96,6 +101,9 @@ from .purpose import candidate_admitted_purposes, candidate_supply_status
 from .qualification import validate_qualification_sources
 
 __all__ = (
+    "CandidateResearchV4Artifact", "CandidateResearchV2ModelActionArtifact",
+    "CandidateResearchV3ModelJudgmentArtifact", "CandidateResearchInvocationAttemptArtifact",
+    "candidate_artifact_model", "action_artifact_model", "judgment_artifact_model",
     "MealCountShortfallGap",
     "candidate_admitted_purposes",
     "candidate_supply_status",

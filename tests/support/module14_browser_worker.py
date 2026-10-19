@@ -59,6 +59,19 @@ async def serve(port):
     settings=web_settings(public_origin=f"http://{ip}:{port}",port=port,
         pause_key_file=Path(os.environ["MODULE14_EVIDENCE_DIR"])/"isolated-pause-key.json")
     provider,maps=await offline_boundaries()
+    original_reset = provider.reset
+    def reset_with_route_facts():
+        original_reset()
+        from tests.support.hotel_selection_fakes import place
+        from tests.unit.candidate_research.test_service_initial import _matching_details
+        from tests.support.itinerary_planning_fakes import directions_success
+        hotels = tuple(place(f"h{index + 1}", index=index).coordinate for index in range(3))
+        attraction = _matching_details("a0").details.coordinate
+        # 路线样例按模拟地点事实匹配，避免依赖查询顺序。
+        maps.planning.directions_factory = lambda request: directions_success(duration_s=(
+            2580 if request.origin.coordinate in hotels and request.destination.coordinate == attraction else 600))
+    provider.reset = reset_with_route_facts
+    reset_with_route_facts()
     patch=pytest.MonkeyPatch()
     # Test-only external-boundary barriers hold actual graph nodes in flight.
     # The production observer and public DTO are never substituted.

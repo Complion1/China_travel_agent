@@ -55,7 +55,8 @@ async def test_production_root_sdk_capture_postgres_export(durable_execution_set
             if rejected_proposal is not None:
                 feedback = json.loads(next(item['content'] for item in tool_messages
                     if item['tool_call_id'] in boundaries.planning_model._pending_ids))
-                assert feedback['tool_result']['reason'] == 'proposal_structure_or_reference_invalid'
+                assert feedback['tool_result']['reason'] == 'route_visit_overlap'
+                assert feedback['tool_result']['field'] == 'draft.days[0].visits[0].start_at'
                 output = boundaries.planning_model.batch(('submit_itinerary', rejected_proposal))
                 rejected_proposal = None
             elif boundaries.planning_model.call_count == 0:
@@ -188,7 +189,9 @@ def multiday_boundaries(boundaries, patch, turn):
     from tests.support.candidate_research_fakes import structured
     from tests.unit.candidate_research.test_service_initial import _multi_place_search, _matching_details
     from app.itinerary_planning.models import (PlanDirectionsArgs, DirectionLegIntent, TransportSemantic, PurposeVisitIntent,
-        ProposedScheduledVisit, VisitKind, BusinessHoursState, ProposedDayPlan, PlanningDayKind, TimeInterval)
+        ProposedScheduledVisit, VisitKind, BusinessHoursState, ProposedDayPlan, PlanningDayKind, TimeInterval,
+        DailyPlanOutline, PlannedBreak, ProposedRouteLeg, ProposedItineraryDraft, ProposedBoundaryTransfer,
+        ProposedEffectivePlanningPolicy, SubmitItineraryArgs)
     from app.baidu_map import TravelMode
     payload = patch.model_dump(mode='json')
     payload.update(sightseeing_end_date='2026-09-05', sightseeing_days=3, departure_datetime='2026-09-06 18:00')
@@ -236,56 +239,74 @@ def multiday_boundaries(boundaries, patch, turn):
             template.model_copy(update={'instruction': '从A站乘坐地铁1号线至B站', 'duration_s':300}),
             template.model_copy(update={'instruction': '在B站换乘地铁2号线至C站', 'duration_s':300}),)}),)})
     boundaries.planning_map.directions_factory = transit_route
+    def at(day,hour,minute=0):
+        return datetime(2026,9,day,hour,minute,tzinfo=ZoneInfo('Asia/Shanghai'))
+    pairs = [('hub-location-arrival','hotel-handle')]
+    outlines = []
+    for offset in range(3):
+        day = offset + 3
+        handles = ('hotel-handle',f'candidate-handle-{offset:04d}',f'candidate-handle-{18+offset*2:04d}',
+            f'candidate-handle-{19+offset*2:04d}','hotel-handle')
+        pairs.extend(zip(handles, handles[1:]))
+        visits = tuple(PurposeVisitIntent(date=date(2026,9,day),candidate_handle=handle,visit_kind=kind,
+            is_backup=False,interval=TimeInterval(start_at=start,end_at=end)) for handle,kind,start,end in (
+                (handles[1],VisitKind.ATTRACTION,at(day,10),at(day,11)),
+                (handles[2],VisitKind.LUNCH,at(day,11,30),at(day,12,30)),
+                (handles[3],VisitKind.DINNER,at(day,17,30),at(day,18,30))))
+        rests = (PlannedBreak(break_id=f'rest-{day}',kind='rest',start_at=at(day,14),end_at=at(day,16),reason='午后休息'),)
+        outlines.append(DailyPlanOutline(date=date(2026,9,day),visits=visits,planned_breaks=rests))
+    pairs.append(('hotel-handle','hub-location-departure'))
+    model.endpoints = tuple(pairs)
     original_continue = model.acontinue_tools
     async def continuation(results, **kwargs):
-        if model.stage == 1:
+        if model.stage in {1,2}:
             model.feedback.append([json.loads(item.content) for item in results])
-            model.stage = 2
-            pairs = [('hub-location-arrival','hotel-handle')]
-            for day in range(3):
-                handles = ('hotel-handle',f'candidate-handle-{day:04d}',f'candidate-handle-{18+day*2:04d}',
-                    f'candidate-handle-{19+day*2:04d}','hotel-handle')
-                pairs.extend(zip(handles, handles[1:]))
-            pairs.append(('hotel-handle','hub-location-departure'))
-            model.endpoints = tuple(pairs)
-            return model.batch(('plan_directions', PlanDirectionsArgs(legs=tuple(DirectionLegIntent(leg_id=f'leg{i}',
-                origin_handle=a,destination_handle=b,transport_semantic=TransportSemantic.PUBLIC_TRANSIT,route_mode=TravelMode.TRANSIT,
-                alternatives_limit=1) for i,(a,b) in enumerate(pairs)),
-                visit_intents=tuple(PurposeVisitIntent(date=date(2026,9,3+day),candidate_handle=handle,
-                    visit_kind=kind,is_backup=False) for day in range(3) for handle,kind in (
-                        (f'candidate-handle-{day:04d}',VisitKind.ATTRACTION),
-                        (f'candidate-handle-{18+day*2:04d}',VisitKind.LUNCH),
-                        (f'candidate-handle-{19+day*2:04d}',VisitKind.DINNER))))))
+            boundary = model.stage == 1
+            model.stage += 1
+            indexes = (0,len(pairs)-1) if boundary else tuple(range(1,len(pairs)-1))
+            return model.batch(('plan_directions', PlanDirectionsArgs(
+                legs=tuple(DirectionLegIntent(leg_id=f'leg{i}',origin_handle=pairs[i][0],destination_handle=pairs[i][1],
+                    transport_semantic=TransportSemantic.PUBLIC_TRANSIT,route_mode=TravelMode.TRANSIT,alternatives_limit=1)
+                    for i in indexes), daily_outline=() if boundary else tuple(outlines),
+                visit_intents=() if boundary else tuple(item for day in outlines for item in day.visits))))
         return await original_continue(results, **kwargs)
     model.acontinue_tools = continuation
-    original_proposal = model.proposal
     def proposal(feedback):
-        base = original_proposal(feedback)
-        found = {item['leg_id']: item['directions_handle'] for entry in feedback
-            for item in entry['tool_result']['observation']['observations']}
-        def at(day,hour,minute=0):
-            return datetime(2026,9,day,hour,minute,tzinfo=ZoneInfo('Asia/Shanghai'))
-        route_template = base.draft.arrival_transfer.route_leg
-        routes, day_plans = [], []
-        times = [(at(2,18,30),at(2,19))]
+        found = {}
+        def collect(value):
+            if isinstance(value,dict):
+                if 'leg_id' in value and 'directions_handle' in value:
+                    found[value['leg_id']] = value['directions_handle']
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value,list):
+                for child in value:
+                    collect(child)
+        collect(feedback)
+        times = [at(2,18,31)]
         for day in range(3,6):
-            times.extend([(at(day,9,30),at(day,10)),(at(day,11),at(day,11,30)),(at(day,13),at(day,13,30)),(at(day,18,30),at(day,19))])
-        times.append((at(6,14,30),at(6,15)))
-        for i,((a,b),(start,end)) in enumerate(zip(model.endpoints,times,strict=True)):
-            routes.append(route_template.model_copy(update={'leg_id':f'leg{i}','origin_handle':a,'destination_handle':b,
-                'directions_handle':found[f'leg{i}'],'start_at':start,'end_at':end,
-                'transport_semantic':TransportSemantic.PUBLIC_TRANSIT,'route_mode':TravelMode.TRANSIT}))
-        for offset in range(3):
-            day = offset+3
-            visits = tuple(ProposedScheduledVisit(visit_id=f'd{day}v{i}',candidate_handle=f'candidate-handle-{ordinal:04d}',visit_kind=kind,
-                start_at=start,end_at=end,duration_source='planning_estimate',must_group_ids=(),time_sensitive_anchor_ids=(),
-                business_hours_state=BusinessHoursState.UNKNOWN,business_evidence_handles=()) for i,(ordinal,kind,start,end) in enumerate([
-                (offset,VisitKind.ATTRACTION,at(day,10),at(day,11)),(18+offset*2,VisitKind.LUNCH,at(day,11,30),at(day,12,30)),
-                (19+offset*2,VisitKind.DINNER,at(day,17,30),at(day,18,30))]))
-            day_plans.append(ProposedDayPlan(date=date(2026,9,day),day_kind=PlanningDayKind.FULL,theme=f'第{offset+1}天',
-                open_intervals=(TimeInterval(start_at=at(day,9),end_at=at(day,21)),),visits=visits,route_legs=tuple(routes[1+offset*4:5+offset*4]),backups=()))
-        return base.model_copy(update={'draft':base.draft.model_copy(update={'days':tuple(day_plans),
-            'arrival_transfer':base.draft.arrival_transfer.model_copy(update={'route_leg':routes[0]}),
-            'departure_transfer':base.draft.departure_transfer.model_copy(update={'route_leg':routes[-1]})})})
+            times.extend([at(day,9,30),at(day,11),at(day,13),at(day,18,30)])
+        times.append(at(6,14,30))
+        routes = tuple(ProposedRouteLeg(leg_id=f'leg{i}',origin_handle=a,destination_handle=b,
+            directions_handle=found[f'leg{i}'],start_at=start,end_at=None,
+            transport_semantic=TransportSemantic.PUBLIC_TRANSIT,route_mode=TravelMode.TRANSIT,alternative_index=0)
+            for i,((a,b),start) in enumerate(zip(pairs,times,strict=True)))
+        day_plans = []
+        for offset, outline in enumerate(outlines):
+            visits = tuple(ProposedScheduledVisit(visit_id=f'd{offset+3}v{i}',candidate_handle=item.candidate_handle,
+                visit_kind=item.visit_kind,start_at=item.interval.start_at,end_at=item.interval.end_at,
+                duration_source='planning_estimate',must_group_ids=(),time_sensitive_anchor_ids=(),
+                business_hours_state=BusinessHoursState.UNKNOWN,business_evidence_handles=())
+                for i,item in enumerate(outline.visits))
+            day_plans.append(ProposedDayPlan(date=outline.date,day_kind=PlanningDayKind.FULL,theme=f'第{offset+1}天',
+                open_intervals=(TimeInterval(start_at=at(offset+3,9),end_at=at(offset+3,21)),),visits=visits,
+                route_legs=routes[1+offset*4:5+offset*4],backups=(),planned_breaks=outline.planned_breaks))
+        from app.requirements import TravelPace
+        return SubmitItineraryArgs(effective_policy=ProposedEffectivePlanningPolicy(effective_pace=TravelPace.RELAXED,
+            daily_time_rules=(),time_sensitive_must=(),transport_rules=()),draft=ProposedItineraryDraft(
+                arrival_transfer=ProposedBoundaryTransfer(transfer_kind='arrival',hub_handle='hub-location-arrival',
+                    hotel_handle='hotel-handle',route_leg=routes[0]),days=tuple(day_plans),
+                departure_transfer=ProposedBoundaryTransfer(transfer_kind='departure',hub_handle='hub-location-departure',
+                    hotel_handle='hotel-handle',route_leg=routes[-1]),upstream_gap_ids=()))
     model.proposal = proposal
     return patch, turn

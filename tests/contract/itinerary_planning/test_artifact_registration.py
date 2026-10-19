@@ -384,6 +384,43 @@ def test_real_registry_accepts_complete_graph_and_each_registered_artifact_round
         assert decoded is not artifact
 
 
+@pytest.mark.parametrize("prompt_version,prompt_hash", (
+    ("planning-v11", "sha256:d340f0e8d1b52ea1414f744c7aa5b7c4519d2ed877bc7a695f407387f17b61d5"),
+    ("planning-v12", "sha256:51ad670cc237ddb5b319ae2ef46a8cfb0f1f0f72e331aab9c0b68b4f63e5ba9b"),
+))
+def test_current_action_registry_preserves_both_prompt_versions(prompt_version, prompt_hash):
+    registry = ArtifactSchemaRegistry(ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS)
+    original = _registered_artifacts()[0][1]
+    action = original.model_copy(update={"schema_version": "11.0",
+        "prompt_version": prompt_version, "prompt_hash": prompt_hash})
+    operation_id = _op("current_prompt_action")
+    prepared = registry.prepare(ArtifactWriteRequest(operation_id=operation_id,
+        artifact_type="itinerary_planning.model_action", schema_version="11.0", content=action.model_dump(mode="json")))
+    ref = ArtifactRef(artifact_id=uuid4(), artifact_type="itinerary_planning.model_action", schema_version="11.0",
+        content_hash=prepared.content_hash, operation_id=operation_id, created_at=UTC, size_bytes=prepared.size_bytes)
+    decoded = registry.decode(ref=ref, canonical_bytes=prepared.canonical_bytes, expected_model=ItineraryPlanningModelActionArtifact)
+    assert decoded == action
+    assert registry.prepare(ArtifactWriteRequest(operation_id=operation_id, artifact_type=ref.artifact_type,
+        schema_version=ref.schema_version, content=decoded.model_dump(mode="json"))).canonical_bytes == prepared.canonical_bytes
+    extra = {**action.model_dump(mode="json"), "unexpected": True}
+    with pytest.raises(ArtifactRequestValidationError):
+        registry.prepare(ArtifactWriteRequest(operation_id=operation_id, artifact_type=ref.artifact_type,
+            schema_version=ref.schema_version, content=extra))
+
+
+@pytest.mark.parametrize("schema_version,prompt_version", (
+    ("11.0", "planning-v10"), ("11.0", "planning-v13"),
+    ("10.0", "planning-v12"), ("9.0", "planning-v12"),
+))
+def test_prompt_extension_does_not_relax_other_action_version_pairs(schema_version, prompt_version):
+    registry = ArtifactSchemaRegistry(ITINERARY_PLANNING_ARTIFACT_REGISTRATIONS)
+    payload = {**_registered_artifacts()[0][1].model_dump(mode="json"),
+        "schema_version": schema_version, "prompt_version": prompt_version}
+    with pytest.raises(ArtifactRequestValidationError):
+        registry.prepare(ArtifactWriteRequest(operation_id=_op("bad_prompt_pair"),
+            artifact_type="itinerary_planning.model_action", schema_version=schema_version, content=payload))
+
+
 def test_reachable_artifact_models_are_exact_registry_models_with_no_public_embedding() -> None:
     allowed = {ArtifactRef, InvocationMetadata, LLMUsage, OperationId}
     visited: set[type[BaseModel]] = set()

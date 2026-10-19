@@ -240,7 +240,7 @@ class Nodes:
             return goto(state, "terminal")
         saved = (await cap.read_only_artifact_repository.get(
             value.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
-        if (saved.schema_version != "4.0" or saved.run_id != state.run_id
+        if (saved.schema_version != "5.0" or saved.run_id != state.run_id
                 or saved.record.record_type not in {"completed", "incomplete"}
                 or saved.record.counts.model_dump(mode="python") != value.counts.model_dump(mode="python")):
             raise DurableExecutionStateError()
@@ -295,7 +295,7 @@ class Nodes:
             planning_ref = found.ref
             saved = (await cap.read_only_artifact_repository.get(planning_ref, expected_model=ItineraryPlanningArtifact)).content
             if (planning_ref.operation_id != plan.terminal_successor_operation_id
-                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "6.0" or saved.schema_version != planning_ref.schema_version
+                or planning_ref.artifact_type != "itinerary_planning.itinerary" or planning_ref.schema_version != "8.0" or saved.schema_version != planning_ref.schema_version
                 or saved.request_digest != planning_request_digest(request)
                 or saved.record.record_type != "incomplete" or saved.record.stop_reasons != value.stop_reasons
                 or restore_gaps(saved) != value.gaps or saved.directories.candidate_set_refs[-1] != control.candidate_set_ref
@@ -317,6 +317,6 @@ class Nodes:
             index = (await self.cap("terminal").read_only_artifact_repository.get(refs[0], expected_model=ResultIndexArtifact)).content
             if index.source_itinerary_ref != control.planning_ref or any(day.ref not in state.artifact_refs for day in index.days):
                 raise DurableExecutionStateError()
-            code = "workflow_degraded" if index.core.unknown_business_visit_count > 0 or control.map_requested else "workflow_completed"
+            code = "workflow_degraded" if index.core.unknown_business_visit_count > 0 or getattr(index.core, "quality_issue_count", 0) > 0 or control.map_requested else "workflow_completed"
             return goto(terminal_state(state, code), END)
         return goto(terminal_state(state, control.terminal_code), END)

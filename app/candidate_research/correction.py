@@ -120,7 +120,7 @@ def record_rejection(records, state, objective, actions, destination, rule, hist
     evidence = evidence_fingerprint(state, objective, history)
     previous = next((item for item in reversed(records) if item.target == target and item.evidence == evidence), None)
     value = ActionCorrection(target, evidence, plan_fingerprint(actions, destination), rule,
-                             min(2, (previous.attempts if previous else 0) + 1))
+                             min(12, (previous.attempts if previous else 0) + 1))
     return tuple(item for item in records if (item.target, item.evidence) != (target, evidence)) + (value,)
 
 

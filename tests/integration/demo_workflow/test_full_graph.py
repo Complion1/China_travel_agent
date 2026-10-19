@@ -138,7 +138,7 @@ async def test_research_technical_failure_stops_before_planning(durable_executio
     ("unknown", "research_evidence_insufficient"),
     ("unsuitable", "research_candidates_unsuitable"),
     ("budget", "research_budget_exhausted"),
-    ("missing", "research_recovery_exhausted"),
+    ("missing", "research_budget_exhausted"),
 ])
 async def test_real_research_controller_root_terminal_and_consumption(durable_execution_settings, scenario, code):
     """真实控制器、主图与PostgreSQL运行，仅替换模型和地图边界。"""
@@ -192,10 +192,69 @@ async def test_real_research_controller_root_terminal_and_consumption(durable_ex
         assert model.call_count <= 12 and maps.call_count <= 48
         if scenario == "missing":
             assert (model.call_count, maps.call_count) == (4, 1)
+            assert artifact.record.record_type == "incomplete"
+            assert artifact.record.budgets.corrections_consumed == 2
+            assert "correction_limit_reached" in {item.value for item in artifact.record.stop_reasons}
+            assert len(artifact.record.state.candidates) == 1
         budgets = await context.runtime.get_terminal_budget_snapshots(run_id=result.state.run_id)
         consumed = {item.key.name: item.consumed for item in budgets}
         assert consumed["research.iteration"] == artifact.record.budgets.iterations_consumed
         assert consumed["research.place_call"] == maps.call_count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supply", ["none", "completed", "incomplete"])
+async def test_inline_correction_real_graph_pg_and_read_only_reopen(durable_execution_settings, supply):
+    from app.candidate_research import (
+        CandidateResearchArtifact, CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS,
+        NoUsefulActionProposed, validate_qualification_sources,
+    )
+    from app.demo_workflow.plans import research_plan
+    from tests.support.candidate_research_fakes import structured
+    from tests.support.demo_workflow_fakes import full_runtime, start_to_pause, select_hotel
+    from tests.support.demo_workflow_worker import invoke_worker
+    async with full_runtime(durable_execution_settings) as context:
+        model = context.providers.research_model
+        invalid = structured(NoUsefulActionProposed(reason_code="prior_no_progress"))
+        if supply == "completed":
+            model.responses = [invalid] * 2 + model.responses
+        elif supply == "incomplete":
+            model.responses = model.responses[:2] + [invalid] * 3
+            context.providers.planning_model.known_hours = False
+        else:
+            model.responses = [invalid] * 3
+        paused = await start_to_pause(context, hotel=True)
+        result = await select_hotel(context, paused)
+        assert type(result) is DurableExecutionTerminal
+        assert context.definition.contract.contract_id == "demo_workflow.web.v9"
+        found = await context.artifacts.repository.lookup(operation_id=research_plan(result.state.run_id).terminal_successor_operation_id)
+        artifact = (await context.artifacts.repository.get(found.ref, expected_model=CandidateResearchArtifact)).content
+        assert artifact.schema_version == "5.0" and artifact.record.budgets.corrections_consumed == 2
+        assert artifact.record.budgets.semantic_invocations_consumed == model.call_count
+        models = {(item.artifact_type, item.schema_version): item.model for item in CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS}
+        state = artifact.record.state
+        sources = {}
+        for ref in (*artifact.invocation_attempt_refs, *state.model_action_refs, *state.model_judgment_refs, *state.observation_refs):
+            sources[ref.artifact_id] = await context.artifacts.repository.get(ref, expected_model=models[ref.artifact_type, ref.schema_version])
+        validate_qualification_sources(artifact, sources)
+        if supply != "none":
+            assert result.state.delivery_status in {DeliveryStatus.DEMO_READY, DeliveryStatus.DEGRADED}
+            assert (model.call_count, context.providers.research_map.call_count) == ((6, 16) if supply == "completed" else (5, 8))
+            assert context.providers.planning_model.call_count > 0
+            assert artifact.record.record_type == supply
+            if supply == "incomplete":
+                assert "correction_limit_reached" in {item.value for item in artifact.record.stop_reasons}
+        else:
+            assert result.state.terminal_code == "research_no_candidates"
+            assert artifact.record.record_type == "incomplete"
+            assert (model.call_count, context.providers.research_map.call_count) == (3, 0)
+            assert context.providers.planning_model.call_count == 0
+        payload = artifact.model_dump_json()
+        await context.runtime.close()
+        loaded = await invoke_worker(dict(run_id=result.state.run_id, mode="read_result" if supply != "none" else "read_research"))
+        assert TravelSessionState.model_validate_json(loaded["state"], strict=True) == result.state
+        assert all(loaded[key] == 0 for key in ("extract_calls", "hotel_calls", "research_calls", "planning_calls"))
+        assert (await context.artifacts.repository.get(found.ref, expected_model=CandidateResearchArtifact)).content.model_dump_json() == payload
 
 
 @pytest.mark.asyncio

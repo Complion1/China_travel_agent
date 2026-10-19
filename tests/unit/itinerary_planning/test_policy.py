@@ -164,10 +164,10 @@ def test_grid_buffers_modes_and_raw_duration_ceiling() -> None:
     assert route_mode_for_semantic(TransportSemantic.PUBLIC_TRANSIT) is TravelMode.TRANSIT
 
 
-def test_density_distinguishes_full_and_partial_days() -> None:
-    assert attraction_bounds(TravelPace.RELAXED, PlanningDayKind.FULL) == (1, 2)
-    assert attraction_bounds(TravelPace.NORMAL, PlanningDayKind.FULL) == (3, 3)
-    assert attraction_bounds(TravelPace.INTENSE, PlanningDayKind.FULL) == (4, 4)
+def test_density_uses_the_same_pace_maximum_for_every_day() -> None:
+    assert attraction_bounds(TravelPace.RELAXED, PlanningDayKind.FULL) == (0, 2)
+    assert attraction_bounds(TravelPace.NORMAL, PlanningDayKind.FULL) == (0, 3)
+    assert attraction_bounds(TravelPace.INTENSE, PlanningDayKind.FULL) == (0, 4)
     assert attraction_bounds(TravelPace.NORMAL, PlanningDayKind.PARTIAL) == (0, 3)
 
     candidate = CandidateLocationRef(admission_ordinal=0, uid="candidate")
@@ -197,8 +197,10 @@ def test_density_distinguishes_full_and_partial_days() -> None:
         visits=(visit,), route_legs=(leg(hotel, candidate, datetime(2026, 9, 3, 10, 0, tzinfo=SHANGHAI)), leg(candidate, hotel, datetime(2026, 9, 3, 11, 0, tzinfo=SHANGHAI))), backups=(),
     )
     validate_density(day, TravelPace.RELAXED)
+    validate_density(day, TravelPace.INTENSE)
+    excessive = day.model_copy(update={"visits": (visit,) * 5})
     with pytest.raises(ValueError):
-        validate_density(day, TravelPace.INTENSE)
+        validate_density(excessive, TravelPace.INTENSE)
 
 
 def test_backup_accepts_non_walking_matrix_within_3000m_and_rejects_high_value_invalids() -> None:
@@ -526,8 +528,7 @@ def test_policy_primitives_cover_invalid_time_meal_route_and_anchor_paths() -> N
     partial = DayPlan.model_construct(day_kind=PlanningDayKind.PARTIAL, visits=(attraction,), route_legs=(), backups=(), open_intervals=())
     validate_meal_slots(partial)
     validate_day_policy(DayPlan.model_construct(day_kind=PlanningDayKind.PARTIAL, visits=(), route_legs=(), backups=(), open_intervals=()), TravelPace.NORMAL)
-    with pytest.raises(ValueError):
-        validate_meal_slots(DayPlan.model_construct(day_kind=PlanningDayKind.FULL, visits=(attraction,), route_legs=(), backups=(), open_intervals=()))
+    validate_meal_slots(DayPlan.model_construct(day_kind=PlanningDayKind.FULL, visits=(attraction,), route_legs=(), backups=(), open_intervals=()))
     with pytest.raises(ValueError):
         validate_meal_slots(DayPlan.model_construct(day_kind=PlanningDayKind.TRANSIT_ONLY, visits=(lunch,), route_legs=(), backups=(), open_intervals=()))
     lunch_two = lunch.model_copy(update={"visit_id": "lunch-two"})

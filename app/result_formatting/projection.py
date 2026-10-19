@@ -17,7 +17,10 @@ from uuid import UUID
 from pydantic import BaseModel, ValidationError
 
 from app.candidate_research import (
-    CandidateResearchArtifact, CandidateResearchV3Artifact,
+    CandidateResearchArtifact, CandidateResearchV3Artifact, CandidateResearchV4Artifact,
+    CandidateResearchV2ModelActionArtifact, CandidateResearchV3ModelJudgmentArtifact,
+    CandidateResearchInvocationAttemptArtifact,
+    candidate_artifact_model, action_artifact_model, judgment_artifact_model,
     CandidateResearchLegacyArtifact, CandidateResearchPlaceObservationArtifact,
     CandidateResearchModelActionArtifact, CandidateResearchModelJudgmentArtifact,
     CandidateResearchLegacyModelJudgmentArtifact, validate_qualification_sources,
@@ -35,9 +38,10 @@ from .artifacts import (
     ResultBackup, ResultCoordinate, ResultCore, ResultDayData, ResultEndpoint,
     ResultInterval, ResultPlace, ResultRequirement, ResultRoute, ResultSource,
     ResultTransfer, ResultTransitRoute, ResultVisit, fresh_model,
+    BoundaryResultCore, BoundaryResultDayData, ResultPlannedBreak, ResultQualityIssue,
 )
 from .errors import ResultFormattingUsageError
-from .artifacts import ACTIVE_INPUTS_TEMPLATE_VERSION
+from .artifacts import ACTIVE_INPUTS_TEMPLATE_VERSION, BOUNDARY_QUALITY_TEMPLATE_VERSION, DAILY_QUALITY_TEMPLATE_VERSION
 from .models import ResultFormattingFailureCode as Code, ResultFormattingRequest
 
 
@@ -85,6 +89,10 @@ def input_digest(request: ResultFormattingRequest) -> str:
 
 
 def template_version_for(request: ResultFormattingRequest) -> str:
+    if request.itinerary_ref.schema_version == "8.0":
+        return DAILY_QUALITY_TEMPLATE_VERSION
+    if request.itinerary_ref.schema_version == "7.0":
+        return BOUNDARY_QUALITY_TEMPLATE_VERSION
     return ACTIVE_INPUTS_TEMPLATE_VERSION if request.state.requirement_outcome.schema_version == "1.1" else "zh-guide-v1"
 
 
@@ -162,14 +170,18 @@ _READ_TYPES = {
     HotelSelectionArtifact: ("hotel.selection", "hotel_selection", "1.0"),
     HotelDiscoveryArtifact: ("hotel.candidate_set", "hotel_selection", "1.0"),
     HotelPlaceSearchArtifact: ("hotel.place_search", "hotel_selection", "1.0"),
-    CandidateResearchArtifact: ("candidate_research.candidate_set", "candidate_research", "4.0"),
+    CandidateResearchArtifact: ("candidate_research.candidate_set", "candidate_research", "5.0"),
+    CandidateResearchV4Artifact: ("candidate_research.candidate_set", "candidate_research", "4.0"),
     CandidateResearchV3Artifact: ("candidate_research.candidate_set", "candidate_research", "3.0"),
     CandidateResearchLegacyArtifact: ("candidate_research.candidate_set", "candidate_research", ("1.0", "2.0")),
     CandidateResearchPlaceObservationArtifact: ("candidate_research.place_observation", "candidate_research", "1.0"),
-    CandidateResearchModelActionArtifact: ("candidate_research.model_action", "candidate_research", ("1.0", "2.0")),
-    CandidateResearchModelJudgmentArtifact: ("candidate_research.model_judgment", "candidate_research", "3.0"),
+    CandidateResearchModelActionArtifact: ("candidate_research.model_action", "candidate_research", "3.0"),
+    CandidateResearchV2ModelActionArtifact: ("candidate_research.model_action", "candidate_research", ("1.0", "2.0")),
+    CandidateResearchModelJudgmentArtifact: ("candidate_research.model_judgment", "candidate_research", "4.0"),
+    CandidateResearchV3ModelJudgmentArtifact: ("candidate_research.model_judgment", "candidate_research", "3.0"),
+    CandidateResearchInvocationAttemptArtifact: ("candidate_research.invocation_attempt", "candidate_research", "1.0"),
     CandidateResearchLegacyModelJudgmentArtifact: ("candidate_research.model_judgment", "candidate_research", ("1.0", "2.0")),
-    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", ("5.0", "6.0", "7.0", "8.0", "9.0")),
+    ItineraryPlanningModelActionArtifact: ("itinerary_planning.model_action", "itinerary_planning", ("5.0", "6.0", "7.0", "8.0", "9.0", "10.0", "11.0")),
     ItineraryPlanningHubGeocodeObservationArtifact: ("itinerary_planning.hub_geocode_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningDirectionsObservationArtifact: ("itinerary_planning.directions_observation", "itinerary_planning", "1.0"),
     ItineraryPlanningRouteMatrixObservationArtifact: ("itinerary_planning.route_matrix_observation", "itinerary_planning", "1.0"),
@@ -193,12 +205,12 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
     sources: dict[UUID, dict[str, Any]] = {}
 
     def read(ref: ArtifactRef, model: type[BaseModel]) -> Generator:
-        if model is CandidateResearchArtifact and ref.schema_version in {"1.0", "2.0"}:
-            model = CandidateResearchLegacyArtifact
-        elif model is CandidateResearchArtifact and ref.schema_version == "3.0":
-            model = CandidateResearchV3Artifact
-        elif model is CandidateResearchModelJudgmentArtifact and ref.schema_version in {"1.0", "2.0"}:
-            model = CandidateResearchLegacyModelJudgmentArtifact
+        if model is CandidateResearchArtifact:
+            model = candidate_artifact_model(ref.schema_version)
+        elif model is CandidateResearchModelActionArtifact:
+            model = action_artifact_model(ref.schema_version)
+        elif model is CandidateResearchModelJudgmentArtifact:
+            model = judgment_artifact_model(ref.schema_version)
         artifact_type, phase, version = _READ_TYPES[model]
         _require(ref.operation_id.run_id == request.state.run_id)
         _require(ref.artifact_type == artifact_type and ref.schema_version in ((version,) if isinstance(version, str) else version), Code.ARTIFACT_CONTRACT_ERROR)
@@ -217,7 +229,8 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
             raise ProjectionFailure(Code.ARTIFACT_INTEGRITY_ERROR) from None
         _require(content.schema_version == ref.schema_version, Code.ARTIFACT_INTEGRITY_ERROR)
         if isinstance(content, (CandidateResearchLegacyArtifact, CandidateResearchPlaceObservationArtifact,
-                                CandidateResearchModelActionArtifact, CandidateResearchLegacyModelJudgmentArtifact)):
+                                CandidateResearchV2ModelActionArtifact, CandidateResearchLegacyModelJudgmentArtifact,
+                                CandidateResearchInvocationAttemptArtifact)):
             _require(content.run_id == request.state.run_id)
         read_cache[ref.artifact_id] = ArtifactReadResult(ref=ref, content=content)
         return content
@@ -257,7 +270,10 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
     _require(candidate_state.confirmed_requirement_digest == digest and candidate_state.hotel_selection_ref == draft.hotel_selection_ref)
     for ref in candidate_state.model_judgment_refs:
         yield from read(ref, CandidateResearchModelJudgmentArtifact)
-    if type(candidates) is CandidateResearchArtifact:
+    if type(candidates) in {CandidateResearchArtifact, CandidateResearchV4Artifact}:
+        if type(candidates) is CandidateResearchArtifact:
+            for ref in candidates.invocation_attempt_refs:
+                yield from read(ref, CandidateResearchInvocationAttemptArtifact)
         for ref in candidate_state.model_action_refs:
             yield from read(ref, CandidateResearchModelActionArtifact)
         for ref in candidate_state.observation_refs:
@@ -385,8 +401,14 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
                                 matrix_mode=backup.matrix_mode.value, distance_m=backup.distance_m, source_id=add_source(ref, matrix),
                                 business_hours_state=backup.business_hours_state.value, business_source_ids=evidence_ids,
                                 requires_verification=backup.requires_verification))
+        extra = {}
+        if itinerary.schema_version in {"7.0", "8.0"}:
+            extra = dict(planned_breaks=tuple(ResultPlannedBreak(break_id=item.break_id, kind=item.kind,
+                interval=_interval(item.interval), reason=item.reason) for item in day.planned_breaks),
+                quality_issues=tuple(ResultQualityIssue(date=item.date, rule=item.rule, interval=_interval(item.interval),
+                    minutes=item.minutes) for item in day.quality_issues))
         day_specs.append(dict(day_no=day_no, date=day.date, day_kind=day.day_kind.value, theme=day.theme,
-                              open_intervals=tuple(_interval(item) for item in day.open_intervals), visits=visits, route_legs=routes, backups=backups))
+                              open_intervals=tuple(_interval(item) for item in day.open_intervals), visits=visits, route_legs=routes, backups=backups, **extra))
     departure_route = yield from route_spec(draft.departure_transfer.route_leg)
 
     ordered_sources = sorted(sources.values(), key=lambda item: (item["artifact_ref"].artifact_type, item["artifact_ref"].schema_version,
@@ -403,7 +425,8 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
         model = ResultTransitRoute if "transit_instructions" in spec else ResultRoute
         return model(**{**spec, "source_id": source_ids[spec["source_id"]]})
 
-    days = tuple(ResultDayData(**{**spec,
+    day_model = BoundaryResultDayData if itinerary.schema_version in {"7.0", "8.0"} else ResultDayData
+    days = tuple(day_model(**{**spec,
         "visits": tuple(ResultVisit(**business_ids(item)) for item in spec["visits"]),
         "route_legs": tuple(route_dto(item) for item in spec["route_legs"]),
         "backups": tuple(ResultBackup(**{**business_ids(item), "source_id": source_ids[item["source_id"]]}) for item in spec["backups"]),
@@ -413,11 +436,13 @@ def projection_steps(request: ResultFormattingRequest, itinerary: ItineraryPlann
         return ResultTransfer(transfer_kind=transfer.transfer_kind, hub_place_id=location_id(transfer.hub), hotel_place_id=1,
                               route=route_dto(route), processing_minutes=transfer.processing_minutes, approximate_extra_minutes=transfer.approximate_extra_minutes)
 
-    core = ResultCore(requirement=requirement, effective_pace=draft.effective_policy.effective_pace.value, places=places, sources=source_dtos,
+    core_model = BoundaryResultCore if itinerary.schema_version in {"7.0", "8.0"} else ResultCore
+    extra = {"quality_issue_count": sum(len(day.quality_issues) for day in days)} if itinerary.schema_version in {"7.0", "8.0"} else {}
+    core = core_model(requirement=requirement, effective_pace=draft.effective_policy.effective_pace.value, places=places, sources=source_dtos,
                       arrival_transfer=transfer_dto(draft.arrival_transfer, arrival_route), departure_transfer=transfer_dto(draft.departure_transfer, departure_route),
                       unknown_business_visit_count=sum(visit.business_hours_state == "unknown" for day in days for visit in day.visits),
                       unknown_business_backup_count=sum(backup.business_hours_state == "unknown" for day in days for backup in day.backups),
-                      weather_status="not_collected", map_status="deferred", cost_status="unverified", scope_notice_code="m09_first_release")
+                      weather_status="not_collected", map_status="deferred", cost_status="unverified", scope_notice_code="m09_first_release", **extra)
     return core, days
 
 

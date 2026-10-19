@@ -557,6 +557,27 @@ def test_validate_tool_batch_covers_global_limits_and_duplicate_guards() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("count", (2, 3))
+async def test_multiple_route_calls_are_rejected_before_any_map_request(count):
+    directory = _directory()
+    adapter = FakeMapAdapter()
+    run_id = uuid4()
+    key = _direction_key()
+    operations = tuple(OperationId(run_id=run_id, phase=WorkflowPhase.ITINERARY_PLANNING,
+        logical_step=f"rejected_route_{index}") for index in range(count))
+    dispatcher = ToolDispatcher(directory=directory,
+        map_executor=_executor_for_dispatch(adapter, run_id, key), operation_ids=operations)
+    calls = tuple(_call(PlanningTool.PLAN_DIRECTIONS.value, _direction_args(), f"route-{index}")
+        for index in range(count))
+    with pytest.raises(ToolBatchError) as error:
+        await dispatcher.dispatch(calls, sightseeing_days=1, direction_budget_key=key)
+    assert error.value.code == "action_batch_invalid"
+    assert not adapter.directions_calls
+    assert not adapter.geocode_calls
+    assert not adapter.matrix_calls
+
+
+@pytest.mark.asyncio
 async def test_dispatch_preflight_and_projection_reject_or_sanitize_untrusted_shapes() -> None:
     directory = _directory()
     with pytest.raises(ToolBatchError) as error:

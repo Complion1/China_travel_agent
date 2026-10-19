@@ -22,7 +22,7 @@ def test_facade_is_the_exact_final_module_09_projection() -> None:
     assert planning.ItineraryPlanningService.__name__ == "ItineraryPlanningService"
     assert not hasattr(planning, "models")
     assert not hasattr(planning, "artifacts")
-    assert planning.ITINERARY_PLANNING_SCHEMA_VERSION == "6.0"
+    assert planning.ITINERARY_PLANNING_SCHEMA_VERSION == "8.0"
 
 
 def test_facade_does_not_leak_artifact_locals_or_conversion_helpers() -> None:

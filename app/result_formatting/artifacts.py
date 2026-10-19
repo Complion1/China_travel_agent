@@ -27,6 +27,8 @@ from .errors import ResultFormattingUsageError
 RESULT_FORMATTING_SCHEMA_VERSION = "2.0"
 RESULT_FORMATTING_TEMPLATE_VERSION = "zh-guide-v1"
 ACTIVE_INPUTS_TEMPLATE_VERSION = "zh-guide-v2-active-inputs"
+BOUNDARY_QUALITY_TEMPLATE_VERSION = "zh-guide-v3-boundary-quality"
+DAILY_QUALITY_TEMPLATE_VERSION = "zh-guide-v4-daily-quality"
 MAX_RESULT_ARTIFACT_BYTES = 1_048_576
 _SAFE_INTEGER_MAX = 2**53 - 1
 
@@ -272,6 +274,44 @@ class ResultDayData(_ResultArtifactModel):
     backups: Annotated[tuple[ResultBackup, ...], Field(min_length=0, max_length=3)]
 
 
+class ResultPlannedBreak(_ResultArtifactModel):
+    break_id: StableText
+    kind: Literal["rest", "free_time"]
+    interval: ResultInterval
+    reason: Annotated[str, StringConstraints(min_length=1, max_length=160)]
+
+
+class ResultQualityIssue(_ResultArtifactModel):
+    date: date
+    rule: Literal["unexplained_gap", "missing_lunch", "missing_dinner", "excessive_break"]
+    interval: ResultInterval
+    minutes: Annotated[int, Field(ge=1, le=1440)]
+
+
+class BoundaryResultDayData(ResultDayData):
+    planned_breaks: Annotated[tuple[ResultPlannedBreak, ...], Field(max_length=16)]
+    quality_issues: Annotated[tuple[ResultQualityIssue, ...], Field(max_length=32)]
+
+    @model_validator(mode="after")
+    def _issues(self):
+        if any(item.date != self.date for item in self.quality_issues):
+            raise ValueError("quality issue day mismatch")
+        return self
+
+
+class BoundaryResultCore(ResultCore):
+    quality_issue_count: Annotated[int, Field(ge=0, le=1920)]
+
+
+def _check_template_data(template: str, source: ArtifactRef, data: BaseModel) -> None:
+    boundary = template in {BOUNDARY_QUALITY_TEMPLATE_VERSION, DAILY_QUALITY_TEMPLATE_VERSION}
+    if boundary != isinstance(data, (BoundaryResultDayData, BoundaryResultCore)) or boundary != (source.schema_version in {"7.0", "8.0"}):
+        raise ValueError("result template, source and data variant mismatch")
+    expected = {"7.0": BOUNDARY_QUALITY_TEMPLATE_VERSION, "8.0": DAILY_QUALITY_TEMPLATE_VERSION}.get(source.schema_version)
+    if expected is not None and template != expected:
+        raise ValueError("result template and source version mismatch")
+
+
 class ResultDayEntry(_ResultArtifactModel):
     day_no: DayNumber
     date: date
@@ -280,7 +320,7 @@ class ResultDayEntry(_ResultArtifactModel):
 
 def _check_itinerary_ref(ref: ArtifactRef, run_id: UUID) -> None:
     if (ref.operation_id.run_id != run_id or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING
-            or ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version not in {"2.0", "3.0", "4.0", "5.0", "6.0"}):
+            or ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version not in {"2.0", "3.0", "4.0", "5.0", "6.0", "7.0", "8.0"}):
         raise ValueError("source itinerary reference mismatch")
 
 
@@ -291,29 +331,30 @@ def _check_markdown(value: str) -> None:
 
 class ResultDayArtifact(_ResultArtifactModel):
     schema_version: Literal["2.0"]
-    template_version: Literal["zh-guide-v1", "zh-guide-v2-active-inputs"]
+    template_version: Literal["zh-guide-v1", "zh-guide-v2-active-inputs", "zh-guide-v3-boundary-quality", "zh-guide-v4-daily-quality"]
     run_id: UUID
     source_itinerary_ref: ArtifactRef
     input_digest: Digest
     bundle_digest: Digest
-    data: ResultDayData = Field(repr=False)
+    data: BoundaryResultDayData | ResultDayData = Field(repr=False)
     markdown: str = Field(repr=False)
 
     @model_validator(mode="after")
     def _artifact(self):
         _check_itinerary_ref(self.source_itinerary_ref, self.run_id)
+        _check_template_data(self.template_version, self.source_itinerary_ref, self.data)
         _check_markdown(self.markdown)
         return self
 
 
 class ResultIndexArtifact(_ResultArtifactModel):
     schema_version: Literal["2.0"]
-    template_version: Literal["zh-guide-v1", "zh-guide-v2-active-inputs"]
+    template_version: Literal["zh-guide-v1", "zh-guide-v2-active-inputs", "zh-guide-v3-boundary-quality", "zh-guide-v4-daily-quality"]
     run_id: UUID
     source_itinerary_ref: ArtifactRef
     input_digest: Digest
     bundle_digest: Digest
-    core: ResultCore = Field(repr=False)
+    core: BoundaryResultCore | ResultCore = Field(repr=False)
     days: Annotated[tuple[ResultDayEntry, ...], Field(min_length=1, max_length=60)] = Field(repr=False)
     markdown_header: str = Field(repr=False)
     markdown_footer: str = Field(repr=False)
@@ -321,6 +362,7 @@ class ResultIndexArtifact(_ResultArtifactModel):
     @model_validator(mode="after")
     def _artifact(self):
         _check_itinerary_ref(self.source_itinerary_ref, self.run_id)
+        _check_template_data(self.template_version, self.source_itinerary_ref, self.core)
         _check_markdown(self.markdown_header)
         _check_markdown(self.markdown_footer)
         requirement = self.core.requirement

@@ -50,7 +50,7 @@ async def test_private_context_loss_blocks_cross_process_rerun(durable_execution
         artifact = await context.artifacts.repository.get(saved[0],expected_model=CandidateResearchArtifact if phase == "research" else ItineraryPlanningArtifact)
         assert artifact.ref == saved[0]
         assert context.providers.research_model.call_count == 4
-        assert context.providers.planning_model.call_count == (3 if phase == "planning" else 0)
+        assert context.providers.planning_model.call_count == (4 if phase == "planning" else 0)
         await context.runtime.close()
         result = await invoke_worker(dict(run_id=paused.state.run_id,mode="recover_blocked"))
         assert all(result[key] == 0 for key in ("extract_calls","hotel_calls","research_calls","planning_calls"))

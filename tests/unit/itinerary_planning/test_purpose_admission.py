@@ -22,7 +22,7 @@ async def test_entry_state_proof_is_accepted_by_real_research_and_preserved_in_s
     from app.candidate_research import ProposedActionBatch, RoleJudgmentUpdate, ResearchRole, RoleVerdict, RoleReasonCode, EvidenceHandle
     model.responses.extend((lambda _: upstream.structured(ProposedActionBatch(actions=(_first_objective_action(model),))),
         lambda _: legal_judgment(model, JudgmentPatch(role_updates=(RoleJudgmentUpdate(candidate_handle="c:0",role=ResearchRole.ATTRACTION,
-            verdict=RoleVerdict.SUPPORTED,reason_code=RoleReasonCode.PROVIDER_CATEGORY_SUPPORTS,evidence_handles=(EvidenceHandle(handle_id="e:0"),)),),interest_updates=(),meal_updates=(),requirement_group_updates=())),
+            verdict=RoleVerdict.UNRESOLVED,reason_code=RoleReasonCode.EVIDENCE_INSUFFICIENT,evidence_handles=(EvidenceHandle(handle_id="e:0"),)),),interest_updates=(),meal_updates=(),requirement_group_updates=())),
         lambda _: upstream.structured(__import__("app.candidate_research", fromlist=["ProposedActionBatch"]).ProposedActionBatch(actions=(_first_objective_action(model),))),
         upstream.structured(JudgmentPatch(role_updates=(),interest_updates=(),meal_updates=(),requirement_group_updates=())),
         upstream.structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
@@ -49,11 +49,12 @@ async def test_entry_state_proof_is_accepted_by_real_research_and_preserved_in_s
     assert outcome.outcome_type == "incomplete", outcome
     successor = (await repository.get(outcome.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
     assert successor.predecessor_ref == source.candidate_set_ref
-    assert all(gap.source_candidate_set_ref == source.candidate_set_ref for gap in successor.record.gaps if gap.gap_type=="meal_count_shortfall")
+    assert supplemental.gaps
+    assert all(gap.evidence_refs for gap in supplemental.gaps)
     assert planning_model.call_count == 0
     assert maps.call_count == 2
 from app.candidate_research import MatchVerdict, MealIntent
-from app.candidate_research.artifacts import CandidateResearchArtifact
+from app.candidate_research.artifacts import CandidateResearchV4Artifact as CandidateResearchArtifact
 from app.itinerary_planning import ItineraryPlanningCandidateSupplementRequested, ItineraryPlanningIncomplete, PlanningStopReason
 from app.itinerary_planning.admission import candidate_purposes
 from tests.unit.itinerary_planning.test_service_initial import _fixture
@@ -82,24 +83,21 @@ def with_unknown_meals(repository, request, *, exhausted=False):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exhausted", (False, True))
-async def test_missing_meals_routes_to_research_or_specific_incomplete_without_model_or_map(exhausted):
-    service, request, runtime, operation, repository = _fixture()
+async def test_missing_meals_do_not_impose_a_full_day_quota_before_window_verification(exhausted):
+    from app.llm_runtime import ToolTurnCompleted
+    from tests.unit.itinerary_planning.test_service_initial import _metadata
+    service, request, runtime, operation, repository = _fixture(ToolTurnCompleted(final_text="结束", metadata=_metadata()))
     request = with_unknown_meals(repository, request, exhausted=exhausted)
     outcome = await service.plan_initial(request)
-    if exhausted:
-        assert isinstance(outcome, ItineraryPlanningIncomplete), outcome
-        assert PlanningStopReason.CANDIDATE_SUPPLY_INSUFFICIENT in outcome.stop_reasons
-    else:
-        assert isinstance(outcome, ItineraryPlanningCandidateSupplementRequested), outcome
-        assert {gap.target.meal_intent for gap in outcome.gaps} == set(MealIntent)
-    assert operation.call_count == 0
-    assert not service._map_adapter.directions_calls
-    assert not service._map_adapter.matrix_calls
+    assert isinstance(outcome, ItineraryPlanningIncomplete), outcome
+    assert outcome.stop_reasons == (PlanningStopReason.NO_TERMINAL_SUBMISSION,)
+    assert operation.call_count == outcome.budgets.model_invocations_consumed == 1
+    assert not service._map_adapter.directions_calls and not service._map_adapter.matrix_calls
     assert not service._map_adapter.geocode_calls
-    assert outcome.budgets.model_invocations_consumed == outcome.budgets.direction_calls_consumed == 0
+    assert outcome.budgets.direction_calls_consumed == 0
 
 
-def test_supply_lower_bound_counts_distinct_uids_across_all_full_days():
+def test_supply_does_not_force_theoretical_full_day_counts():
     from app.itinerary_planning.admission import supply_shortages
     from tests.unit.itinerary_planning.test_service_initial import _upstream, _confirmed
     from app.candidate_research import CandidateRecordV2
@@ -112,9 +110,8 @@ def test_supply_lower_bound_counts_distinct_uids_across_all_full_days():
         "departure":confirmed.requirement.time_window.departure.model_copy(update={"local_datetime":"2026-09-06 18:00"})})
     confirmed = confirmed.model_copy(update={"requirement":confirmed.requirement.model_copy(update={"time_window":window})})
     gaps = supply_shortages(candidates,confirmed,())
-    assert ("count","attraction",2,3,None) in gaps
-    assert ("meal","lunch",2,3,None) in gaps
-    assert ("meal","dinner",2,3,None) in gaps
+    assert gaps == ()
+
 
 
 def test_exact_state_proof_rejects_forged_current_count():

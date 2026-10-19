@@ -215,19 +215,32 @@ class PlanningModel:
         self.feedback.append([json.loads(r.content) for r in results])
         if self.stage == 0:
             return self.geocode()
-        if self.stage == 1:
-            self.stage = 2
+        if self.stage in {1, 2}:
+            from datetime import date, datetime
+            from zoneinfo import ZoneInfo
+            from app.itinerary_planning.models import DailyPlanOutline, TimeInterval, PlannedBreak
             handles = ("hub-location-arrival", "hotel-handle", "candidate-handle-0000", "candidate-handle-0006", "candidate-handle-0007", "hotel-handle", "hub-location-departure")
             self.endpoints = tuple(zip(handles, handles[1:]))
-            return self.batch(("plan_directions", PlanDirectionsArgs(legs=tuple(DirectionLegIntent(leg_id=f"leg{i}",
-                origin_handle=a, destination_handle=b, transport_semantic=TransportSemantic.WALKING,
-                route_mode=TravelMode.WALKING, alternatives_limit=1) for i, (a, b) in enumerate(self.endpoints)),
-                visit_intents=tuple(PurposeVisitIntent(date=__import__("datetime").date(2026,9,3), candidate_handle=handle,
-                    visit_kind=kind, is_backup=False) for handle,kind in (("candidate-handle-0000",VisitKind.ATTRACTION),
-                    ("candidate-handle-0006",VisitKind.LUNCH),("candidate-handle-0007",VisitKind.DINNER))))))
-        if self.stage == 2:
-            self.stage = 3
-            return self.batch(("submit_itinerary", self.proposal(self.feedback[-1])))
+            boundary = self.stage == 1
+            indexes = (0, 5) if boundary else (1, 2, 3, 4)
+            self.stage += 1
+            def at(hour, minute=0):
+                return datetime(2026, 9, 3, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai"))
+            visits = tuple(PurposeVisitIntent(date=date(2026,9,3), candidate_handle=handle,
+                visit_kind=kind, is_backup=False, interval=TimeInterval(start_at=start, end_at=end))
+                for handle,kind,start,end in (("candidate-handle-0000",VisitKind.ATTRACTION,at(10,7),at(11,22)),
+                    ("candidate-handle-0006",VisitKind.LUNCH,at(11,37),at(12,42)),
+                    ("candidate-handle-0007",VisitKind.DINNER,at(17,43),at(18,48))))
+            rests = (PlannedBreak(break_id="afternoon-rest",kind="rest",start_at=at(14),end_at=at(16),reason="午后休息"),)
+            return self.batch(("plan_directions", PlanDirectionsArgs(
+                daily_outline=() if boundary else (DailyPlanOutline(date=date(2026,9,3),visits=visits,planned_breaks=rests),),
+                legs=tuple(DirectionLegIntent(leg_id=f"leg{i}", origin_handle=self.endpoints[i][0],
+                    destination_handle=self.endpoints[i][1], transport_semantic=TransportSemantic.WALKING,
+                    route_mode=TravelMode.WALKING, alternatives_limit=1) for i in indexes),
+                visit_intents=() if boundary else visits)))
+        if self.stage == 3:
+            self.stage = 4
+            return self.batch(("submit_itinerary", self.proposal(self.feedback)))
         from app.llm_runtime import ToolTurnCompleted
         from tests.unit.itinerary_planning.test_service_initial import _metadata
         self.call_count += 1
@@ -238,7 +251,7 @@ class PlanningModel:
         from zoneinfo import ZoneInfo
         from app.itinerary_planning.models import (ProposedRouteLeg, ProposedScheduledVisit, VisitKind, BusinessHoursState,
             TransportSemantic, ProposedItineraryDraft, ProposedBoundaryTransfer, ProposedDayPlan, PlanningDayKind,
-            TimeInterval, SubmitItineraryArgs, ProposedEffectivePlanningPolicy)
+            TimeInterval, SubmitItineraryArgs, ProposedEffectivePlanningPolicy, PlannedBreak)
         from app.baidu_map import TravelMode
         from app.requirements import TravelPace
         def at(day, hour, minute=0):
@@ -269,7 +282,8 @@ class PlanningModel:
             daily_time_rules=(), time_sensitive_must=(), transport_rules=()), draft=ProposedItineraryDraft(
                 arrival_transfer=ProposedBoundaryTransfer(transfer_kind="arrival", hub_handle="hub-location-arrival", hotel_handle="hotel-handle", route_leg=routes[0]),
                 days=(ProposedDayPlan(date=date(2026,9,3),day_kind=PlanningDayKind.FULL,theme="杭州漫游",
-                    open_intervals=(TimeInterval(start_at=at(3,9),end_at=at(3,21)),),visits=visits,route_legs=routes[1:5],backups=()),),
+                    open_intervals=(TimeInterval(start_at=at(3,9),end_at=at(3,21)),),visits=visits,route_legs=routes[1:5],backups=(),
+                    planned_breaks=(PlannedBreak(break_id="afternoon-rest",kind="rest",start_at=at(3,14),end_at=at(3,16),reason="午后休息"),)),),
                 departure_transfer=ProposedBoundaryTransfer(transfer_kind="departure", hub_handle="hub-location-departure", hotel_handle="hotel-handle", route_leg=routes[5]),upstream_gap_ids=()))
 
 

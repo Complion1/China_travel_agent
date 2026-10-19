@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.baidu_map import MatrixTravelMode
-from app.candidate_research import CandidateResearchArtifact, CandidateResearchOperationPlan, CandidateResearchSupplementalRequest, CandidateCountShortfallGap, MealIntent, ResearchMode, ResearchRole
+from app.candidate_research import CandidateResearchV4Artifact as CandidateResearchArtifact, CandidateResearchOperationPlan, CandidateResearchSupplementalRequest, CandidateCountShortfallGap, MealIntent, ResearchMode, ResearchRole
 from app.itinerary_planning import (
     ItineraryPlanningCandidateSupplementRequested,
     ItineraryPlanningFailed,

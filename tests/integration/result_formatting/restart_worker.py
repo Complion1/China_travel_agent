@@ -129,7 +129,7 @@ async def seed(repository, *, transit: bool = False) -> dict[str, object]:
             "M12_RESTART_SEED_ALREADY_EXISTS")
     instructions = ("步行到合成甲站", "乘坐合成1号线至乙站", "换乘合成20路至丙站") if transit else None
     scenario = await make_scenario(repository=repository, days=RESTART_DAYS, run_id=RESTART_RUN_ID,
-        transit_instructions=instructions, minute_schedule=True)
+        transit_instructions=instructions, minute_schedule=True, planning_version="8.0")
     service = ResultFormattingService(artifact_repository=repository)
     prepared = await service.prepare(scenario.request)
     require(type(prepared) is ResultFormattingPrepared, "M12_SEED_PREPARE_FAILED")

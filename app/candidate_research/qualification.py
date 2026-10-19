@@ -244,20 +244,24 @@ def _record_decisions(receipts, job, decisions):
 def validate_qualification_sources(artifact, sources) -> None:
     """只读核验新版资格来源，不执行外调，也不修改候选或判断。"""
     from .artifacts import (
-        CandidateResearchArtifact, CandidateResearchModelActionArtifact,
+        CandidateResearchArtifact, CandidateResearchV4Artifact, CandidateResearchModelActionArtifact,
         CandidateResearchModelJudgmentArtifact, CandidateResearchPlaceObservationArtifact,
         ModelActionAcceptedRecord, ModelJudgmentAcceptedRecord, unwrap_model_record,
+        action_artifact_model, judgment_artifact_model,
     )
     from .fingerprints import canonical_json_bytes
 
-    if type(artifact) is not CandidateResearchArtifact:
-        raise ValueError("qualification source validation requires candidate set version 4")
+    if type(artifact) not in {CandidateResearchArtifact, CandidateResearchV4Artifact}:
+        raise ValueError("qualification source validation requires candidate set version 4 or 5")
     if not isinstance(sources, Mapping):
         raise ValueError("qualification source directory mismatch")
     try:
-        artifact = CandidateResearchArtifact.model_validate_json(artifact.model_dump_json(), strict=True)
+        artifact = type(artifact).model_validate_json(artifact.model_dump_json(), strict=True)
     except (TypeError, ValueError):
         raise ValueError("qualification artifact contract mismatch") from None
+    if type(artifact) is CandidateResearchArtifact:
+        from .recovery import validate_invocation_attempt_sources
+        validate_invocation_attempt_sources(artifact, sources)
     state = getattr(artifact.record, "state", None)
     if state is None:
         return
@@ -289,7 +293,7 @@ def validate_qualification_sources(artifact, sources) -> None:
         observations[index] = observation_context(index, observation, searches.get(index))
         step(observation.iteration_index)["observation_refs"].append(ref)
     for ref in state.model_action_refs:
-        action = source(ref, CandidateResearchModelActionArtifact)
+        action = source(ref, action_artifact_model(ref.schema_version))
         current = step(action.iteration_index)
         if current["action_ref"] is not None:
             raise ValueError("research iteration has multiple action records")
@@ -326,7 +330,7 @@ def validate_qualification_sources(artifact, sources) -> None:
     supported_roles, avoid_decisions = {}, {}
     last_judgment_iteration = -1
     for ref in state.model_judgment_refs:
-        judgment = source(ref, CandidateResearchModelJudgmentArtifact)
+        judgment = source(ref, judgment_artifact_model(ref.schema_version))
         if judgment.iteration_index <= last_judgment_iteration:
             raise ValueError("judgment source directory order mismatch")
         last_judgment_iteration = judgment.iteration_index

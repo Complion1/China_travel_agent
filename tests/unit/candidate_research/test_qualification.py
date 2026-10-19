@@ -155,10 +155,13 @@ async def test_missing_judgment_recovers_on_same_evidence_before_any_acceptance(
     assert result.outcome_type == "incomplete", getattr(result, "failure", None)
     assert (model.call_count, maps.call_count) == (3, 1)
     writes = [item for item in repo.put_requests if item.artifact_type.endswith("model_judgment")]
-    assert len(writes) == 1 and writes[0].schema_version == "3.0"
+    assert len(writes) == 1 and writes[0].schema_version == "4.0"
     record = writes[0].content["result"]
-    assert record["record_type"] == "recovered" and record["attempts"][0]["code"] == "judgment_required_missing"
-    assert record["attempts"][0]["metadata"] is not None and record["final"]["record_type"] == "accepted"
+    assert record["record_type"] == "accepted"
+    attempts = [item.content for item in repo.put_requests if item.artifact_type.endswith("invocation_attempt") and item.content["kind"] == "judgment"]
+    assert attempts[0]["recovery_code"] == "judgment_required_missing"
+    assert attempts[0]["result"]["record"]["metadata"] is not None
+    assert attempts[1]["correction_number"] == 1
     first, retry = map(lambda prompt: json.loads(prompt.user_text), model.prompts[1:])
     retry.pop("output_recovery")
     assert first == retry
@@ -176,11 +179,13 @@ async def test_missing_judgment_exhausts_shared_recovery_without_accepting_subse
     empty = JudgmentPatch(role_updates=(), interest_updates=(), meal_updates=(), requirement_group_updates=())
     model.responses.extend([action(model)] + [structured(empty)] * 3)
     result = await service.research_initial(request)
-    assert result.failure.code.value == "judgment_required_missing"
+    assert result.outcome_type == "incomplete"
+    assert "correction_limit_reached" in {item.value for item in result.stop_reasons}
     assert (model.call_count, maps.call_count) == (4, 1)
     stored = repo.contents[repo.refs[request.operation_plan.terminal_successor_operation_id].artifact_id]
     assert not stored["qualification_state"]["assessments"]
-    assert not stored["record"]["state"]["candidates"]
+    assert len(stored["record"]["state"]["candidates"]) == 1
+    assert stored["record"]["state"]["candidates"][0]["state"] == "withheld"
     assert await service.research_initial(request) == result
     await service.aclose()
 

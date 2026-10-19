@@ -261,9 +261,12 @@
       for(const kind of ["cancel","recover"]){if(!view.actions.includes(kind))continue;const button=make("button",kind==="cancel"?"取消任务":"明确恢复任务",controls);if(kind==="cancel")button.className="danger";button.addEventListener("click",()=>send(kind,{},id));}
       await readResult(view);if($("statistics").open)await readSummary();
       const overview=$("process-overview");
-      if(markdown!==null)overview.before($("result"));
-      else if(view.run.activity==="awaiting_user")overview.before($("interaction"));
-      else overview.after($("interaction"));
+      const interactionPanel=$("interaction"), resultPanel=$("result");
+      if(markdown!==null){
+        if(overview.previousElementSibling!==resultPanel)overview.before(resultPanel);
+      }else if(view.run.activity==="awaiting_user"){
+        if(overview.previousElementSibling!==interactionPanel)overview.before(interactionPanel);
+      }else if(overview.nextElementSibling!==interactionPanel)overview.after(interactionPanel);
       updateTaskTimers();
     }catch(e){workflowUnavailable();message(e.message,"read");}finally{refreshing=false;}
   }

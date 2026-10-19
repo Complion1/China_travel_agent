@@ -29,17 +29,19 @@ async def test_actual_feedback_first_item_schema_bounded_correction_and_exact_re
         action = _first_objective_action(model)
         return structured(ProposedActionBatch(actions=(action.model_copy(update={'interest': request.confirmed.requirement.preferences.interests[0]}),)))
     model.responses.extend((lambda _: structured(ProposedActionBatch(actions=(
-        _action_batch_from_prompt(model, 2).actions[1].model_copy(update={'ordinal': 0}),))), rejected))
+        _action_batch_from_prompt(model, 2).actions[1].model_copy(update={'ordinal': 0}),))), rejected, rejected))
     repository = FakeRepository(); repository.seed(hotel_ref, hotel)
     maps = FakeMapAdapter()
     service = CandidateResearchService(runtime=FakeRuntime(model), map_adapter=maps,
         artifact_repository=repository, budget_manager=FakeBudgetManager(request.operation_plan.run_id))
     result = await service.research_initial(request)
-    assert result.failure.code.value == 'action_correction_exhausted'
-    assert model.call_count == 2 and maps.call_count == 0
-    assert result.budgets.semantic_invocations_consumed == 2 and result.budgets.known_usage.total_tokens == 4
-    first, second_prompt = (json.loads(p.user_text) for p in model.prompts)
-    assert len(second_prompt['objectives']) == 1
+    assert result.outcome_type == 'incomplete'
+    assert 'correction_limit_reached' in {item.value for item in result.stop_reasons}
+    assert model.call_count == 3 and maps.call_count == 0
+    assert result.budgets.semantic_invocations_consumed == 3 and result.budgets.known_usage.total_tokens == 6
+    first, second_prompt = (json.loads(p.user_text) for p in model.prompts[:2])
+    assert second_prompt['objectives'] == first['objectives']
+    assert second_prompt['action_validation_feedback']['invalid_action_ordinals'] == [0]
     assert second_prompt['correction']['attempts'] == 1
     assert second_prompt['correction']['rule'] == 'highest_priority_objective_ignored'
     assert second_prompt['required_objective_id'] == first['objectives'][0]['objective_id']
@@ -54,7 +56,7 @@ async def test_actual_feedback_first_item_schema_bounded_correction_and_exact_re
     assert array['maxItems'] == 8
     assert array['prefixItems'][0]['allOf'][1]['properties']['objective_id']['const'] == first['objectives'][0]['objective_id']
     artifact = (await repository.get(repository.refs[request.operation_plan.terminal_successor_operation_id], expected_model=CandidateResearchArtifact)).content
-    assert artifact.correction_state[0].attempts == 2
+    assert artifact.correction_state[0].attempts == 3
     assert CandidateResearchArtifact.model_validate_json(artifact.model_dump_json(), strict=True) == artifact
     before = (model.call_count, maps.call_count, len(repository.put_requests))
     assert await service.research_initial(request) == result
@@ -273,7 +275,9 @@ async def test_complete_with_unrelated_conflicted_avoid_unknown_and_preserve_leg
     extra = artifact.record.state.candidates[-1]
     assert extra.state.value == 'conflicted' and extra.avoid_matches[0].verdict is MatchVerdict.UNRESOLVED
     assert model.call_count == 4
-    data = artifact.model_dump(mode='json'); data['schema_version'] = '2.0'; data.pop('correction_state'); data.pop('qualification_state')
+    data = artifact.model_dump(mode='json'); data['schema_version'] = '2.0'; data.pop('correction_state'); data.pop('qualification_state'); data.pop('invocation_attempt_refs')
+    for budget in (data['record']['budgets'], data['record']['state']['budgets']):
+        budget.pop('correction_limit'); budget.pop('corrections_consumed')
     for ref in (*data['record']['state']['model_action_refs'], *data['record']['state']['model_judgment_refs']): ref['schema_version'] = '1.0'
     with pytest.raises(ValidationError, match='legacy completion'):
         CandidateResearchLegacyArtifact.model_validate_json(json.dumps(data), strict=True)
@@ -308,12 +312,12 @@ async def test_terminal_lookup_failure_preserves_actual_usage_and_strict_outcome
                 raise ArtifactRepositoryError()
             return await super().lookup(**kwargs)
     request, hotel_ref, hotel, _ = _request(uuid4())
-    model = FakeModelOperation([structured(NoUsefulActionProposed(reason_code='no_legal_action'))] * 2)
+    model = FakeModelOperation([structured(NoUsefulActionProposed(reason_code='no_legal_action'))] * 3)
     repository = LookupFailure(); repository.seed(hotel_ref, hotel)
     maps = FakeMapAdapter()
     service = CandidateResearchService(runtime=FakeRuntime(model), map_adapter=maps, artifact_repository=repository, budget_manager=FakeBudgetManager(request.operation_plan.run_id))
     original = await service.research_initial(request)
-    assert original.budgets.semantic_invocations_consumed == 2
+    assert original.budgets.semantic_invocations_consumed == 3
     repository.unavailable = True
     before = (model.call_count, maps.call_count, len(repository.put_requests))
     failed = await service.research_initial(request)
@@ -401,11 +405,12 @@ async def test_new_named_requirement_cannot_be_replaced_by_other_requirement_det
     if correct:
         model.responses.extend((lambda _: structured(ProposedActionBatch(actions=(_first_objective_action(model, query='generic'),))),
             lambda _: legal_judgment(model)))
+        model.responses.extend([structured(NoUsefulActionProposed(reason_code='insufficient_remaining_budget'))] * 2)
     else:
-        model.responses.append(wrong_details)
+        model.responses.extend((wrong_details, wrong_details))
     repository = FakeRepository(); repository.seed(hotel_ref, hotel)
     maps = FakeMapAdapter([search_success('first-only'), search_no_result()])
-    service = CandidateResearchService(runtime=FakeRuntime(model), map_adapter=maps, artifact_repository=repository, budget_manager=FakeBudgetManager(request.operation_plan.run_id))
+    service = CandidateResearchService(runtime=FakeRuntime(model), map_adapter=maps, artifact_repository=repository, budget_manager=FakeBudgetManager(request.operation_plan.run_id, place_limit=2))
     result = await service.research_initial(request)
     assert not maps.details_requests
     if correct:
@@ -413,7 +418,8 @@ async def test_new_named_requirement_cannot_be_replaced_by_other_requirement_det
         assert result.outcome_type == 'incomplete', getattr(result, 'failure', None)
     else:
         assert maps.call_count == 1
-        assert result.failure.code.value == 'action_correction_exhausted'
+        assert result.outcome_type == 'incomplete'
+        assert 'correction_limit_reached' in {item.value for item in result.stop_reasons}
     await service.aclose()
 
 
@@ -428,15 +434,13 @@ async def test_same_process_must_supplement_preserves_rejection_limit(empty, for
     request.confirmed.requirement.preferences.must_visit_places = ['同一个需求']
     request.confirmed.requirement.preferences.avoid_places = ['避让目标']
     model = FakeModelOperation()
-    model.responses.extend((lambda _: structured(ProposedActionBatch(actions=(_first_objective_action(model),))),
-        lambda _: legal_judgment(model),
-        structured(NoUsefulActionProposed(reason_code='no_legal_action')),
-        lambda _: structured(ProposedActionBatch(actions=(_first_objective_action(model, query='同一个需求'),)))))
-    if empty:
-        model.responses = [model.responses[2], *model.responses[:2]]
+    model.responses.extend((structured(NoUsefulActionProposed(reason_code='no_legal_action')),
+        lambda _: structured(ProposedActionBatch(actions=(_first_objective_action(model),))),
+        lambda _: legal_judgment(model)))
+    model.responses.extend([structured(NoUsefulActionProposed(reason_code='insufficient_remaining_budget'))] * 2)
     repository = FakeRepository(); repository.seed(hotel_ref, hotel)
     maps = FakeMapAdapter([search_no_result() if empty else search_success('same')])
-    service = CandidateResearchService(runtime=FakeRuntime(model), map_adapter=maps, artifact_repository=repository, budget_manager=FakeBudgetManager(request.operation_plan.run_id))
+    service = CandidateResearchService(runtime=FakeRuntime(model), map_adapter=maps, artifact_repository=repository, budget_manager=FakeBudgetManager(request.operation_plan.run_id, place_limit=1))
     initial = await service.research_initial(request)
     assert initial.outcome_type == 'incomplete', getattr(initial, 'failure', None)
     artifact = (await repository.get(initial.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
@@ -454,17 +458,22 @@ async def test_same_process_must_supplement_preserves_rejection_limit(empty, for
         operation_plan=CandidateResearchOperationPlan(run_id=request.operation_plan.run_id,
             iteration_slots=_slots(request.operation_plan.run_id, count=6-initial.budgets.iterations_consumed, prefix='same_must'),
             terminal_successor_operation_id=OperationId(run_id=request.operation_plan.run_id, phase=WorkflowPhase.CANDIDATE_RESEARCH, logical_step='same_must_terminal')))
-    model.responses.append(structured(NoUsefulActionProposed(reason_code='no_legal_action')))
+    service._budget.iteration_limit = 6
+    model.responses.clear()
+    model.responses.extend([structured(NoUsefulActionProposed(reason_code='no_legal_action'))] * 2)
     result = await service.research_supplemental(supplemental)
     if forged:
         assert result.failure.code.value == 'replay_mismatch'
-        assert model.call_count == (3 if empty else 4) and maps.call_count == 1
+        assert model.call_count == (4 if empty else 5) and maps.call_count == 1
         await service.aclose()
         return
-    assert result.failure.code.value == 'action_correction_exhausted'
-    assert model.call_count == (4 if empty else 5) and maps.call_count == 1
+    assert result.outcome_type == 'incomplete'
+    assert 'correction_limit_reached' in {item.value for item in result.stop_reasons}
+    assert result.budgets.corrections_consumed == 2
+    assert model.call_count == (6 if empty else 7) and maps.call_count == 1
     terminal = (await repository.get(repository.refs[supplemental.operation_plan.terminal_successor_operation_id], expected_model=CandidateResearchArtifact)).content
-    assert len(terminal.correction_state) == 1 and terminal.correction_state[0].attempts == 2
+    assert terminal.record.budgets.corrections_consumed == 2
+    assert terminal.correction_state[-1].attempts >= 2
     await service.aclose()
 
 

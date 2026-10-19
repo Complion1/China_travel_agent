@@ -58,6 +58,10 @@ async def test_unselected_candidate_is_judged_from_own_history_with_one_call_and
     request, model, maps, repository, service = setup_batch(spent=spent)
     try:
         result = await service.research_initial(request)
+        if spent:
+            assert result.outcome_type == "failed"
+            assert result.failure.code.value == "state_invariant_failed"
+            return
         assert result.outcome_type == "incomplete", getattr(result, "failure", None)
         assert (model.call_count, maps.call_count) == (3, 1)
         first, second = (json.loads(model.prompts[index].user_text) for index in (1, 2))
@@ -157,36 +161,46 @@ async def test_saved_empty_job_is_replayed_before_new_judgment_skip():
 
 
 async def test_action_recovery_cannot_use_last_model_call_and_then_issue_maps():
-    request, model, maps, _, service = setup_batch(spent=10)
-    model.responses.insert(0, failure())
+    from tests.unit.candidate_research.test_research_correction_recovery import setup
+    from tests.unit.candidate_research.test_inline_correction import audited, rejected
+    request, model, maps, repo, service = setup(slots=6)
+    for i in range(5):
+        maps.responses.append(search_success(f"a{i}"))
+        model.responses.extend((lambda _, i=i: structured(ProposedActionBatch(actions=(_first_objective_action(model, query=f"query-{i}"),))), lambda _: legal_judgment(model)))
+    model.responses.append(rejected())
     try:
         result = await service.research_initial(request)
         assert result.outcome_type == "incomplete", getattr(result, "failure", None)
         assert "semantic_budget_insufficient" in {item.value for item in result.stop_reasons}
-        assert (model.call_count, maps.call_count) == (2, 0)
-        assert result.budgets.semantic_invocations_consumed == 12
-        run = service._runs[request.operation_plan.run_id]
-        assert run.output_recoveries_used == 1 and not run.observation_refs
+        assert "correction_limit_reached" not in {item.value for item in result.stop_reasons}
+        assert (model.call_count, maps.call_count) == (11, 5)
+        assert result.budgets.semantic_invocations_consumed == 11
+        assert result.budgets.corrections_consumed == 0
+        await audited(repo, result.candidate_set_ref)
     finally:
         await service.aclose()
 
 
 async def test_last_model_call_still_affords_pending_judgment_when_research_steps_are_exhausted():
-    request, model, maps, _, service = setup_batch(spent=8)
-    response = search_success("a0")
-    maps.responses = [response.model_copy(update={"places": tuple(
-        response.places[0].model_copy(update={"uid": f"a{index}"}) for index in range(33))})]
+    from tests.unit.candidate_research.test_research_correction_recovery import setup
+    from tests.unit.candidate_research.test_inline_correction import audited
+    request, model, maps, repo, service = setup(slots=6)
+    for i in range(4):
+        maps.responses.append(search_success(f"a{i}"))
+        model.responses.extend((lambda _, i=i: structured(ProposedActionBatch(actions=(_first_objective_action(model, query=f"query-{i}"),))), lambda _: legal_judgment(model)))
+    response = search_success("last")
+    maps.responses.append(response.model_copy(update={"places": tuple(response.places[0].model_copy(update={"uid": f"last-{i}"}) for i in range(17))}))
+    model.responses.extend((lambda _: structured(ProposedActionBatch(actions=(_first_objective_action(model, query="last-query"),))), failure(), lambda _: legal_judgment(model), lambda _: legal_judgment(model)))
     try:
         result = await service.research_initial(request)
-        assert result.outcome_type == "incomplete"
-        assert result.budgets.semantic_invocations_consumed == 11
-        assert result.budgets.iterations_consumed == 6
-        assert (model.call_count, maps.call_count) == (3, 1)
-        reasons = {item.value for item in result.stop_reasons}
-        assert "iteration_limit_reached" in reasons
-        assert "semantic_budget_insufficient" not in reasons
-        pending = await service._pending_judgment(service._runs[request.operation_plan.run_id])
-        assert pending[0].candidate_ordinals == (32,)
+        assert result.outcome_type == "incomplete", getattr(result, "failure", None)
+        assert result.budgets.semantic_invocations_consumed == 12
+        assert result.budgets.iterations_consumed == 6 and result.budgets.corrections_consumed == 1
+        assert (model.call_count, maps.call_count) == (12, 5)
+        assert json.loads(model.prompts[-1].user_text)["step_kind"] == "judge_existing"
+        assert request.operation_plan.iteration_slots[5].action_operation_id not in repo.refs
+        await audited(repo, result.candidate_set_ref)
+        assert await service.research_initial(request) == result and model.call_count == 12
     finally:
         await service.aclose()
 
@@ -423,5 +437,26 @@ async def test_confirmed_must_can_search_other_candidates_after_own_details_exha
         assert [item.query for item in maps.search_requests] == ["Place", "alternative"]
         assert len(maps.details_requests) == 1
         assert (model.call_count, maps.call_count) == (6, 3)
+    finally:
+        await service.aclose()
+
+
+async def test_action_two_remaining_calls_pay_for_correction_and_judgment():
+    from tests.unit.candidate_research.test_research_correction_recovery import setup, action
+    from tests.unit.candidate_research.test_inline_correction import audited
+    request, model, maps, repo, service = setup(slots=6)
+    for i in range(4):
+        maps.responses.append(search_success(f"a{i}"))
+        model.responses.extend((lambda _, i=i: structured(ProposedActionBatch(actions=(_first_objective_action(model, query=f"query-{i}"),))), lambda _: legal_judgment(model)))
+    maps.responses.append(search_success("last"))
+    model.responses.extend((failure(), failure(), action(model), lambda _: legal_judgment(model)))
+    try:
+        result = await service.research_initial(request)
+        assert result.outcome_type == "incomplete", getattr(result, "failure", None)
+        assert result.budgets.semantic_invocations_consumed == 12 and result.budgets.corrections_consumed == 2
+        assert result.budgets.iterations_consumed == 5
+        assert (model.call_count, maps.call_count) == (12, 5)
+        assert "correction_limit_reached" not in {item.value for item in result.stop_reasons}
+        await audited(repo, result.candidate_set_ref)
     finally:
         await service.aclose()

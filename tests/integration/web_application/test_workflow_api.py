@@ -158,13 +158,14 @@ async def test_generic_argument_recovery_real_graph_pg_and_read_only_reopen(pg_s
             # control's planning_ref continues to mean a consistent itinerary.
             assert control.planning_ref is None and control.last_outcome=="failed"
         planning=(await repository.get(planning_ref,expected_model=ItineraryPlanningArtifact)).content
-        assert planning.schema_version == planning_ref.schema_version == "6.0"
+        assert planning.schema_version == planning_ref.schema_version == "8.0"
         budget=planning.record.budgets
         assert budget.format_repair_used == min(bad_responses,2)
         assert budget.model_invocations_consumed == sum((budget.preparation_used,budget.transport_used,
             budget.submit_repair_used,budget.supplement_request_used,budget.format_repair_used))
         actions=[(await repository.get(ref,expected_model=ItineraryPlanningModelActionArtifact)).content
             for ref in planning.directories.model_action_refs]
+        assert all(action.schema_version == "11.0" and action.prompt_version == "planning-v11" for action in actions)
         assert sum(action.budget_category=="format_repair" for action in actions)==min(bad_responses,2)
         assert all(action.action_kind=="llm_failure" and action.invocation_metadata is None
             and not action.call_summaries for action in actions[:bad_responses])

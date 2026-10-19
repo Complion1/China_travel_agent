@@ -47,7 +47,7 @@ async def test_bad_then_good_executes_once_and_accounts_each_call(invalid_count)
     for action in actions[:invalid_count]:
         assert action.content["action_kind"] == "llm_failure"
         assert not action.content["call_summaries"] and action.content["invocation_metadata"] is None
-    assert all(r.schema_version=="9.0" for r in actions)
+    assert all(r.schema_version=="11.0" for r in actions)
 
 
 @pytest.mark.asyncio
@@ -104,7 +104,7 @@ def test_pending_at_normal_stage_limit_keeps_exact_tools_and_allows_reserve():
 @pytest.mark.parametrize("already_exhausted", [False, True])
 async def test_public_controller_normal_limit_and_last_call_repair(already_exhausted):
     from app.hotel_selection import HotelSelectionArtifact
-    from app.candidate_research import CandidateResearchArtifact
+    from app.candidate_research import CandidateResearchV4Artifact as CandidateResearchArtifact
     from app.workflow_contracts import BudgetConsumeRequest
     from app.itinerary_planning.models import ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY
     from tests.unit.itinerary_planning.test_phase_budget import invalid_submit
@@ -157,7 +157,7 @@ async def test_format_success_still_reaches_original_business_gate():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("before_supplement", [1, 2])
 async def test_resume_shares_format_reserve_and_never_restarts_operation(before_supplement):
-    from app.candidate_research import CandidateResearchArtifact
+    from app.candidate_research import CandidateResearchV4Artifact as CandidateResearchArtifact
     from app.itinerary_planning import ItineraryPlanningCandidateSupplementRequested, ItineraryPlanningResumeRequest
     from tests.unit.itinerary_planning.test_service_initial import _plan
     from tests.unit.itinerary_planning.test_service_resume import (

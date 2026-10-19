@@ -17,25 +17,20 @@ def test_previous_prompt_remains_immutable():
     assert hashlib.sha256(previous).hexdigest() == "cc9d5816a91fde13eeaea17d6925ffa5ea7794ba6041956913ce45f08f187934"
     minute_prompt = resources.files("app.itinerary_planning.prompts").joinpath("planning_v8.txt").read_bytes()
     assert hashlib.sha256(minute_prompt).hexdigest() == "4d3526665d1831cc06b14164bb8fcc1a166d04ac10e823077f24a509c7382f16"
+    boundary_prompt = resources.files("app.itinerary_planning.prompts").joinpath("planning_v10.txt").read_bytes()
+    assert hashlib.sha256(boundary_prompt).hexdigest() == "285ac96dbf9fbf47b30329922ba16b7a4dbc28a70fca0b3c13d6929b158b2a94"
+    daily_prompt = resources.files("app.itinerary_planning.prompts").joinpath("planning_v11.txt").read_bytes()
+    assert hashlib.sha256(daily_prompt).hexdigest() == "d340f0e8d1b52ea1414f744c7aa5b7c4519d2ed877bc7a695f407387f17b61d5"
 
 
 def test_planning_prompt_is_packaged_utf8_and_hash_locked() -> None:
     resource = load_planning_prompt()
-    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v9"
+    assert resource.version == PLANNING_PROMPT_VERSION == "planning-v12"
     assert resource.sha256 == PLANNING_PROMPT_SHA256
-    assert "普通日开放区间固定为当日 07:30–22:00" in resource.text
-    assert "backup_distance_exceeded" in resource.text
-    assert "仅缺备选时不请求补研" in resource.text
-    assert "午餐和晚餐不能是同一地点" in resource.text
-    assert "backup_candidate_duplicate" in resource.text
-    assert "remaining_direction_slots" in resource.text
-    assert "meal_intent_mismatch" in resource.text
-    assert "restaurant 角色本身不代表同时支持两餐" in resource.text
-    assert "get_candidate_evidence" in resource.text
-    assert "request_candidate_supplement" in resource.text
-    assert "leg_id 必须原样复用该 directions_handle 所属 Observation 返回的 leg_id" in resource.text
-    assert "43分钟预留50分钟" in resource.text
-    assert "活动及路线出发时刻仍可使用任意整数分钟" in resource.text
+    for required in ("默认最大窗口07:30～22:00", "当前提供的六个工具", "午餐与晚餐不能同一地点",
+                     "先取得需要的候选证据", "补充仅限主行程确有候选缺口", "不为可选备选申请",
+                     "不重造ID或交叉配对", "直接复用这些句柄", "精确到分钟"):
+        assert required in resource.text
 
 
 def test_prompt_does_not_contain_external_or_sensitive_instructions() -> None:
@@ -46,23 +41,16 @@ def test_prompt_does_not_contain_external_or_sensitive_instructions() -> None:
 
 def test_prompt_exposes_the_controller_date_and_route_capacity_rules() -> None:
     text = load_planning_prompt().text
-    assert "数量必须等于 sightseeing_days" in text
-    assert "不得额外创建 transit_only day" in text
-    assert "end_at 填 null" in text
-    assert "3600/5400/7200 秒" in text
-    assert "7200/10800/14400 秒" in text
-    assert "抵达、离开接驳和日内各段路线均优先公共交通，网约车和步行其次" in text
-    assert "公交或地铁组合使用 public_transit/transit" in text
-    assert "calculate_route_matrix 不支持 transit" in text
-    assert "先为尚未覆盖的主路线保留 Directions 槽位" in text
-    assert "抵达和离开接驳统一使用 ride_hailing/driving" not in text
-    assert "标准恰好 3 个" in text
-    assert "规划最多 17 次逻辑模型调用" in text
-    assert "立即构造最小主行程并提交" in text
-    assert "同一业务迭代中每个日期最多调用一次 Matrix" in text
-    assert "remaining_matrix_slots" in text
-    assert "主行程全部硬约束成立即可提交" in text
-    assert "backups=[] 完全合法" in text
+    for required in ("数量=sightseeing_days", "不增加区间外日期", "end_at=null",
+                     "3600/5400/7200秒", "7200/10800/14400秒", "优先 public_transit/transit",
+                     "不能用驾车冒充公交", "不为形式比较强制每段查询所有模式",
+                     "正常调用最多17次", "共享格式修正储备2", "总最多19", "准备2、交通5、提交修正5",
+                     "Matrix 每日期每批最多一次、每次最多10地点", "备选可全部为空",
+                     "daily_outline", "daily_windows", "remaining_direction_slots",
+                     "remaining_direction_queries", "daily_plan_quality_review", "宽裕时按轻松1～2、标准3、紧凑4个景点作为目标",
+                     "无须安排到22:00", "长窗口空一天不可交付"):
+        assert required in text
+    assert "标准恰好" not in text and "固定4" not in text
 
 
 def test_prompt_validation_fails_closed_for_type_hash_encoding_and_content(monkeypatch: pytest.MonkeyPatch) -> None:

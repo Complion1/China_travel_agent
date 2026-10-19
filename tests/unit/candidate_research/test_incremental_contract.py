@@ -85,7 +85,7 @@ async def test_full_state_failure_is_rejected_before_accepted_write_and_keeps_us
         assert result.failure.code.value == 'state_invariant_failed'
         judgments = [r.content for r in repository.put_requests if r.artifact_type.endswith('model_judgment')]
         assert len(judgments) == 1
-        assert judgments[0]['schema_version'] == '3.0'
+        assert judgments[0]['schema_version'] == '4.0'
         assert judgments[0]['result']['record_type'] == 'controller_rejected'
         assert operation.call_count == 2 and maps.call_count == 1
         assert result.budgets.semantic_invocations_consumed == 2
@@ -130,7 +130,7 @@ async def test_new_candidate_does_not_inherit_confirmed_group_default():
         assert state['candidates'][0]['must_matches'][0]['verdict'] == 'confirmed'
         assert state['candidates'][1]['must_matches'][0]['verdict'] == 'unresolved'
         assert state['candidates'][1]['must_matches'][0]['evidence_indexes'] == [1]
-        from app.candidate_research.artifacts import CandidateSetStateSnapshot
+        from app.candidate_research.artifacts import CorrectableCandidateSetStateSnapshot as CandidateSetStateSnapshot
         before = CandidateSetStateSnapshot.model_validate_json(json.dumps(state), strict=True)
         def patch(group_id):
             update = group((0,), MatchVerdict.NO_MATCH).model_copy(update={'requirement_group_id': group_id})

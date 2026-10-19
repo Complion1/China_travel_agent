@@ -6,7 +6,9 @@ import re
 
 import pytest
 from playwright.sync_api import expect
-from tests.browser.web_application.test_demo_pages import ui_projection, route_projection
+from tests.browser.web_application.test_demo_pages import (
+    capture_sse, refresh_projection, ui_projection, route_projection,
+)
 
 
 RUN = "00000000-0000-4000-8000-000000000124"
@@ -93,6 +95,39 @@ def test_b24_03_confirmation_form_survives_snapshots_and_details(page, origin):
     assert page.locator("#interaction").bounding_box()["y"] < page.locator("#process-overview").bounding_box()["y"]
     page.locator("#close-details").click()
     expect(page.locator('[data-step="requirements"]')).to_be_focused()
+
+
+@pytest.mark.parametrize("kind", ("clarification", "confirmation"))
+def test_same_snapshot_keeps_form_focus_and_subsequent_typing(page, origin, kind):
+    capture_sse(page)
+    view = ui_projection(RUN, activity="awaiting_user", phase="requirements",
+        pause_generation=1, delivery_status="awaiting_user")
+    card = dict(kind=kind, title="旅行需求", paragraphs=[], facts=[], choices=[], schema_version="1.0")
+    if kind == "clarification":
+        card["questions"] = [dict(schema_version="1.0", field="time_window.departure.hub_name",
+            kind="text", label="离开杭州的机场/车站")]
+        selector = "#clarify-time_window-departure-hub_name"
+    else:
+        selector = "#revision-input"
+    view.update(actions=["clarify" if kind == "clarification" else "confirm"], card=card)
+    route_projection(page, RUN, view)
+    progress(page, lambda _: packet())
+    writes = []
+    page.on("request", lambda request: writes.append(request.url) if request.method == "POST" else None)
+    page.goto(origin + "/tasks/" + RUN)
+    page.wait_for_function("() => document.getElementById('process-overview').previousElementSibling === document.getElementById('interaction')")
+    field = page.locator(selector)
+    field.fill("杭州萧山")
+    expect(field).to_be_focused()
+    with page.expect_response(lambda response: response.request.method == "GET"
+            and response.url.endswith("/api/runs/" + RUN)):
+        refresh_projection(page)
+    # 等状态读取后的页面更新完成，再验证焦点和真实键盘输入。
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    expect(field).to_be_focused(timeout=2000)
+    page.keyboard.insert_text("机场")
+    expect(field).to_have_value("杭州萧山机场")
+    assert writes == []
 
 
 def test_b24_04_hotel_whole_card_and_keyboard_selection(page, origin):

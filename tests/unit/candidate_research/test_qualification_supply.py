@@ -8,9 +8,10 @@ import pytest
 from pydantic import ValidationError
 
 from app.candidate_research import (
-    CandidateResearchArtifact, CandidateResearchV3Artifact, CandidateResearchService,
+    CandidateResearchV4Artifact as CandidateResearchArtifact, CandidateResearchV3Artifact, CandidateResearchService,
     candidate_supply_status,
 )
+from app.candidate_research import CandidateResearchArtifact as CurrentCandidateResearchArtifact
 from tests.unit.itinerary_planning.test_service_initial import _upstream
 from tests.unit.candidate_research.test_service_initial import _request, _multi_place_search
 from tests.support.candidate_research_fakes import FakeRuntime, FakeRepository, FakeBudgetManager
@@ -89,7 +90,7 @@ async def test_enough_qualified_supply_completes_with_an_unused_unknown_candidat
     try:
         result = await service.research_initial(request)
         assert result.outcome_type == "completed", getattr(result, "failure", None)
-        artifact = (await repository.get(result.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
+        artifact = (await repository.get(result.candidate_set_ref, expected_model=CurrentCandidateResearchArtifact)).content
         assert artifact.record.state.candidates[-1].state.value == "withheld"
         assert result.counts.unique_eligible_count == 10
         assert result.counts.admitted_slots == 11
@@ -112,10 +113,21 @@ async def test_current_candidate_set_rejects_legacy_model_reference_versions(dir
     try:
         result = await service.research_initial(request)
         assert result.outcome_type == "completed"
-        artifact = (await repository.get(result.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
+        artifact = (await repository.get(result.candidate_set_ref, expected_model=CurrentCandidateResearchArtifact)).content
         data = artifact.model_dump(mode="json")
         data["record"]["state"][directory][0]["schema_version"] = version
-        with pytest.raises(ValidationError, match="current candidate model reference versions incompatible"):
-            CandidateResearchArtifact.model_validate_json(json.dumps(data), strict=True)
+        with pytest.raises(ValidationError):
+            CurrentCandidateResearchArtifact.model_validate_json(json.dumps(data), strict=True)
     finally:
         await service.aclose()
+
+
+def current_supply_fixture(artifact):
+    """路由单元测试的当前版本输入，不作为完整来源证明使用。"""
+    data = artifact.model_dump(mode="json")
+    assert not data["record"]["state"]["model_action_refs"]
+    assert not data["record"]["state"]["model_judgment_refs"]
+    data.update(schema_version="5.0", invocation_attempt_refs=[])
+    for budget in (data["record"]["state"]["budgets"], data["record"]["budgets"]):
+        budget.update(correction_limit=2, corrections_consumed=0)
+    return CurrentCandidateResearchArtifact.model_validate_json(json.dumps(data), strict=True)

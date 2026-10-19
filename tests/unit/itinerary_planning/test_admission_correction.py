@@ -41,6 +41,10 @@ async def test_invalid_query_batch_is_feedback_without_any_matrix_or_direction_e
     calls=(ValidatedToolCall(call_id="read-sibling",tool_name="get_candidate_evidence",arguments=GetCandidateEvidenceArgs(candidate_handles=("candidate-handle-0000",))),query) if case=="siblings" else (query,)
     service,request,_,model,repository=_fixture(ToolCallsReady(calls=calls,metadata=_metadata()),
         ToolTurnCompleted(final_text="结束",metadata=_metadata()),declare_query_intents=False)
+    from app.workflow_contracts import OperationId, WorkflowPhase
+    request=request.model_copy(update={"operation_plan":request.operation_plan.model_copy(update={
+        "matrix_operation_ids":(OperationId(run_id=request.operation_plan.run_id,
+            phase=WorkflowPhase.ITINERARY_PLANNING,logical_step="admission_matrix"),)})})
     request=with_unknown_meals(repository,request)
     window=request.confirmed.requirement.time_window
     window=window.model_copy(update={"arrival":window.arrival.model_copy(update={"local_datetime":"2026-09-03 08:00"})})
@@ -154,7 +158,7 @@ async def test_invalid_patch_does_not_erase_the_original_missing_meal_obligation
     assert service._rejection_progress(run,invalid_submit(),_BusinessRejected(issues=(issue(),)))
     assert service._rejection_progress(run,invalid_submit(shift=30),_BusinessRejected("patch_date_not_in_base","patch.days"))
     assert run.correction_no_progress == 1
-    assert any(problem["rule"]=="required_visit_missing" and ":lunch:" in problem["target"] for problem in run.correction_issues)
+    assert any(problem["rule"]=="purpose_not_admitted" and ":lunch:" in problem["target"] for problem in run.correction_issues)
     assert not service._rejection_progress(run,invalid_submit(shift=60),_BusinessRejected("patch_date_not_in_base","patch.days"))
     assert run.correction_no_progress == 2
 
@@ -194,6 +198,10 @@ async def test_query_cycle_fingerprint_includes_every_tool_in_the_batch():
         return ToolCallsReady(calls=(read, query), metadata=_metadata())
     service, request, _, model, repository = _fixture(batch(MatrixTravelMode.WALKING, "first"),
         batch(MatrixTravelMode.DRIVING, "different"), batch(MatrixTravelMode.WALKING, "repeat"), declare_query_intents=False)
+    from app.workflow_contracts import OperationId, WorkflowPhase
+    request = request.model_copy(update={"operation_plan":request.operation_plan.model_copy(update={
+        "matrix_operation_ids":(OperationId(run_id=request.operation_plan.run_id,
+            phase=WorkflowPhase.ITINERARY_PLANNING,logical_step="cycle_matrix"),)})})
     request = with_unknown_meals(repository, request)
     window = request.confirmed.requirement.time_window
     request = request.model_copy(update={"confirmed": request.confirmed.model_copy(update={"requirement":
@@ -211,6 +219,9 @@ async def test_query_cycle_fingerprint_includes_every_tool_in_the_batch():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ("compatible", "interval_conflict", "unverified_hours", "same_tool_duplicate", "different_purpose"))
 async def test_cross_tool_visit_declarations_allow_optional_precision_without_laundering_claims(case):
+    if case == "compatible":
+        from tests.unit.itinerary_planning.test_service_initial import test_service_completed_requires_main_plan_and_valid_optional_backups
+        return await test_service_completed_requires_main_plan_and_valid_optional_backups("query_declaration_compatible")
     from datetime import datetime
     from zoneinfo import ZoneInfo
     from app.baidu_map import TravelMode

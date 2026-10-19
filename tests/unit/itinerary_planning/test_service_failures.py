@@ -228,22 +228,23 @@ async def test_terminal_replay_mismatch_lookup_failure_and_budget_outcomes_are_e
 async def test_direction_budget_refusal_is_a_typed_terminal_stop() -> None:
     models = __import__("app.itinerary_planning.models", fromlist=["DirectionLegIntent", "PlanDirectionsArgs"])
     first_args = models.PlanDirectionsArgs(legs=(models.DirectionLegIntent(
-        leg_id="leg-0", origin_handle="candidate-handle-0000", destination_handle="hotel-handle",
+        leg_id="leg-0", origin_handle="hotel-handle", destination_handle="hub-location-departure",
         transport_semantic=TransportSemantic.WALKING, route_mode=TravelMode.WALKING, alternatives_limit=1,
     ),))
     second_args = models.PlanDirectionsArgs(legs=(
         models.DirectionLegIntent(
-            leg_id="leg-1", origin_handle="hotel-handle", destination_handle="candidate-handle-0000",
+            leg_id="leg-1", origin_handle="hub-location-arrival", destination_handle="hotel-handle",
             transport_semantic=TransportSemantic.WALKING, route_mode=TravelMode.WALKING, alternatives_limit=1,
         ),
         models.DirectionLegIntent(
-            leg_id="leg-2", origin_handle="candidate-handle-0000", destination_handle="hotel-handle",
+            leg_id="leg-2", origin_handle="hotel-handle", destination_handle="hub-location-departure",
             transport_semantic=TransportSemantic.RIDE_HAILING, route_mode=TravelMode.DRIVING, alternatives_limit=1,
         ),
     ))
     service, request, _, _, _ = _fixture(
         ToolCallsReady(calls=(ValidatedToolCall(call_id="direction_first", tool_name=PlanningTool.PLAN_DIRECTIONS.value, arguments=first_args),), metadata=_metadata()),
         ToolCallsReady(calls=(ValidatedToolCall(call_id="direction_second", tool_name=PlanningTool.PLAN_DIRECTIONS.value, arguments=second_args),), metadata=_metadata()),
+        ToolTurnCompleted(final_text="结束", metadata=_metadata()),
     )
     service._budget = make_planning_budget_manager(request.operation_plan.run_id, direction_limit=2)
     base = request.operation_plan
@@ -253,4 +254,8 @@ async def test_direction_budget_refusal_is_a_typed_terminal_stop() -> None:
     result = await service.plan_initial(request)
 
     assert isinstance(result, ItineraryPlanningIncomplete)
-    assert result.stop_reasons == (__import__("app.itinerary_planning.models", fromlist=["PlanningStopReason"]).PlanningStopReason.DIRECTION_BUDGET_EXHAUSTED,)
+    import json
+    feedback = json.loads(service._runs[base.run_id].operation.continuations[-1][0].content)["tool_result"]
+    assert feedback["reason"] == "direction_capacity_exhausted"
+    assert feedback["remaining_direction_queries"] == 1
+    assert result.stop_reasons == (__import__("app.itinerary_planning.models", fromlist=["PlanningStopReason"]).PlanningStopReason.NO_TERMINAL_SUBMISSION,)

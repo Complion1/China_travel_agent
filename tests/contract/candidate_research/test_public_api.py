@@ -13,6 +13,9 @@ EXPECTED = ("MealCountShortfallGap", "candidate_admitted_purposes", "candidate_s
             "validate_qualification_sources",
             "CandidateResearchV3Artifact", "CandidateResearchLegacyModelJudgmentArtifact",
             "CandidateRecordV2", "MealAssessment") + EXPECTED
+EXPECTED = ("CandidateResearchV4Artifact", "CandidateResearchV2ModelActionArtifact",
+            "CandidateResearchV3ModelJudgmentArtifact", "CandidateResearchInvocationAttemptArtifact",
+            "candidate_artifact_model", "action_artifact_model", "judgment_artifact_model") + EXPECTED
 
 
 def test_exact_public_api_and_identity():

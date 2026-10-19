@@ -52,7 +52,7 @@ _TOOL_DESCRIPTIONS = {
     PlanningTool.GET_CANDIDATE_EVIDENCE.value: "读取当前候选 handle 的已存在安全证据切片。每次最多16个候选；更多候选须拆分为多个调用，可在同一轮提交。",
     PlanningTool.GEOCODE_HUB.value: "解析已确认抵达或离开枢纽的 typed 地址。",
     PlanningTool.CALCULATE_ROUTE_MATRIX.value: "对已知地点按原序取得一个日期的完整 N×N 路线矩阵。",
-    PlanningTool.PLAN_DIRECTIONS.value: "为相邻地点腿按模型顺序取得静态路线摘要、原始 leg_id 和 directions_handle。",
+    PlanningTool.PLAN_DIRECTIONS.value: "为相邻地点腿按模型顺序取得静态路线摘要、原始 leg_id 和 directions_handle。每轮最多一个调用；将当前阶段额度允许的多天路线合并到同一个 legs，不按日期拆成多个调用。先查询抵离接驳，再查询日内路线。",
     PlanningTool.SUBMIT_ITINERARY.value: "提交完整的 typed 行程 proposal；每条路线必须原样复用同一 Directions Observation 的 leg_id 与 directions_handle。",
     PlanningTool.REQUEST_CANDIDATE_SUPPLEMENT.value: "提交严格的候选供给缺口并终止本次规划调用。",
 }

@@ -151,11 +151,11 @@ def attraction_bounds(pace: TravelPace, day_kind: PlanningDayKind) -> tuple[int,
     if day_kind is PlanningDayKind.TRANSIT_ONLY:
         return (0, 0)
     bounds = {
-        TravelPace.RELAXED: (1, 2),
-        TravelPace.NORMAL: (3, 3),
-        TravelPace.INTENSE: (4, 4),
+        TravelPace.RELAXED: (0, 2),
+        TravelPace.NORMAL: (0, 3),
+        TravelPace.INTENSE: (0, 4),
     }[pace]
-    return bounds if day_kind is PlanningDayKind.FULL else (0, bounds[1])
+    return bounds
 
 
 def visit_role_counts(visits: Iterable[ScheduledVisit]) -> tuple[int, int, int]:
@@ -184,10 +184,8 @@ def validate_meal_slots(
         if anchor.source == "user_provided"
     }
     _, lunches, dinners = visit_role_counts(day.visits)
-    if day.day_kind is PlanningDayKind.FULL and (lunches != 1 or dinners != 1):
-        raise ValueError("full day requires exactly one lunch and one dinner")
-    if day.day_kind is PlanningDayKind.PARTIAL and (lunches > 1 or dinners > 1):
-        raise ValueError("partial day has at most one meal of each kind")
+    if lunches > 1 or dinners > 1:
+        raise ValueError("day has at most one meal of each kind")
     if day.day_kind is PlanningDayKind.TRANSIT_ONLY and (lunches or dinners):
         raise ValueError("transit-only day cannot contain meals")
     for visit in day.visits:
@@ -591,7 +589,7 @@ def validate_route_capacity(
 ) -> None:
     for leg in day.route_legs:
         validate_route_leg_capacity(leg, pace)
-    if day.day_kind is PlanningDayKind.FULL:
+    if day.day_kind is not PlanningDayKind.TRANSIT_ONLY:
         total = sum(leg.duration_s for leg in day.route_legs)
         limit = FULL_DAY_TRANSPORT_LIMIT_SECONDS[pace]
         if explicit_day_limit_seconds is not None:
@@ -599,7 +597,7 @@ def validate_route_capacity(
                 raise ValueError("explicit transport limit must be positive")
             limit = min(limit, explicit_day_limit_seconds)
         if total > limit:
-            raise ValueError("full-day route total exceeds pace limit")
+            raise ValueError("daily route total exceeds pace limit")
 
 
 def validate_route_leg_capacity(leg: RouteLeg, pace: TravelPace) -> None:

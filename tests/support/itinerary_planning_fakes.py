@@ -22,6 +22,7 @@ from app.baidu_map import (
     RouteMatrixSuccess,
     RouteStep,
 )
+from app.itinerary_planning import ItineraryPlanningService
 from app.itinerary_planning.models import (
     ITINERARY_PLANNING_DIRECTION_CALL_BUDGET_KEY,
     ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY,
@@ -314,8 +315,78 @@ def make_budget_manager(run_id: UUID, direction_key: ExecutionBudgetKey, limit: 
     )
 
 
+
+def remap_fixture_handles(value, replacements):
+    """调整拆分批次后的已知证据句柄，保留其余测试参数。"""
+    from pydantic import BaseModel
+    if isinstance(value, BaseModel):
+        return value.model_copy(update={name: remap_fixture_handles(getattr(value, name), replacements)
+            for name in type(value).model_fields})
+    if isinstance(value, tuple):
+        return tuple(remap_fixture_handles(item, replacements) for item in value)
+    if isinstance(value, list):
+        return [remap_fixture_handles(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {key: remap_fixture_handles(item, replacements) for key, item in value.items()}
+    return replacements.get(value, value) if isinstance(value, str) else value
+
+
+def split_boundary_fixture(request, direction_call, context, route_specs, direction_ids):
+    """先在前一查询批次取得接驳，再查询带全日期安排的日内路线。"""
+    from datetime import date, datetime, time, timedelta
+    from app.itinerary_planning.models import DailyPlanOutline, PurposeVisitIntent, TimeInterval, VisitKind
+    from app.itinerary_planning.fingerprints import fingerprint_directions, fingerprint_directions_handle
+    from app.itinerary_planning.policy import SHANGHAI, boundary_processing_minutes
+    args = direction_call.arguments
+    boundary = tuple(i for i, leg in enumerate(args.legs)
+        if "candidate-handle-" not in leg.origin_handle and "candidate-handle-" not in leg.destination_handle)
+    daily = tuple(i for i in range(len(args.legs)) if i not in boundary)
+    order = (*boundary, *daily)
+    operations = tuple(direction_ids[i] for i in order)
+    replacements = {}
+    for indexes in (boundary, daily):
+        for ordinal, index in enumerate(indexes):
+            _, origin, origin_coordinate, destination, destination_coordinate = route_specs[index]
+            leg = args.legs[index]
+            fingerprint = fingerprint_directions(context, origin, origin_coordinate, destination,
+                destination_coordinate, leg.route_mode, leg.alternatives_limit)
+            replacements[fingerprint_directions_handle(direction_ids[index], index, fingerprint)] = (
+                fingerprint_directions_handle(direction_ids[index], ordinal, fingerprint))
+    window = request.confirmed.requirement.time_window
+    arrival, departure = window.arrival, window.departure
+    start = datetime.fromisoformat(arrival.local_datetime).replace(tzinfo=SHANGHAI) + timedelta(minutes=10 +
+        boundary_processing_minutes(arrival.hub_type, "arrival", is_approximate=arrival.is_approximate) + (30 if arrival.is_approximate else 0))
+    end = datetime.fromisoformat(departure.local_datetime).replace(tzinfo=SHANGHAI) - timedelta(minutes=10 +
+        boundary_processing_minutes(departure.hub_type, "departure", is_approximate=departure.is_approximate) + (30 if departure.is_approximate else 0))
+    days = []
+    for offset in range(window.sightseeing_days):
+        day = date.fromisoformat(window.sightseeing_start_date) + timedelta(days=offset)
+        left = max(datetime.combine(day, time(10), SHANGHAI), start)
+        right = min(datetime.combine(day, time(22), SHANGHAI), end)
+        visits = ()
+        if left + timedelta(hours=1) <= right:
+            visits = (PurposeVisitIntent(date=day, candidate_handle=f"candidate-handle-{0 if offset == 0 else offset+2:04d}",
+                visit_kind=VisitKind.ATTRACTION, is_backup=False,
+                interval=TimeInterval(start_at=left, end_at=left + timedelta(hours=1))),)
+        days.append(DailyPlanOutline(date=day, visits=visits))
+    request = request.model_copy(update={"operation_plan": request.operation_plan.model_copy(update={
+        "direction_operation_ids": operations})})
+    boundary_call = direction_call.model_copy(update={"call_id": direction_call.call_id + "_boundaries",
+        "arguments": args.model_copy(update={"legs": tuple(args.legs[i] for i in boundary),
+            "visit_intents": (), "daily_outline": ()})})
+    daily_call = direction_call.model_copy(update={"arguments": args.model_copy(update={
+        "legs": tuple(args.legs[i] for i in daily), "daily_outline": tuple(days)})})
+    return request, boundary_call, daily_call, replacements
+
+
 __all__ = (
     "FakeMapAdapter", "FakeModelOperation", "FakeRepository", "FakeRuntime",
     "directions_success", "matrix_success", "make_budget_manager", "make_planning_budget_manager",
     "map_provenance",
 )
+
+class PlanningServiceWithTrustedSyntheticResearch(ItineraryPlanningService):
+    """规划规则单元测试使用已信任的合成 M08 来源；真实来源另由公共入口回归核验。"""
+
+    async def _validate_candidate_sources(self, artifact):
+        return None

@@ -28,6 +28,8 @@ from app.candidate_research.artifacts import (
     CandidateResearchModelActionArtifact,
     CandidateResearchModelJudgmentArtifact,
     CandidateResearchPlaceObservationArtifact,
+    CandidateResearchInvocationAttemptArtifact,
+    candidate_artifact_model, action_artifact_model, judgment_artifact_model,
 )
 from app.hotel_selection import HotelSelectedDecision, HotelSelectionArtifact
 from app.hotel_selection.models import HotelCandidate, HotelCoordinate
@@ -229,12 +231,15 @@ class FakeRepository:
         self.put_requests.append(request)
         tree, encoded = _canonical(request.content)
         expected_models = {
-            "candidate_research.model_action": CandidateResearchModelActionArtifact,
-            "candidate_research.model_judgment": CandidateResearchModelJudgmentArtifact,
+            "candidate_research.model_action": action_artifact_model,
+            "candidate_research.model_judgment": judgment_artifact_model,
             "candidate_research.place_observation": CandidateResearchPlaceObservationArtifact,
-            "candidate_research.candidate_set": CandidateResearchArtifact,
+            "candidate_research.candidate_set": candidate_artifact_model,
+            "candidate_research.invocation_attempt": CandidateResearchInvocationAttemptArtifact,
         }
         expected = expected_models.get(request.artifact_type)
+        if expected in (candidate_artifact_model, action_artifact_model, judgment_artifact_model):
+            expected = expected(request.schema_version)
         if expected is not None:
             try:
                 TypeAdapter(expected).validate_json(encoded, strict=True)

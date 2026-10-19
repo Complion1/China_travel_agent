@@ -99,6 +99,7 @@ class CandidateResearchStopReason(str, Enum):
     NO_LEGAL_ACTION = "no_legal_action"
     USEFUL_SUPPLY_NOT_FOUND = "useful_supply_not_found"
     SEMANTIC_BUDGET_INSUFFICIENT = "semantic_budget_insufficient"
+    CORRECTION_LIMIT_REACHED = "correction_limit_reached"
 
 
 class RoleReasonCode(str, Enum):
@@ -179,16 +180,20 @@ ResearchAnchorRef: TypeAlias = Annotated[
 
 
 class ResearchIterationOperationIds(_PublicModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     invocation_slot_index: Annotated[int, Field(ge=0, le=5)]
     action_operation_id: OperationId
     judgment_operation_id: OperationId
     candidate_set_operation_id: OperationId
     place_observation_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=0, max_length=8)]
+    action_attempt_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=3, max_length=3)]
+    judgment_attempt_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=3, max_length=3)]
 
     @model_validator(mode="after")
     def _validate_ids(self) -> "ResearchIterationOperationIds":
-        all_ids = (self.action_operation_id, self.judgment_operation_id, self.candidate_set_operation_id, *self.place_observation_operation_ids)
+        all_ids = (self.action_operation_id, self.judgment_operation_id, self.candidate_set_operation_id,
+                   *self.place_observation_operation_ids, *self.action_attempt_operation_ids,
+                   *self.judgment_attempt_operation_ids)
         if any(item.phase is not WorkflowPhase.CANDIDATE_RESEARCH for item in all_ids):
             raise ValueError("all operation ids must be candidate_research phase")
         if len({(item.run_id, item.phase, item.logical_step) for item in all_ids}) != len(all_ids):
@@ -199,7 +204,7 @@ class ResearchIterationOperationIds(_PublicModel):
 
 
 class CandidateResearchOperationPlan(_PublicModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     run_id: UUID
     iteration_slots: Annotated[tuple[ResearchIterationOperationIds, ...], Field(min_length=0, max_length=6)]
     terminal_successor_operation_id: OperationId
@@ -211,7 +216,9 @@ class CandidateResearchOperationPlan(_PublicModel):
             raise ValueError("iteration slots must be contiguous")
         all_ids = [self.terminal_successor_operation_id]
         for item in self.iteration_slots:
-            all_ids.extend((item.action_operation_id, item.judgment_operation_id, item.candidate_set_operation_id, *item.place_observation_operation_ids))
+            all_ids.extend((item.action_operation_id, item.judgment_operation_id, item.candidate_set_operation_id,
+                            *item.place_observation_operation_ids, *item.action_attempt_operation_ids,
+                            *item.judgment_attempt_operation_ids))
         if any(item.run_id != self.run_id for item in all_ids):
             raise ValueError("operation ids must use plan run")
         if len({(item.run_id, item.phase, item.logical_step) for item in all_ids}) != len(all_ids):
@@ -246,7 +253,7 @@ class CandidateResearchSupplementalRequest(_PublicModel):
 
     @model_validator(mode="after")
     def _predecessor_ref(self) -> "CandidateResearchSupplementalRequest":
-        if self.predecessor_candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.predecessor_candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0"} or self.predecessor_candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
+        if self.predecessor_candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.predecessor_candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0", "5.0"} or self.predecessor_candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
             raise ValueError("supplemental request must reference candidate set artifact")
         if self.predecessor_candidate_set_ref.operation_id.run_id != self.operation_plan.run_id:
             raise ValueError("predecessor ref run must match operation plan")
@@ -254,7 +261,7 @@ class CandidateResearchSupplementalRequest(_PublicModel):
             state_proof = (self.schema_version == "2.0" and gap.gap_type in {
                 "candidate_count_shortfall", "meal_count_shortfall", "must_visit_resolution_missing"}
                 and gap.evidence_refs == (self.predecessor_candidate_set_ref,)
-                and self.predecessor_candidate_set_ref.schema_version in {"2.0", "3.0", "4.0"})
+                and self.predecessor_candidate_set_ref.schema_version in {"2.0", "3.0", "4.0", "5.0"})
             if not state_proof and any(ref.artifact_type != "candidate_research.place_observation" or ref.schema_version != "1.0"
                     or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH or ref.operation_id.run_id != self.operation_plan.run_id for ref in gap.evidence_refs):
                 raise ValueError("gap evidence must be owned observations or exact v2 predecessor state proof")
@@ -692,9 +699,15 @@ class ResearchBudgetSummary(_PublicModel):
     provider_attempts_complete: bool
     known_usage: KnownLLMUsage
     usage_complete: bool
+    correction_limit: Literal[2] | None = None
+    corrections_consumed: Annotated[int, Field(ge=0, le=2)] | None = None
 
     @model_validator(mode="after")
     def _budget_consistency(self) -> "ResearchBudgetSummary":
+        if (self.correction_limit is None) != (self.corrections_consumed is None):
+            raise ValueError("correction budget fields must both be available or unavailable")
+        if self.corrections_consumed is not None and self.corrections_consumed > self.semantic_invocations_consumed:
+            raise ValueError("paid corrections cannot exceed admitted semantic invocations")
         if self.iterations_consumed > self.iteration_limit or self.place_calls_consumed > self.place_call_limit or self.semantic_invocations_consumed > self.semantic_invocation_limit:
             raise ValueError("budget counters exceed frozen limits")
         usage = self.known_usage
@@ -703,7 +716,7 @@ class ResearchBudgetSummary(_PublicModel):
         if self.provider_attempts_complete and self.known_provider_attempts < self.semantic_invocations_consumed:
             raise ValueError("complete provider attempts must cover semantic invocations")
         if self.semantic_invocations_consumed == 0:
-            if self.known_provider_attempts != 0 or not self.provider_attempts_complete or not self.usage_complete:
+            if self.known_provider_attempts != 0 or (self.correction_limit is None and (not self.provider_attempts_complete or not self.usage_complete)):
                 raise ValueError("zero semantic calls require complete zero usage")
             if any(getattr(usage, name) != 0 for name in ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens")):
                 raise ValueError("zero semantic calls require zero usage")
@@ -876,7 +889,7 @@ class CandidateResearchCompleted(_PublicModel):
 
     @model_validator(mode="after")
     def _completed_gate(self) -> "CandidateResearchCompleted":
-        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0"} or self.candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
+        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0", "5.0"} or self.candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
             raise ValueError("candidate_set_ref must reference candidate research candidate set")
         _validate_outcome_summary_relationships(self.counts, self.coverage)
         if self.counts.attraction_count < self.counts.attraction_target or self.counts.restaurant_count < self.counts.restaurant_target:
@@ -902,7 +915,7 @@ class CandidateResearchIncomplete(_PublicModel):
     coverage: ResearchCoverageSummary
     budgets: ResearchBudgetSummary
     gaps: Annotated[tuple[ResearchGapSummary, ...], Field(min_length=1, max_length=128)]
-    stop_reasons: Annotated[tuple[CandidateResearchStopReason, ...], Field(min_length=1, max_length=7)]
+    stop_reasons: Annotated[tuple[CandidateResearchStopReason, ...], Field(min_length=1, max_length=8)]
 
     @field_validator("stop_reasons")
     @classmethod
@@ -915,7 +928,7 @@ class CandidateResearchIncomplete(_PublicModel):
 
     @model_validator(mode="after")
     def _incomplete_summary_relationships(self) -> "CandidateResearchIncomplete":
-        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0"} or self.candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
+        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0", "5.0"} or self.candidate_set_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH:
             raise ValueError("candidate_set_ref must reference candidate research candidate set")
         _validate_outcome_summary_relationships(self.counts, self.coverage)
         return self
@@ -957,8 +970,8 @@ class CandidateResearchFailed(_PublicModel):
             ):
                 raise ValueError("map failure flags invalid")
         for ref in (self.last_consistent_candidate_set_ref, self.failure_artifact_ref):
-            if ref is not None and (ref.schema_version not in ({"1.0", "2.0", "3.0", "4.0"} if ref.artifact_type == "candidate_research.candidate_set" else {"1.0", "2.0", "3.0"} if ref.artifact_type == "candidate_research.model_judgment" else {"1.0", "2.0"} if ref.artifact_type == "candidate_research.model_action" else {"1.0"}) or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH):
-                raise ValueError("failure refs must use schema 1.0")
+            if ref is not None and (ref.schema_version not in ({"1.0", "2.0", "3.0", "4.0", "5.0"} if ref.artifact_type == "candidate_research.candidate_set" else {"1.0", "2.0", "3.0", "4.0"} if ref.artifact_type == "candidate_research.model_judgment" else {"1.0", "2.0", "3.0"} if ref.artifact_type == "candidate_research.model_action" else {"1.0"}) or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH):
+                raise ValueError("failure refs must use a supported research schema")
         failure_refs = [
             ref for ref in (self.last_consistent_candidate_set_ref, self.failure_artifact_ref)
             if ref is not None

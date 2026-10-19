@@ -32,7 +32,7 @@ from app.baidu_map import (
 )
 from app.candidate_research import (
     CandidateRecord,
-    CandidateResearchArtifact,
+    CandidateResearchArtifact, candidate_artifact_model,
     CandidateState,
     MealIntent,
     MatchVerdict,
@@ -178,6 +178,7 @@ from .models import (
     RouteTimeInterval,
     PlanningTool,
 )
+from .models import DailyPlanOutline, BoundaryDayQualityIssue
 from .policy import (
     _BackupSlotsMismatch,
     _PolicyBusinessRejected,
@@ -551,6 +552,20 @@ class _Run:
     correction_fact_fingerprints: dict[str, str] = field(default_factory=dict)
     correction_no_progress: int = 0
     last_proposal: ProposedItineraryDraft | None = None
+    quality_review_used: bool = False
+    daily_outline: tuple[DailyPlanOutline, ...] = ()
+    outline_quality_issues: tuple[BoundaryDayQualityIssue, ...] = ()
+    direction_queries_remaining: int | None = None
+
+
+class _DirectionCapacityRejected(Exception):
+    """合法请求超过可用方向操作槽位。"""
+
+
+class _QualityReviewRequested(Exception):
+    """首稿已通过硬校验，仍需一次有界的质量修订。"""
+
+    __slots__ = ()
 
 
 class ItineraryPlanningService:
@@ -709,7 +724,7 @@ class ItineraryPlanningService:
         if (
             lookup.ref.operation_id != plan.terminal_successor_operation_id
             or lookup.ref.artifact_type != "itinerary_planning.itinerary"
-            or lookup.ref.schema_version != "6.0"
+            or lookup.ref.schema_version != "8.0"
         ):
             return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
         try:
@@ -745,7 +760,7 @@ class ItineraryPlanningService:
             for operation_id, artifact_type, expected in operation_ids:
                 lookup = await self._repository.lookup(operation_id=operation_id)
                 if isinstance(lookup, ArtifactFound):
-                    expected_schema_version = "9.0" if artifact_type == "itinerary_planning.model_action" else "6.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
+                    expected_schema_version = "11.0" if artifact_type == "itinerary_planning.model_action" else "8.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
                     if lookup.ref.operation_id != operation_id or lookup.ref.schema_version != expected_schema_version or lookup.ref.artifact_type != artifact_type:
                         return self._failed(None, None, PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
                     read = await self._repository.get(lookup.ref, expected_model=expected)
@@ -801,7 +816,7 @@ class ItineraryPlanningService:
             candidate_artifact = await self._read_upstream(request.candidate_set_ref, CandidateResearchArtifact, "candidate_research.candidate_set")
             state = getattr(candidate_artifact.record, "state", None)
             if (
-                candidate_artifact.schema_version != "4.0"
+                candidate_artifact.schema_version not in {"4.0", "5.0"}
                 or getattr(candidate_artifact.record, "record_type", None) not in {"completed", "incomplete"}
                 or state is None
                 or state.confirmed_requirement_digest != _confirmed_digest(confirmed)
@@ -1068,7 +1083,9 @@ class ItineraryPlanningService:
         return candidates, refs, requirement_group_states
 
     async def _read_upstream(self, ref: ArtifactRef, expected: type[BaseModel], artifact_type: str) -> BaseModel:
-        if type(ref) is not ArtifactRef or ref.artifact_type != artifact_type or ref.schema_version not in ({"6.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0", "2.0", "3.0", "4.0"} if artifact_type == "candidate_research.candidate_set" else {"1.0"}):
+        if expected is CandidateResearchArtifact:
+            expected = candidate_artifact_model(ref.schema_version)
+        if type(ref) is not ArtifactRef or ref.artifact_type != artifact_type or ref.schema_version not in ({"8.0"} if artifact_type == "itinerary_planning.itinerary" else {"1.0", "2.0", "3.0", "4.0", "5.0"} if artifact_type == "candidate_research.candidate_set" else {"1.0"}):
             raise ValueError("upstream reference mismatch")
         lookup = await self._repository.lookup(operation_id=ref.operation_id)
         if not isinstance(lookup, ArtifactFound) or lookup.ref != ref:
@@ -1081,11 +1098,31 @@ class ItineraryPlanningService:
         content_run_id = getattr(fresh, "run_id", None)
         if content_run_id is not None and content_run_id != ref.operation_id.run_id:
             raise ValueError("upstream artifact run mismatch")
+        if artifact_type == "candidate_research.candidate_set" and fresh.schema_version in {"4.0", "5.0"}:
+            await self._validate_candidate_sources(fresh)
         return fresh
+
+    async def _validate_candidate_sources(self, artifact):
+        state = artifact.record.state
+        if state is None:
+            raise ValueError("candidate set has no source state")
+        groups = [
+            (state.model_action_refs, research.action_artifact_model),
+            (state.model_judgment_refs, research.judgment_artifact_model),
+            (state.observation_refs, lambda version: research.CandidateResearchPlaceObservationArtifact),
+        ]
+        if artifact.schema_version == "5.0":
+            groups.append((artifact.invocation_attempt_refs, lambda version: research.CandidateResearchInvocationAttemptArtifact))
+        sources = {}
+        for refs, model_for_version in groups:
+            for ref in refs:
+                saved = await self._repository.get(ref, expected_model=model_for_version(ref.schema_version))
+                sources[ref.artifact_id] = saved
+        research.validate_qualification_sources(artifact, sources)
 
     def _directory_model(self, run: _Run) -> ArtifactRefDirectories:
         return ArtifactRefDirectories(
-            schema_version="5.0",
+            schema_version="7.0",
             hotel_selection_refs=(run.hotel_ref,), candidate_set_refs=tuple(run.candidate_set_refs),
             model_action_refs=tuple(run.action_refs), hub_geocode_refs=tuple(run.hub_refs),
             matrix_refs=tuple(run.matrix_refs), directions_refs=tuple(run.directions_refs),
@@ -1097,7 +1134,7 @@ class ItineraryPlanningService:
             raise ValueError("artifact operation phase mismatch")
         if type(content) is not expected:
             raise ValueError("artifact model mismatch")
-        artifact_schema_version = "9.0" if artifact_type == "itinerary_planning.model_action" else "6.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
+        artifact_schema_version = "11.0" if artifact_type == "itinerary_planning.model_action" else "8.0" if artifact_type == "itinerary_planning.itinerary" else "1.0"
         if content.schema_version != artifact_schema_version:
             raise ValueError("artifact envelope version mismatch")
         request = ArtifactWriteRequest(
@@ -1162,7 +1199,7 @@ class ItineraryPlanningService:
     async def _persist_action(self, run: _Run, calls: tuple[ValidatedToolCall, ...], metadata: InvocationMetadata | None, kind: str, disposition: str, request_stage: str, budget_category: str) -> ArtifactRef:
         operation_id = self._invocation_slot(run, run.invocation_count - 1).action_operation_id
         action = ItineraryPlanningModelActionArtifact(
-            schema_version="9.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
+            schema_version="11.0", request_digest=run.request_digest, invocation_index=run.invocation_count - 1,
             request_stage=request_stage, budget_category=budget_category,
             prompt_version=PLANNING_PROMPT_VERSION, prompt_hash=load_planning_prompt().sha256, action_kind=kind,
             call_summaries=tuple(self._action_summary(call, i) for i, call in enumerate(calls)),
@@ -1283,11 +1320,11 @@ class ItineraryPlanningService:
             names = {"get_candidate_evidence", "geocode_hub"}
         elif run.current_stage == "transport":
             names = {"get_candidate_evidence", "calculate_route_matrix", "plan_directions", "submit_itinerary"}
-        elif run.last_rejection is None or run.submit_repair_used >= 4:
+        elif (run.last_rejection is None and not run.quality_review_used) or run.submit_repair_used >= 4:
             names = {"submit_itinerary"}
         else:
             names = {"get_candidate_evidence", "calculate_route_matrix", "plan_directions", "submit_itinerary"}
-        if run.supplement_request_used < 5 and self._normal_invocations_used(run) < 16 and run.research_remaining > 0 and run.place_remaining > 0 and not (run.current_stage == "submit_repair" and (run.last_rejection is None or run.submit_repair_used >= 4)):
+        if run.supplement_request_used < 5 and self._normal_invocations_used(run) < 16 and run.research_remaining > 0 and run.place_remaining > 0 and not (run.current_stage == "submit_repair" and ((run.last_rejection is None and not run.quality_review_used) or run.submit_repair_used >= 4)):
             names.add("request_candidate_supplement")
         return tuple(tool for tool in PLANNING_TOOL_CONTRACTS if tool.name in names)
 
@@ -1337,7 +1374,9 @@ class ItineraryPlanningService:
         issues = rejected.issues
         if not issues:
             proposal = getattr(args, "draft", None)
-            issues = ((*self._proposal_qualification_issues(run, proposal),) if proposal is not None else ()) + (
+            retained = run.correction_issues if rejected.reason.startswith("patch_") else (
+                self._proposal_qualification_issues(run, proposal) if proposal is not None else ())
+            issues = (*retained,
                 dict(target=f"submission:main:{rejected.reason}", rule=rejected.reason,
                 field=rejected.field, candidate_handle=None, actual=None, expected=None, evidence_handles=[],
                 allowed_actions=["patch_draft", "query_route"]),)
@@ -1426,6 +1465,14 @@ class ItineraryPlanningService:
             if stop is not None:
                 return await self._finish_incomplete(run, stop)
             await self._load_business_hours(run)
+            try:
+                direction_snapshot = await self._budget.get_snapshot(key=self._direction_key(run))
+                run.direction_queries_remaining = direction_snapshot.remaining
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                run.budget_complete = False
+                return await self._finish_control_failed(run, PlanningFailureCode.BUDGET_ERROR)
             request_stage = run.current_stage
             effective_tools = self._effective_tools(run)
             prompt = self._prompt(run)
@@ -1509,15 +1556,18 @@ class ItineraryPlanningService:
                     return await self._finish_control_failed(run, PlanningFailureCode.MODEL_CONTRACT_INVALID)
                 calls = tuple(response.calls)
                 try:
-                    self._validate_batch(run, calls, effective_tools=effective_tools)
+                    accepted_outline = self._validate_batch(run, calls, effective_tools=effective_tools)
                 except _BusinessRejected as rejected:
                     category = self._classify_invocation(run, request_stage, calls, legal=True, format_repair=repairing)
                     await identity.record_validation(stage="policy", passed=False, code=rejected.reason, field=rejected.field, budget_category=category)
                     await self._persist_action(run, calls, response.metadata, "tool_calls", "policy_rejected", request_stage, category)
                     proposal = tuple(dict(tool_name=call.tool_name, arguments=call.arguments.model_dump(mode="json")) for call in calls)
                     progressed = self._rejection_progress(run, proposal, rejected)
+                    actions = (["patch_daily_outline", "research_evidence"] if rejected.reason == "daily_outline_rejected"
+                               else ["query_boundary_routes"] if rejected.reason == "boundary_routes_required"
+                               else ["replace_candidate", "research_evidence"])
                     feedback = json.dumps({"status": "rejected", "reason": rejected.reason, "field": rejected.field,
-                        "issues": rejected.issues, "allowed_actions": ["replace_candidate", "research_evidence"]}, separators=(",", ":"))
+                        "issues": rejected.issues, "allowed_actions": actions}, separators=(",", ":"))
                     pending_results = tuple(ToolResult(call_id=call.call_id, content=feedback) for call in calls)
                     for ordinal, call in enumerate(calls):
                         await identity.record_tool_result(tool_name=call.tool_name, provider_tool_call_id=call.call_id,
@@ -1526,6 +1576,13 @@ class ItineraryPlanningService:
                     if not progressed:
                         return await self._finish_incomplete(run, PlanningStopReason.NO_PROGRESS)
                     continue
+                except _DirectionCapacityRejected:
+                    category = self._classify_invocation(run, request_stage, format_repair=repairing)
+                    capacity = await self._direction_capacity_feedback(run, calls, response.metadata, identity, request_stage, category)
+                    if isinstance(capacity, tuple):
+                        pending_results = capacity
+                        continue
+                    return capacity
                 except ToolBatchError as error:
                     category = self._classify_invocation(run, request_stage, format_repair=repairing)
                     await identity.record_validation(stage="batch", passed=False, code=error.code, budget_category=category)
@@ -1558,6 +1615,16 @@ class ItineraryPlanningService:
                         await identity.record_tool_result(tool_name="submit_itinerary", provider_tool_call_id=calls[0].call_id,
                             ordinal=0, outcome="success", feedback=json.dumps({"status": result.outcome_type}), observation_ref_json=result.itinerary_ref.model_dump_json())
                         return result
+                    except _QualityReviewRequested:
+                        from .quality import quality_feedback
+                        feedback = {"status": "quality_review_requested", "code": "daily_plan_quality_review",
+                            "issues": quality_feedback(run.draft), "allowed_actions": ["patch_draft", "query_route", "research_evidence"]}
+                        await identity.record_validation(stage="submit", passed=True, code="daily_plan_quality_review", budget_category=category)
+                        pending_results = (ToolResult(call_id=calls[0].call_id, content=json.dumps(feedback, separators=(",", ":"))),)
+                        await identity.record_tool_result(tool_name="submit_itinerary", provider_tool_call_id=calls[0].call_id,
+                            ordinal=0, outcome="success", feedback=pending_results[0].content)
+                        await self._persist_state(run)
+                        continue
                     except _BusinessRejected as rejected:
                         record_error("planning_submit_rejected", reason=rejected.reason, field=rejected.field, invocation=run.invocation_count,
                             request_stage=request_stage, budget_category=category, location=locations(rejected))
@@ -1601,6 +1668,14 @@ class ItineraryPlanningService:
                     dispatcher = ToolDispatcher(directory=run.directory, map_executor=run.map_executor,
                         evidence_reader=lambda handles: self._read_evidence(run, handles), operation_ids=run.plan.direction_operation_ids[run.direction_cursor:])
                     dispatch = await dispatcher.dispatch(calls, sightseeing_days=self._days(run), iteration_index=run.invocation_count - 1, direction_budget_key=self._direction_key(run))
+                    if any(getattr(item.payload, "status", None) == "not_admitted_budget_exhausted" for item in dispatch.observations):
+                        capacity = await self._direction_capacity_feedback(run, calls, response.metadata, identity, request_stage, category, action_saved=True)
+                        if isinstance(capacity, tuple):
+                            pending_results = capacity
+                            continue
+                        return capacity
+                    if accepted_outline is not None:
+                        run.daily_outline, run.outline_quality_issues = accepted_outline
                     run.cache_hits += dispatch.cache_hits
                     refs_by_call = await self._persist_observations(run, action_ref, dispatch, calls)
                     pending_results = tool_results(dispatch, directory=run.directory)
@@ -1626,8 +1701,6 @@ class ItineraryPlanningService:
                             await identity.record_tool_result(tool_name=call.tool_name, provider_tool_call_id=call.call_id, ordinal=ordinal,
                                 outcome=recorded_outcome(leg), feedback=json.dumps({"status": leg.status, "leg_ordinal": leg.leg_ordinal,
                                     "observation_ref": ref.model_dump(mode="json")}), observation_ref_json=ref.model_dump_json())
-                    if any(getattr(item.payload, "status", None) == "not_admitted_budget_exhausted" for item in dispatch.observations):
-                        return await self._finish_incomplete(run, PlanningStopReason.DIRECTION_BUDGET_EXHAUSTED)
                     if any(getattr(item.payload, "status", None) == "reservation_barrier_failed" for item in dispatch.observations):
                         return self._failed(run.last_planning_ref, await self._budget_summary(run), PlanningFailureCode.OPERATION_RESULT_INDETERMINATE)
                     map_failure = self._map_failure_from_dispatch(dispatch)
@@ -1638,6 +1711,9 @@ class ItineraryPlanningService:
                     run.direction_cursor += sum(len(call.arguments.legs) for call in calls if call.tool_name == "plan_directions")
                 except asyncio.CancelledError:
                     raise
+                except ToolBatchError as error:
+                    code = PlanningFailureCode.BUDGET_ERROR if error.code == "budget_snapshot_failed" else PlanningFailureCode.ACTION_BATCH_INVALID
+                    return await self._finish_control_failed(run, code)
                 except Exception:
                     return self._failed(run.last_planning_ref, await self._budget_summary(run), PlanningFailureCode.OBSERVATION_INVALID)
                 stop = self._advance_stage(run)
@@ -1678,24 +1754,130 @@ class ItineraryPlanningService:
             return ToolTurnRejected.model_validate_json(value.model_dump_json(exclude_none=False), strict=True)
         return value
 
-    def _validate_batch(self, run: _Run, calls: tuple[ValidatedToolCall, ...], *, effective_tools) -> None:
+    def _validate_batch(self, run: _Run, calls: tuple[ValidatedToolCall, ...], *, effective_tools):
         if not calls:
             raise ToolBatchError("action_batch_invalid")
         dispatcher = ToolDispatcher(directory=run.directory)
         dispatcher.validate(calls, sightseeing_days=self._days(run))
         if any(call.tool_name not in {tool.name for tool in effective_tools} for call in calls):
             raise ToolBatchError("unknown_tool")
-        issues = self._query_qualification_issues(run, calls)
-        if issues:
-            raise _BusinessRejected("qualification_rejected", issues[0]["field"], issues=issues)
         remaining_hubs = len(run.plan.hub_geocode_operation_ids) - run.hub_cursor
         remaining_matrix = len(run.plan.matrix_operation_ids) - run.matrix_cursor
         remaining_directions = len(run.plan.direction_operation_ids) - run.direction_cursor
         geocode_count = sum(call.tool_name == PlanningTool.GEOCODE_HUB.value for call in calls)
         matrix_count = sum(call.tool_name == PlanningTool.CALCULATE_ROUTE_MATRIX.value for call in calls)
         direction_count = sum(len(call.arguments.legs) for call in calls if call.tool_name == PlanningTool.PLAN_DIRECTIONS.value)
-        if geocode_count > remaining_hubs or matrix_count > remaining_matrix or direction_count > remaining_directions:
+        if geocode_count > remaining_hubs or matrix_count > remaining_matrix:
             raise ToolBatchError("operation_plan_invalid")
+        issues = self._query_qualification_issues(run, calls)
+        if issues:
+            raise _BusinessRejected("qualification_rejected", issues[0]["field"], issues=issues)
+        accepted_outline = self._outline_for_batch(run, calls)
+        if direction_count > remaining_directions:
+            raise _DirectionCapacityRejected()
+        return accepted_outline
+
+    def _outline_for_batch(self, run: _Run, calls):
+        from .admission import qualification_issues
+        from .quality import boundary_day_windows, outline_window_issues, assess_day_quality
+        direction = next((call.arguments for call in calls if call.tool_name == "plan_directions"), None)
+        if direction is None:
+            return None
+        daily = any(run.directory.require_location(handle).value.ref_type == "candidate"
+                    for leg in direction.legs for handle in (leg.origin_handle, leg.destination_handle))
+        if not daily and not direction.daily_outline:
+            return None
+        windows = boundary_day_windows(run.confirmed, draft=run.draft, observations=tuple(run.direction_observations))
+        if any(item.route_pending for item in windows):
+            raise _BusinessRejected("boundary_routes_required", "daily_outline")
+        merged = {day.date: day for day in run.daily_outline}
+        merged.update((day.date, day) for day in direction.daily_outline)
+        days = tuple(merged[key] for key in sorted(merged))
+        for day in days:
+            for intent in day.visits:
+                try:
+                    run.directory.require(intent.candidate_handle, kind="candidate")
+                    for handle in intent.business_evidence_handles:
+                        run.directory.require(handle)
+                except ValueError:
+                    raise ToolBatchError("handle_invalid") from None
+        intents = tuple(intent for day in days for intent in day.visits)
+        issues = qualification_issues(run.candidates, intents, run.confirmed, require_daily=True,
+            business_facts=run.business_hours,
+            required_must=tuple(group.group_id for group in run.requirement_group_states if group.requirement_kind == "must_visit"))
+        paths = tuple(f"daily_outline[{day_index}].visits[{visit_index}]"
+            for day_index, day in enumerate(days) for visit_index, _ in enumerate(day.visits))
+        for issue in issues:
+            if issue["field"].startswith("visit_intents["):
+                index = int(issue["field"].split("[", 1)[1].split("]", 1)[0])
+                issue["field"] = paths[index] + issue["field"].split("]", 1)[1]
+            elif issue["field"] == "draft.days.visits" or issue["field"].startswith("draft.days.visits."):
+                issue["field"] = "daily_outline"
+        pace = run.policy.effective_pace if run.policy is not None else run.confirmed.requirement.preferences.pace
+        # 未选择节奏时不预先强加更严格的密度；最终按锁定节奏重验。
+        from app.requirements import TravelPace
+        issues += outline_window_issues(days, windows, pace)
+        if issues:
+            for issue in issues:
+                if issue["field"].startswith("days["):
+                    issue["field"] = "daily_outline" + issue["field"][4:]
+                issue["allowed_actions"] = ["patch_daily_outline", "research_evidence"]
+            raise _BusinessRejected("daily_outline_rejected", issues[0]["field"], issues=issues)
+        quality = tuple(issue for day in days for issue in assess_day_quality(day,
+            next(item for item in windows if item.date == day.date), pace or TravelPace.RELAXED))
+        return days, quality
+
+    def _required_daily_routes(self, run: _Run) -> list[dict]:
+        from .fingerprints import fingerprint_directions
+        result = []
+        for day in run.daily_outline:
+            if not day.visits:
+                continue
+            handles = ("hotel-handle", *(item.candidate_handle for item in day.visits), "hotel-handle")
+            for origin, destination in zip(handles, handles[1:]):
+                left, right = run.directory.require_location(origin), run.directory.require_location(destination)
+                available = []
+                for observation in run.direction_observations:
+                    fingerprint = fingerprint_directions(run.context_digest, left.value, left.coordinate,
+                        right.value, right.coordinate, observation.route_mode, observation.alternatives_limit)
+                    if observation.status == "success" and observation.leg_fingerprint == fingerprint:
+                        available.append(dict(directions_handle=observation.directions_handle, leg_id=observation.leg_id,
+                            route_mode=observation.route_mode.value, transport_semantic=observation.transport_semantic.value))
+                result.append(dict(date=day.date.isoformat(), origin_handle=origin, destination_handle=destination,
+                    existing_directions=available))
+        return result
+
+    async def _direction_capacity_feedback(self, run, calls, metadata, identity, stage, category, *, action_saved=False):
+        try:
+            snapshot = await self._budget.get_snapshot(key=self._direction_key(run))
+            run.direction_queries_remaining = snapshot.remaining
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            run.budget_complete = False
+            return await self._finish_control_failed(run, PlanningFailureCode.BUDGET_ERROR)
+        slots = max(0, len(run.plan.direction_operation_ids) - run.direction_cursor)
+        feedback = json.dumps(dict(status="rejected", reason="direction_capacity_exhausted",
+            remaining_direction_slots=slots, remaining_direction_queries=snapshot.remaining,
+            allowed_actions=["reduce_batch", "reuse_routes", "submit_itinerary"]), separators=(",", ":"))
+        try:
+            await identity.record_validation(stage="batch", passed=False, code="direction_capacity_exhausted", budget_category=category)
+            if not action_saved:
+                await self._persist_action(run, calls, metadata, "tool_calls", "policy_rejected", stage, category)
+            for ordinal, call in enumerate(calls):
+                await identity.record_tool_result(tool_name=call.tool_name, provider_tool_call_id=call.call_id,
+                    ordinal=ordinal, outcome="rejected", feedback=feedback)
+            rejected = _BusinessRejected("direction_capacity_exhausted", "plan_directions.legs")
+            progressed = self._rejection_progress(run,
+                tuple(dict(tool_name=call.tool_name, arguments=call.arguments.model_dump(mode="json")) for call in calls), rejected)
+            await self._persist_state(run)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return self._failed(run.last_planning_ref, await self._budget_summary(run), PlanningFailureCode.ARTIFACT_ERROR)
+        if not slots or not snapshot.remaining or not progressed:
+            return await self._finish_incomplete(run, PlanningStopReason.DIRECTION_BUDGET_EXHAUSTED)
+        return tuple(ToolResult(call_id=call.call_id, content=feedback) for call in calls)
 
     def _days(self, run: _Run) -> int:
         value = run.confirmed.requirement.time_window.sightseeing_days
@@ -1847,6 +2029,8 @@ class ItineraryPlanningService:
         candidates = tuple(item for item in run.candidates if self._candidate_purposes(item) and (
             include_candidates or f"candidate-handle-{item.admission_ordinal:04d}" in related
             or requested.intersection(self._candidate_purposes(item))))
+        from .quality import boundary_day_windows
+        remaining_directions = max(0, len(run.plan.direction_operation_ids) - run.direction_cursor)
         return {
             "current_stage": run.current_stage,
             "model_invocations_consumed": run.invocation_count,
@@ -1865,11 +2049,18 @@ class ItineraryPlanningService:
             "remaining_direction_slots": max(
                 0, len(run.plan.direction_operation_ids) - run.direction_cursor
             ),
+            "remaining_direction_queries": run.direction_queries_remaining,
+            "required_daily_routes": self._required_daily_routes(run),
+            "daily_outline": [item.model_dump(mode="json") for item in run.daily_outline],
+            "outline_quality_issues": [item.model_dump(mode="json") for item in run.outline_quality_issues],
+            "daily_windows": [item.projection() for item in boundary_day_windows(
+                run.confirmed, draft=run.draft, observations=tuple(run.direction_observations))],
+            "quality_review_used": run.quality_review_used,
             "no_progress_streak": run.no_progress,
             "accepted_supplements": len(run.supplement_fingerprints),
             "effective_policy": None if run.policy is None else run.policy.model_dump(mode="json"),
             "correction_issues": run.correction_issues,
-            "patch_base_available": run.last_proposal is not None and run.last_rejection is not None,
+            "patch_base_available": run.last_proposal is not None and (run.last_rejection is not None or run.quality_review_used),
             "draft": None if run.draft is None else run.draft.model_dump(mode="json", exclude={"hotel_selection_ref", "candidate_set_ref"}),
             "gaps": [item.model_dump(mode="json") for item in self._current_gaps(run)],
             "admitted_purposes": [dict(candidate_handle=f"candidate-handle-{item.admission_ordinal:04d}",
@@ -1888,7 +2079,7 @@ class ItineraryPlanningService:
         return candidate_purposes(item)
 
     def _prompt(self, run: _Run) -> PromptEnvelope:
-        objectives = ("先处理当前 typed 缺口，再取得必要的路线证据，最后提交完整行程或请求候选补充。",)
+        objectives = ("先核验抵离接驳，再按每日实际窗口安排所有日期，查询必要相邻路线并提交；修订只改相关日期。",)
         public_directory = HandleDirectory()
         admitted = {f"candidate-handle-{item.admission_ordinal:04d}" for item in run.candidates if self._candidate_purposes(item)}
         for handle, kind, label in run.directory.snapshot():
@@ -1908,15 +2099,17 @@ class ItineraryPlanningService:
         state = await self._state_snapshot(run, pending=None)
         gaps = tuple(_to_gap_summary_snapshot(item) for item in self._current_gaps(run))
         record = InProgressItineraryRecord(schema_version="1.0", record_type="in_progress", state=state, gaps=gaps)
-        artifact = ItineraryPlanningArtifact(schema_version="6.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
+        artifact = ItineraryPlanningArtifact(schema_version="8.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
         slot = self._invocation_slot(run, run.invocation_count - 1)
         ref, _ = await self._persist(operation_id=slot.planning_state_operation_id, artifact_type="itinerary_planning.itinerary", content=artifact, expected=ItineraryPlanningArtifact)
         run.last_planning_ref = ref
         return ref
 
     async def _state_snapshot(self, run: _Run, *, pending: str | None) -> PlanningStateSnapshot:
-        from .artifacts import _PlanningStateSnapshotV6
-        return _PlanningStateSnapshotV6(schema_version="6.0", request_kind="resume" if run.resumed else "initial",
+        from .artifacts import _PlanningStateSnapshotV8, _to_outline_snapshot, _to_quality_snapshot
+        return _PlanningStateSnapshotV8(schema_version="8.0", quality_review_used=run.quality_review_used,
+            daily_outline=tuple(_to_outline_snapshot(day) for day in run.daily_outline),
+            outline_quality_issues=tuple(_to_quality_snapshot(item) for item in run.outline_quality_issues), request_kind="resume" if run.resumed else "initial",
             requirement_digest=_confirmed_digest(run.confirmed), effective_policy=None if run.policy is None else self._policy_snapshot(run.policy),
             draft=None if run.draft is None else _to_draft_snapshot(run.draft), budgets=_to_budget_snapshot(await self._budget_summary(run)),
             current_stage=run.current_stage, model_invocations_consumed=run.invocation_count, preparation_used=run.preparation_used,
@@ -1981,13 +2174,20 @@ class ItineraryPlanningService:
                          errors=validation_details(error, ItineraryDraft) if isinstance(error, ValidationError) else [],
                          location=locations(error), invocation=run.invocation_count)
             raise _BusinessRejected("proposal_structure_or_reference_invalid", "draft") from None
+        from .quality import assess_boundary_quality
+        draft = assess_boundary_quality(run.confirmed, draft)
         run.draft = draft
+        if (any(day.quality_issues for day in draft.days) and not run.quality_review_used
+                and run.submit_repair_used < 5 and self._normal_invocations_used(run) < 17
+                and run.invocation_count < 19):
+            run.quality_review_used = True
+            raise _QualityReviewRequested()
         return await self._finish_completed(run)
 
     def _resolve_submission(self, run, args):
         if args.draft is not None:
             return args
-        if run.last_proposal is None or run.last_rejection is None:
+        if run.last_proposal is None or (run.last_rejection is None and not run.quality_review_used):
             raise _BusinessRejected("patch_base_unavailable", "patch")
         replacements = {day.date: day for day in args.patch.days}
         if not set(replacements).issubset(day.date for day in run.last_proposal.days):
@@ -2170,7 +2370,8 @@ class ItineraryPlanningService:
                 pace=policy.effective_pace)
             time_problems.extend(issues)
             return dict(schema_version="1.0", date=value.date, day_kind=value.day_kind, theme=value.theme,
-                open_intervals=value.open_intervals, visits=visits, route_legs=routes, backups=backups)
+                open_intervals=value.open_intervals, visits=visits, route_legs=routes, backups=backups,
+                planned_breaks=value.planned_breaks)
 
         arrival_route = route(proposal.arrival_transfer.route_leg, "draft.arrival_transfer.route_leg")
         departure_route = route(proposal.departure_transfer.route_leg, "draft.departure_transfer.route_leg")
@@ -2192,6 +2393,11 @@ class ItineraryPlanningService:
         return ItineraryDraft(schema_version="1.0", requirement_digest=_confirmed_digest(run.confirmed), hotel_selection_ref=run.hotel_ref, candidate_set_ref=run.candidate_ref, effective_policy=policy, arrival_transfer=BoundaryTransfer(schema_version="1.0", transfer_kind="arrival", hub=arrival_hub, hotel=hotel, route_leg=arrival_route, processing_minutes=arrival_minutes, approximate_extra_minutes=30 if arrival_info.is_approximate else 0), days=tuple(DayPlan(**value) for value in days), departure_transfer=BoundaryTransfer(schema_version="1.0", transfer_kind="departure", hub=departure_hub, hotel=hotel, route_leg=departure_route, processing_minutes=departure_minutes, approximate_extra_minutes=30 if departure_info.is_approximate else 0), upstream_gap_ids=proposal.upstream_gap_ids)
 
     def _validate_draft(self, run: _Run, draft: ItineraryDraft, *, allow_prefix: bool = False, allow_missing_backups: bool = False) -> None:
+        from .quality import validate_break_windows
+        try:
+            validate_break_windows(run.confirmed, draft)
+        except ValueError:
+            raise _BusinessRejected("planned_break_outside_window", "draft.days.planned_breaks") from None
         _check_business(validate_effective_policy, draft.effective_policy, field="effective_policy")
         if draft.effective_policy.daily_time_rules or draft.effective_policy.time_sensitive_must or draft.effective_policy.transport_rules:
             raise _BusinessRejected("structured_demo_deferred_policy_rule_rejected")
@@ -2283,6 +2489,12 @@ class ItineraryPlanningService:
         if boundary_issues:
             first = boundary_issues[0]
             raise _BusinessRejected(first["rule"], first["field"], issues=boundary_issues)
+        from .quality import boundary_day_windows, unplanned_day_issues
+        unplanned = unplanned_day_issues(draft.days, boundary_day_windows(run.confirmed, draft=draft), draft.effective_policy.effective_pace)
+        if unplanned:
+            for issue in unplanned:
+                issue["field"] = "draft." + issue["field"]
+            raise _BusinessRejected("unplanned_usable_day", unplanned[0]["field"], issues=unplanned)
         for day_index, day in enumerate(draft.days):
             derived_kind = self._day_kind_from_boundaries(draft, day)
             prefix_tail = allow_prefix and day_index == len(draft.days) - 1
@@ -2505,6 +2717,8 @@ class ItineraryPlanningService:
         return False
 
     def _retain_prefix(self, run: _Run, prefix: ItineraryDraft) -> bool:
+        if run.quality_review_used and run.draft is not None:
+            return False
         def strength(draft):
             if draft is None:
                 return (0, 0, 0)
@@ -2588,6 +2802,9 @@ class ItineraryPlanningService:
             try:
                 proposed_draft = self._materialize_draft(run, args.draft, policy)
                 self._validate_draft(run, proposed_draft, allow_prefix=True, allow_missing_backups=True)
+                if run.quality_review_used:
+                    from .quality import assess_boundary_quality
+                    proposed_draft = assess_boundary_quality(run.confirmed, proposed_draft)
             except (TypeError, ValueError, KeyError, StopIteration):
                 return None
             if run.draft is not None and proposed_draft != run.draft:
@@ -2693,6 +2910,7 @@ class ItineraryPlanningService:
         return TypeAdapter(PlanningGapSummary).validate_python(data, strict=True)
 
     async def _continue_after_supplement(self, run: _Run, state: PlanningStateSnapshot) -> ItineraryPlanningOutcome:
+        from .artifacts import _from_outline_snapshot, _from_quality_snapshot
         if (state.model_invocations_consumed != run.invocation_count or state.pending_call_id is None or
             state.current_stage != run.current_stage or state.preparation_used != run.preparation_used or
             state.transport_used != run.transport_used or state.submit_repair_used != run.submit_repair_used or
@@ -2702,6 +2920,9 @@ class ItineraryPlanningService:
             or state.correction_fact_fingerprints != tuple(sorted(run.correction_fact_fingerprints.items()))
             or state.correction_no_progress != run.correction_no_progress
             or state.correction_evidence_fingerprint != run.correction_evidence_fingerprint
+            or state.quality_review_used != run.quality_review_used
+            or tuple(_from_outline_snapshot(item) for item in state.daily_outline) != run.daily_outline
+            or tuple(_from_quality_snapshot(item) for item in state.outline_quality_issues) != run.outline_quality_issues
             or state.last_proposal_fingerprint != (None if run.last_proposal is None else _canonical_hash(run.last_proposal))):
             return self._failed(run.last_planning_ref, await self._budget_summary(run), PlanningFailureCode.REQUEST_MISMATCH)
         if state.pending_call_id.startswith("entry-supply-"):
@@ -2749,10 +2970,21 @@ class ItineraryPlanningService:
     async def _finish_completed(self, run: _Run) -> ItineraryPlanningOutcome:
         summary = self._summary(run, run.draft)
         budgets = await self._budget_summary(run)
+        if not budgets.budget_snapshot_complete:
+            return await self._finish_control_failed(run, PlanningFailureCode.BUDGET_ERROR)
         record = CompletedItineraryRecord(schema_version="1.0", record_type="completed", draft=_to_draft_snapshot(cast(ItineraryDraft, run.draft)), summary=_to_summary_snapshot(summary), budgets=_to_budget_snapshot(budgets))
         return await self._persist_terminal(run, record)
 
     async def _finish_incomplete(self, run: _Run, reason: PlanningStopReason) -> ItineraryPlanningOutcome:
+        if run.quality_review_used and run.draft is not None and len(run.draft.days) == self._days(run):
+            try:
+                self._validate_draft(run, run.draft)
+            except _BusinessRejected:
+                pass
+            else:
+                from .quality import assess_boundary_quality
+                run.draft = assess_boundary_quality(run.confirmed, run.draft)
+                return await self._finish_completed(run)
         record_error("planning_incomplete", reason=reason.value, invocation=run.invocation_count)
         summary = self._summary(run, run.draft)
         budgets = await self._budget_summary(run)
@@ -2785,7 +3017,7 @@ class ItineraryPlanningService:
         return await self._finish_failed(run, failure)
 
     async def _persist_terminal(self, run: _Run, record: Any) -> ItineraryPlanningOutcome:
-        artifact = ItineraryPlanningArtifact(schema_version="6.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
+        artifact = ItineraryPlanningArtifact(schema_version="8.0", request_digest=run.request_digest, parent_planning_ref=run.last_planning_ref, directories=self._directory_model(run), record=record)
         try:
             ref, fresh = await self._persist(operation_id=run.plan.terminal_successor_operation_id, artifact_type="itinerary_planning.itinerary", content=artifact, expected=ItineraryPlanningArtifact)
         except ArtifactCapacityExceededError:
@@ -2834,7 +3066,7 @@ class ItineraryPlanningService:
             complete = complete and total.limit == 19 and total.consumed == run.invocation_count
         except Exception:
             complete = False
-        return PlanningBudgetSummary(schema_version="6.0", model_invocation_limit=19, model_invocations_consumed=run.invocation_count,
+        return PlanningBudgetSummary(schema_version="8.0", model_invocation_limit=19, model_invocations_consumed=run.invocation_count,
             normal_invocation_limit=17, format_repair_limit=2, format_repair_used=run.format_repair_used,
             preparation_limit=2, preparation_used=run.preparation_used, transport_limit=5, transport_used=run.transport_used,
             submit_repair_limit=5, submit_repair_used=run.submit_repair_used, supplement_request_limit=5, supplement_request_used=run.supplement_request_used,
@@ -2849,7 +3081,7 @@ class ItineraryPlanningService:
         if code is PlanningFailureCode.ARTIFACT_ERROR and possible_duplicate:
             retryable = False
         failure = ControlPlanningFailure(schema_version="1.0", failure_type="control", code=code, retryable=retryable, possible_duplicate=possible_duplicate)
-        version = budgets.schema_version if budgets is not None else last_ref.schema_version if last_ref is not None else "6.0"
+        version = budgets.schema_version if budgets is not None else last_ref.schema_version if last_ref is not None else "8.0"
         return ItineraryPlanningFailed(schema_version=version, outcome_type="failed", failure=failure, last_consistent_itinerary_ref=last_ref, failure_artifact_ref=None, budgets=budgets, retryable=retryable, possible_duplicate=possible_duplicate)
 
     def _outcome_from_terminal(self, ref: ArtifactRef, artifact: ItineraryPlanningArtifact) -> ItineraryPlanningOutcome:

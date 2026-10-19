@@ -36,13 +36,24 @@ def checked_itinerary_canonical(artifact, ref):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_transit_steps", [False, True])
 @pytest.mark.parametrize("minute_schedule", [False, True])
-async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory, database_snapshot, with_transit_steps, minute_schedule):
+@pytest.mark.parametrize("planning_version", ["6.0", "7.0", "8.0"])
+async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory, database_snapshot, with_transit_steps, minute_schedule, planning_version):
     run_id = UUID(int=UUID("12000000-0000-4000-8000-00000000c201").int
-                  + (16 if with_transit_steps else 0) + (1 if minute_schedule else 0))
+                  + (16 if with_transit_steps else 0) + (1 if minute_schedule else 0) + ({"6.0": 0, "7.0": 32, "8.0": 64}[planning_version]))
     runtime = await runtime_factory()
     instructions = ("步行到合成甲站", "乘坐合成1号线至乙站", "换乘合成20路至丙站") if with_transit_steps else None
     scenario = await make_scenario(repository=runtime.repository, days=3, run_id=run_id,
-                                   transit_instructions=instructions, minute_schedule=minute_schedule)
+                                   transit_instructions=instructions, minute_schedule=minute_schedule, planning_version=planning_version)
+    if planning_version in {"7.0", "8.0"}:
+        from tests.unit.result_formatting.fakes import replace_itinerary, interval, local_time, START_DATE
+        payload = tree(scenario.itinerary)
+        payload["record"]["draft"]["days"][0]["planned_breaks"] = [dict(break_id="rest", kind="rest", reason="午后休息",
+            interval=interval(local_time(START_DATE, 16), local_time(START_DATE, 16, 30)))]
+        payload["record"]["draft"]["days"][0]["quality_issues"] = [dict(date=START_DATE.isoformat(), rule="unexplained_gap",
+            interval=interval(local_time(START_DATE, 13), local_time(START_DATE, 16)), minutes=180)]
+        original_itinerary_ref = scenario.request.itinerary_ref
+        scenario = await replace_itinerary(scenario, payload)
+        scenario.refs["pre_break_itinerary"] = original_itinerary_ref
     service = ResultFormattingService(artifact_repository=runtime.repository)
     prepared = await service.prepare(scenario.request)
     assert type(prepared) is ResultFormattingPrepared
@@ -95,7 +106,13 @@ async def test_complete_result_reopens_with_same_canonical_bytes(runtime_factory
     source_after = await restarted.repository.get(source_ref, expected_model=type(scenario.itinerary))
     assert source_after.ref == source_ref
     assert checked_itinerary_canonical(source_after.content, source_ref) == source_before
-    assert source_after.content.schema_version == "6.0"
+    assert source_after.content.schema_version == planning_version
+    if planning_version in {"7.0", "8.0"}:
+        assert "午后休息" in second.markdown
+        assert len(source_after.content.record.draft.days[0].planned_breaks) == 1
+        assert source_after.content.record.draft.days[0].quality_issues[0].minutes == 180
+        assert second.index.core.quality_issue_count == 1
+        assert "未解释" in second.markdown or "空档" in second.markdown
     assert await database_snapshot(run_id) == before_database
 
 

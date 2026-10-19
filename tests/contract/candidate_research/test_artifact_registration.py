@@ -9,7 +9,7 @@ from app.candidate_research import CandidateResearchUsageError
 from app.candidate_research.artifacts import (
     CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS, ActionModelOutcomeSnapshot,
     ArtifactInvocationMetadataSnapshot, ArtifactKnownLLMUsageSnapshot,
-    ActionDispositionSnapshot, CandidateResearchModelActionArtifact,
+    ActionDispositionSnapshot, CandidateResearchV2ModelActionArtifact as CandidateResearchModelActionArtifact,
     CandidateResearchLegacyModelJudgmentArtifact as CandidateResearchModelJudgmentArtifact, ModelJudgmentAcceptedRecord,
     ModelJudgmentControllerRejectedRecord, JudgmentPatchSnapshot,
     ModelActionAcceptedRecord, ModelActionPolicyRejectedRecord, NoUsefulActionProposedSnapshot,
@@ -153,8 +153,12 @@ def _action_artifact():
 
 
 def test_registrations_and_type_graph_are_strict():
-    assert tuple(item.artifact_type for item in CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS) == (
-        "candidate_research.model_action", "candidate_research.model_action", "candidate_research.model_judgment", "candidate_research.model_judgment", "candidate_research.model_judgment", "candidate_research.place_observation", "candidate_research.candidate_set", "candidate_research.candidate_set", "candidate_research.candidate_set", "candidate_research.candidate_set",
+    assert tuple((item.artifact_type, item.schema_version) for item in CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS) == (
+        *(("candidate_research.model_action", v) for v in ("1.0", "2.0", "3.0")),
+        *(("candidate_research.model_judgment", v) for v in ("1.0", "2.0", "3.0", "4.0")),
+        ("candidate_research.invocation_attempt", "1.0"),
+        ("candidate_research.place_observation", "1.0"),
+        *(("candidate_research.candidate_set", v) for v in ("1.0", "2.0", "3.0", "4.0", "5.0")),
     )
     ArtifactSchemaRegistry(CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS)
     assert ActionModelOutcomeSnapshot is not NoUsefulActionProposedSnapshot

@@ -73,10 +73,12 @@ async def test_purpose_contract_versions_keep_canonical_bytes_hashes_after_reope
     action_v6.update(schema_version="6.0",prompt_version="planning-v6")
     minute_itinerary = (await make_scenario(minute_schedule=True,run_id=uuid4())).itinerary
     assert current_itinerary.schema_version == minute_itinerary.schema_version == "6.0"
+    boundary_itinerary = (await make_scenario(planning_version="8.0", run_id=uuid4())).itinerary
     samples += [("itinerary_planning.model_action",current_action,ItineraryPlanningModelActionArtifact),
         ("itinerary_planning.model_action",ItineraryPlanningModelActionArtifact.model_validate_json(json.dumps(action_v6),strict=True),ItineraryPlanningModelActionArtifact),
         ("itinerary_planning.itinerary",current_itinerary,ItineraryPlanningArtifact),
-        ("itinerary_planning.itinerary",minute_itinerary,ItineraryPlanningArtifact)]
+        ("itinerary_planning.itinerary",minute_itinerary,ItineraryPlanningArtifact),
+        ("itinerary_planning.itinerary",boundary_itinerary,ItineraryPlanningArtifact)]
     planner,request,_,_,memory = _fixture(ToolTurnCompleted(final_text="结束",metadata=_metadata()))
     outcome = await planner.plan_initial(request)
     assert outcome.outcome_type == "incomplete"

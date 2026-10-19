@@ -95,7 +95,7 @@ from .artifacts import (
     ArtifactMapResearchFailureSnapshot,
     ArtifactMealJudgmentUpdateResolved,
     ArtifactMealCoverageMissingSummary,
-    ArtifactMealCountShortfallSummary,
+    CorrectableMealCountShortfallSummary as ArtifactMealCountShortfallSummary,
     ArtifactPlaceDetailsSnapshot,
     ArtifactPlaceSummarySnapshot,
     ArtifactProvenanceSnapshot,
@@ -103,7 +103,7 @@ from .artifacts import (
     ArtifactAvoidResolutionMissingSummary,
     ArtifactReplacementCandidateNeededSummary,
     ArtifactResearchAnchorSnapshot,
-    ArtifactResearchBudgetSummarySnapshot,
+    CorrectableResearchBudgetSnapshot as ArtifactResearchBudgetSummarySnapshot,
     ArtifactResearchCountSummarySnapshot,
     ArtifactResearchCoverageSummarySnapshot,
     ArtifactResearchGapSummarySnapshot,
@@ -116,13 +116,16 @@ from .artifacts import (
     CandidateResearchModelActionArtifact,
     CandidateResearchModelJudgmentArtifact,
     CandidateResearchPlaceObservationArtifact,
+    CandidateResearchInvocationAttemptArtifact, AttemptActionResult, AttemptJudgmentResult,
+    AttemptControlFailure, CorrectableActionCorrectionState,
+    candidate_artifact_model, action_artifact_model, judgment_artifact_model,
     CandidateSetStateSnapshot,
-    QualifiedCandidateSetStateSnapshot,
+    CorrectableCandidateSetStateSnapshot as QualifiedCandidateSetStateSnapshot,
     _candidate_set_state_complete,
-    QualifiedCompletedCandidateSetRecord as CompletedCandidateSetRecord,
-    QualifiedFailedCandidateSetRecord as FailedCandidateSetRecord,
-    QualifiedIncompleteCandidateSetRecord as IncompleteCandidateSetRecord,
-    QualifiedInProgressCandidateSetRecord as InProgressCandidateSetRecord,
+    CorrectableCompletedCandidateSetRecord as CompletedCandidateSetRecord,
+    CorrectableFailedCandidateSetRecord as FailedCandidateSetRecord,
+    CorrectableIncompleteCandidateSetRecord as IncompleteCandidateSetRecord,
+    CorrectableInProgressCandidateSetRecord as InProgressCandidateSetRecord,
     JudgmentPatchSnapshot,
     JudgmentPatchModelSnapshot,
     ModelActionAcceptedRecord,
@@ -132,8 +135,6 @@ from .artifacts import (
     ModelJudgmentAcceptedRecord,
     ModelJudgmentControllerRejectedRecord,
     ModelJudgmentLLMFailureRecord,
-    ModelActionRecoveredRecord,
-    ModelJudgmentRecoveredRecord,
     OutputRecoveryAttempt,
     unwrap_model_record,
     NoUsefulActionProposedSnapshot,
@@ -155,10 +156,12 @@ from .artifacts import (
 )
 from .errors import CandidateResearchConfigurationError
 from .purpose import candidate_admitted_purposes
+from .recovery import CorrectionFeedback, POLICY_CODES, OUTPUT_CODES, correction_stop
 from .fingerprints import (
     action_fingerprint,
     candidate_handle,
     candidate_core_equal,
+    canonical_json_bytes,
     content_digest,
     details_action_fingerprint,
     invocation_request_digest,
@@ -325,7 +328,14 @@ class _Run:
     replayed_place_refs: dict[OperationId, ArtifactRef] = field(default_factory=dict)
     action_interaction: InteractionCallIdentity | None = None
     output_recoveries_used: int = 0
-    action_recoveries: tuple[OutputRecoveryAttempt, ...] = ()
+    action_validation_feedback: dict | None = None
+    action_recoveries: tuple = ()
+    invocation_attempt_refs: list[ArtifactRef] = field(default_factory=list)
+    action_attempt_refs: list[ArtifactRef] = field(default_factory=list)
+    judgment_attempt_refs: list[ArtifactRef] = field(default_factory=list)
+    call_info: dict = field(default_factory=dict)
+    active_slot: ResearchIterationOperationIds | None = None
+    correction_stop_reason: CandidateResearchStopReason | None = None
     judgment_recoveries: tuple[OutputRecoveryAttempt, ...] = ()
     judgment_recoverable: bool = False
     judgment_recovery_code: str = "judgment_evidence_mismatch"
@@ -561,7 +571,7 @@ class CandidateResearchService:
             raise RuntimeError("terminal artifact lookup contract violation")
         if (
             lookup.ref.artifact_type != "candidate_research.candidate_set"
-            or lookup.ref.schema_version != "4.0"
+            or lookup.ref.schema_version != "5.0"
             or lookup.ref.operation_id != request.operation_plan.terminal_successor_operation_id
         ):
             return await self._indeterminate(request.operation_plan.run_id)
@@ -696,6 +706,7 @@ class CandidateResearchService:
                         iteration, CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
             return await self._failed(run, request, ControlResearchFailure(code=code), None)
         self._start_step(run, iteration, "judge_existing")
+        run.active_slot = slot
         before_state, before_assessments = run.state, run.assessments
         job, payload = prepared
         prepared = job.model_copy(update={"iteration_index": iteration}), payload
@@ -721,6 +732,10 @@ class CandidateResearchService:
             return await self._indeterminate(run.run_id)
         if result is None:
             return None
+        if run.correction_stop_reason is not None:
+            await self._write_judgment_failure(run, request, slot, iteration, result)
+            run.state = self._state_with(run, no_progress=min(2, run.state.iteration_no_progress_streak + 1))
+            return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
         run.state = QualifiedCandidateSetStateSnapshot(**{**_python_model(rollback_state),
                                                  "observation_refs": tuple(run.observation_refs)})
         auditable = isinstance(result, LLMResearchFailure) or result.code in {
@@ -844,6 +859,8 @@ class CandidateResearchService:
             supplemental_baseline_uids=frozenset(item.core.uid for item in state.candidates),
         )
         run.semantic_invocations = state.budgets.semantic_invocations_consumed
+        run.output_recoveries_used = state.budgets.corrections_consumed
+        run.invocation_attempt_refs = list(read.content.invocation_attempt_refs)
         run.provider_attempts = state.budgets.known_provider_attempts
         run.provider_attempts_complete = state.budgets.provider_attempts_complete
         run.usage_complete = state.budgets.usage_complete
@@ -851,12 +868,6 @@ class CandidateResearchService:
             run.usage[name] = getattr(state.budgets.known_usage, name)
         run.action_refs.extend(state.model_action_refs)
         run.judgment_refs.extend(state.model_judgment_refs)
-        for refs, model in ((state.model_action_refs, CandidateResearchModelActionArtifact),
-                            (state.model_judgment_refs, CandidateResearchModelJudgmentArtifact)):
-            for ref in refs:
-                record = (await self._repository.get(ref, expected_model=model)).content.result
-                if record.record_type == "recovered":
-                    run.output_recoveries_used = max(run.output_recoveries_used, record.attempts[-1].recovery_number)
         for ref in state.observation_refs:
             run.observation_refs.append(ref)
             try:
@@ -882,7 +893,7 @@ class CandidateResearchService:
     async def _read_candidate_set(self, ref: ArtifactRef, run_id: UUID):
         if (
             ref.artifact_type != "candidate_research.candidate_set"
-            or ref.schema_version != "4.0"
+            or ref.schema_version != "5.0"
             or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH
             or ref.operation_id.run_id != run_id
         ):
@@ -928,7 +939,7 @@ class CandidateResearchService:
             for item_ref in refs:
                 if (
                     item_ref.artifact_type != expected_type
-                    or item_ref.schema_version != ({"candidate_research.model_action": "2.0", "candidate_research.model_judgment": "3.0"}.get(expected_type, "1.0"))
+                    or item_ref.schema_version != ({"candidate_research.model_action": "3.0", "candidate_research.model_judgment": "4.0"}.get(expected_type, "1.0"))
                     or item_ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH
                     or item_ref.operation_id.run_id != run_id
                 ):
@@ -978,16 +989,17 @@ class CandidateResearchService:
         """研究重放与下游格式化使用同一只读来源核验。"""
         from .qualification import validate_qualification_sources
         state = getattr(artifact.record, "state", None)
-        if state is None:
-            return
         sources = {}
-        for refs, model in (
-            (state.observation_refs, CandidateResearchPlaceObservationArtifact),
-            (state.model_action_refs, CandidateResearchModelActionArtifact),
-            (state.model_judgment_refs, CandidateResearchModelJudgmentArtifact),
-        ):
-            for ref in refs:
-                sources[ref.artifact_id] = await self._repository.get(ref, expected_model=model)
+        if state is not None:
+            for refs, model in (
+                (state.observation_refs, CandidateResearchPlaceObservationArtifact),
+                (state.model_action_refs, CandidateResearchModelActionArtifact),
+                (state.model_judgment_refs, CandidateResearchModelJudgmentArtifact),
+            ):
+                for ref in refs:
+                    sources[ref.artifact_id] = await self._repository.get(ref, expected_model=model)
+        for ref in getattr(artifact, "invocation_attempt_refs", ()):
+            sources[ref.artifact_id] = await self._repository.get(ref, expected_model=CandidateResearchInvocationAttemptArtifact)
         validate_qualification_sources(artifact, sources)
     async def _validate_terminal_refs(self, artifact: CandidateResearchArtifact) -> None:
         """Re-read terminal-linked artifacts so replay cannot trust stale refs."""
@@ -998,7 +1010,7 @@ class CandidateResearchService:
             # directories (initial mode) plus newly produced supplemental refs;
             # the artifact mode alone cannot be imposed on every nested entry.
             await self._validate_state_refs(state, artifact.run_id)
-            await self._validate_qualification_history(artifact)
+        await self._validate_qualification_history(artifact)
         if artifact.predecessor_ref is not None:
             predecessor = await self._read_candidate_set(artifact.predecessor_ref, artifact.run_id)
             predecessor_state = getattr(predecessor.content.record, "state", None)
@@ -1010,7 +1022,7 @@ class CandidateResearchService:
         async def verify(ref: ArtifactRef, expected_type: str, expected_model: type[BaseModel]) -> BaseModel:
             if (
                 ref.artifact_type != expected_type
-                or ref.schema_version != ("4.0" if expected_type == "candidate_research.candidate_set" else {"candidate_research.model_action": "2.0", "candidate_research.model_judgment": "3.0"}.get(expected_type, "1.0"))
+                or ref.schema_version != ("5.0" if expected_type == "candidate_research.candidate_set" else {"candidate_research.model_action": "3.0", "candidate_research.model_judgment": "4.0"}.get(expected_type, "1.0"))
                 or ref.operation_id.phase is not WorkflowPhase.CANDIDATE_RESEARCH
                 or ref.operation_id.run_id != artifact.run_id
             ):
@@ -1175,7 +1187,7 @@ class CandidateResearchService:
             semantic_invocations_consumed=0, known_provider_attempts=0,
             provider_attempts_complete=True,
             known_usage=ArtifactKnownLLMUsageSnapshot(prompt_tokens=0, completion_tokens=0, total_tokens=0, reasoning_tokens=0, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0),
-            usage_complete=True,
+            usage_complete=True, correction_limit=2, corrections_consumed=0,
         )
         counts = ArtifactResearchCountSummarySnapshot(
             attraction_count=0, attraction_target=role_target(ResearchRole.ATTRACTION, self._sightseeing_days(request)),
@@ -1346,6 +1358,7 @@ class CandidateResearchService:
             if local_slot < len(request.operation_plan.iteration_slots) - 1:
                 await self._write_in_progress(run, request, slot)
 
+        run.active_slot = slot
         replay_ref: ArtifactRef | None = None
         action_lookup = await self._repository.lookup(operation_id=slot.action_operation_id)
         if isinstance(action_lookup, ArtifactFound):
@@ -1393,8 +1406,11 @@ class CandidateResearchService:
         if iteration_index is None:
             return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
         self._start_step(run, iteration_index, "search_and_judge")
+        run.active_slot = slot
         if replay_ref is not None:
             run.active_action_ref = replay_ref
+            saved_action = await self._repository.get(replay_ref, expected_model=CandidateResearchModelActionArtifact)
+            await self._restore_attempt_chain(run, saved_action.content, "action")
         if action_outcome is None and run.semantic_invocations >= 12:
             return await self._failed(
                 run,
@@ -1402,69 +1418,87 @@ class CandidateResearchService:
                 ControlResearchFailure(code=CandidateResearchControlFailureCode.BUDGET_ERROR),
                 None,
             )
-        if action_outcome is None:
-            prompt = build_action_prompt(self._action_context(run, objectives))
-            action_outcome = await self._invoke_action(run, prompt)
-        if isinstance(action_outcome, tuple) and isinstance(action_outcome[0], _PolicyReplay):
-            replay = action_outcome[0]
-            return await self._reject_action(run, request, slot, iteration_index, local_slot,
-                objectives, replay.output, action_outcome[1], replay.rule, replay_ref=replay_ref)
-        if isinstance(action_outcome, LLMResearchFailure):
-            action_ref = replay_ref or await self._write_action_artifact(run, request, slot, iteration_index, action_outcome, None)
-            return await self._failed(run, request, action_outcome, action_ref)
-        if isinstance(action_outcome, ControlResearchFailure):
-            if replay_ref is not None:
-                return await self._failed(run, request, action_outcome, replay_ref)
-            return await self._failed(run, request, action_outcome, None)
-        output, metadata = action_outcome
-        if isinstance(output, (ProposedActionBatch, NoUsefulActionProposed)):
-            try:
-                self._freeze_interests(run, output)
-            except (TypeError, ValueError):
-                action_record = ModelActionControllerRejectedRecord(
-                    record_type="controller_rejected",
-                    output=self._action_output_snapshot(output),
-                    metadata=metadata,
-                    code="action_batch_invalid",
-                )
+        while True:
+            if action_outcome is None:
+                prompt = build_action_prompt(self._action_context(run, objectives))
+                action_outcome = await self._invoke_action(run, prompt)
+            if isinstance(action_outcome, tuple) and isinstance(action_outcome[0], _PolicyReplay):
+                replay = action_outcome[0]
+                return await self._reject_action(run, request, slot, iteration_index, local_slot,
+                    objectives, replay.output, action_outcome[1], replay.rule, replay_ref=replay_ref)
+            if isinstance(action_outcome, LLMResearchFailure):
+                action_ref = replay_ref or await self._write_action_artifact(run, request, slot, iteration_index, action_outcome, None)
+                if run.correction_stop_reason is not None:
+                    run.state = self._state_with(run, no_progress=min(2, run.state.iteration_no_progress_streak + 1))
+                    return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
+                return await self._failed(run, request, action_outcome, action_ref)
+            if isinstance(action_outcome, ControlResearchFailure):
+                if replay_ref is not None:
+                    return await self._failed(run, request, action_outcome, replay_ref)
+                await self._write_control_attempt(run, "action", action_outcome)
+                return await self._failed(run, request, action_outcome, None)
+            output, metadata = action_outcome
+            if isinstance(output, (ProposedActionBatch, NoUsefulActionProposed)):
+                try:
+                    self._freeze_interests(run, output)
+                except (TypeError, ValueError):
+                    action_record = ModelActionControllerRejectedRecord(
+                        record_type="controller_rejected",
+                        output=self._action_output_snapshot(output),
+                        metadata=metadata,
+                        code="action_batch_invalid",
+                    )
+                    action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
+                    self._remember_action_ref(run, action_ref)
+                    return await self._failed(
+                        run,
+                        request,
+                        ControlResearchFailure(code=CandidateResearchControlFailureCode.ACTION_BATCH_INVALID),
+                        action_ref,
+                    )
+            if isinstance(output, NoUsefulActionProposed):
+                if objectives and (not await self._no_useful_action_is_legal(run, output, objectives)
+                        or self._pending_correction(run, objectives[0]) is not None):
+                    rejected = await self._reject_action(run, request, slot, iteration_index, local_slot,
+                        objectives, output, metadata, "no_useful_action_invalid")
+                    if rejected is None:
+                        action_outcome = None
+                        continue
+                    return rejected
+                action_record = ModelActionAcceptedRecord(record_type="accepted", output=self._action_output_snapshot(output), metadata=metadata, action_dispositions=())
                 action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
                 self._remember_action_ref(run, action_ref)
-                return await self._failed(
-                    run,
-                    request,
-                    ControlResearchFailure(code=CandidateResearchControlFailureCode.ACTION_BATCH_INVALID),
-                    action_ref,
-                )
-        if isinstance(output, NoUsefulActionProposed):
-            if objectives and (not await self._no_useful_action_is_legal(run, output, objectives)
-                    or self._pending_correction(run, objectives[0]) is not None):
-                return await self._reject_action(run, request, slot, iteration_index, local_slot,
-                    objectives, output, metadata, "no_useful_action_invalid")
-            action_record = ModelActionAcceptedRecord(record_type="accepted", output=self._action_output_snapshot(output), metadata=metadata, action_dispositions=())
-            action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
-            self._remember_action_ref(run, action_ref)
-            run.state = self._state_with(run, no_progress=min(2, run.state.iteration_no_progress_streak + 1))
-            if run.state.iteration_no_progress_streak >= 2:
-                return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
-            await persist_intermediate_if_needed()
-            return None
-        from .correction import bind_first_named_search
-        actions = bind_first_named_search(output.actions, objectives, run.requirement_context, run.named_searches)
-        output = ProposedActionBatch(actions=tuple(actions), effective_interests=output.effective_interests)
-        validation = self._validate_actions(run, actions, objectives, slot)
-        if validation in {"objective_parameters", "duplicate", "details_already_requested"} and objectives:
-            return await self._reject_action(run, request, slot, iteration_index, local_slot,
-                objectives, output, metadata, validation)
-        if validation is not None:
-            action_record = ModelActionControllerRejectedRecord(record_type="controller_rejected", output=self._action_output_snapshot(output), metadata=metadata, code="action_batch_invalid")
-            action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
-            self._remember_action_ref(run, action_ref)
-            failure = ControlResearchFailure(code=CandidateResearchControlFailureCode.ACTION_BATCH_INVALID)
-            return await self._failed(run, request, failure, action_ref)
-        highest = objectives[0].objective_id if objectives else None
-        if highest is not None and actions[0].objective_id != highest:
-            return await self._reject_action(run, request, slot, iteration_index, local_slot,
-                objectives, output, metadata, "highest_priority_objective_ignored")
+                run.state = self._state_with(run, no_progress=min(2, run.state.iteration_no_progress_streak + 1))
+                if run.state.iteration_no_progress_streak >= 2:
+                    return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
+                await persist_intermediate_if_needed()
+                return None
+            from .correction import bind_first_named_search
+            actions = bind_first_named_search(output.actions, objectives, run.requirement_context, run.named_searches)
+            output = ProposedActionBatch(actions=tuple(actions), effective_interests=output.effective_interests)
+            validation = self._validate_actions(run, actions, objectives, slot)
+            if validation in {"objective_parameters", "duplicate", "details_already_requested"} and objectives:
+                rejected = await self._reject_action(run, request, slot, iteration_index, local_slot,
+                    objectives, output, metadata, validation)
+                if rejected is None:
+                    action_outcome = None
+                    continue
+                return rejected
+            if validation is not None:
+                action_record = ModelActionControllerRejectedRecord(record_type="controller_rejected", output=self._action_output_snapshot(output), metadata=metadata, code="action_batch_invalid")
+                action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
+                self._remember_action_ref(run, action_ref)
+                failure = ControlResearchFailure(code=CandidateResearchControlFailureCode.ACTION_BATCH_INVALID)
+                return await self._failed(run, request, failure, action_ref)
+            highest = objectives[0].objective_id if objectives else None
+            if highest is not None and actions[0].objective_id != highest:
+                rejected = await self._reject_action(run, request, slot, iteration_index, local_slot,
+                    objectives, output, metadata, "highest_priority_objective_ignored")
+                if rejected is None:
+                    action_outcome = None
+                    continue
+                return rejected
+            break
         if objectives:
             from dataclasses import replace
             from .correction import target_fingerprint
@@ -1485,21 +1519,10 @@ class CandidateResearchService:
                 dispositions.append(ActionDispositionSnapshot(action_ordinal=action.ordinal, action_fingerprint=fp, disposition="accepted", reused_observation_ref=None))
         remaining_place = await self._place_remaining(run)
         if remaining_place < 0:
-            action_record = ModelActionAcceptedRecord(record_type="accepted", output=self._action_output_snapshot(output), metadata=metadata, action_dispositions=tuple(dispositions))
-            action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
-            self._remember_action_ref(run, action_ref)
-            return await self._failed(
-                run,
-                request,
-                ControlResearchFailure(
-                    code=(
-                        CandidateResearchControlFailureCode.BUDGET_ERROR
-                        if remaining_place == -1
-                        else CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR
-                    )
-                ),
-                action_ref,
-            )
+            failure = ControlResearchFailure(code=(CandidateResearchControlFailureCode.BUDGET_ERROR
+                if remaining_place == -1 else CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR))
+            await self._write_control_attempt(run, "action", failure)
+            return await self._failed(run, request, failure, None)
         if run.semantic_invocations >= 12:
             dispositions = tuple(ActionDispositionSnapshot(action_ordinal=action.ordinal,
                 action_fingerprint=action_fingerprint(action, run.destination),
@@ -1514,36 +1537,46 @@ class CandidateResearchService:
         for position, action in enumerate(actions):
             if action in fresh_actions and id(action) not in allowed_ids:
                 dispositions[position] = ActionDispositionSnapshot(action_ordinal=action.ordinal, action_fingerprint=dispositions[position].action_fingerprint, disposition="not_admitted_budget_exhausted", reused_observation_ref=None)
-        action_record = ModelActionAcceptedRecord(record_type="accepted", output=self._action_output_snapshot(output), metadata=metadata, action_dispositions=tuple(dispositions))
-        action_ref = await self._write_model_action(run, request, slot, iteration_index, action_record)
-        self._remember_action_ref(run, action_ref)
+        async def publish_action():
+            record = ModelActionAcceptedRecord(record_type="accepted", output=self._action_output_snapshot(output),
+                metadata=metadata, action_dispositions=tuple(dispositions))
+            ref = await self._write_model_action(run, request, slot, iteration_index, record)
+            self._remember_action_ref(run, ref)
+            return ref
+
         if not fresh_actions:
+            await publish_action()
             run.state = self._state_with(run, no_progress=min(2, run.state.iteration_no_progress_streak + 1))
             await persist_intermediate_if_needed()
             return None
-        place_actions = allowed_fresh[: len(slot.place_observation_operation_ids)]
+        place_actions = allowed_fresh[:len(slot.place_observation_operation_ids)]
         if not place_actions:
+            await publish_action()
             return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
         reservation = await self._reserve_places(run, slot, place_actions)
         if reservation[0] == -2:
+            await self._write_control_attempt(run, "action", ControlResearchFailure(
+                code=CandidateResearchControlFailureCode.OPERATION_RESULT_INDETERMINATE))
             return await self._indeterminate(run.run_id)
-        if reservation[0] == -1:
-            for action, operation_id in zip(place_actions[: reservation[1]], slot.place_observation_operation_ids):
+        admitted = {item.ordinal for item in place_actions[:reservation[1]]}
+        if reservation[0] != 1:
+            for position, action in enumerate(actions):
+                if action in fresh_actions and action.ordinal not in admitted:
+                    dispositions[position] = ActionDispositionSnapshot(action_ordinal=action.ordinal,
+                        action_fingerprint=dispositions[position].action_fingerprint,
+                        disposition="not_admitted_budget_exhausted", reused_observation_ref=None)
+        action_ref = await publish_action()
+        if reservation[0] != 1:
+            for action, operation_id in zip(place_actions[:reservation[1]], slot.place_observation_operation_ids):
                 try:
                     ref = await self._write_not_issued(run, slot, iteration_index, action, operation_id)
                 except ArtifactRepositoryError:
                     return await self._failed(run, request, ControlResearchFailure(code=CandidateResearchControlFailureCode.ARTIFACT_ERROR), action_ref)
                 run.observation_refs.append(ref)
-            return await self._failed(run, request, ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR), action_ref)
-        if reservation[0] == -3:
-            for action, operation_id in zip(place_actions[: reservation[1]], slot.place_observation_operation_ids):
-                try:
-                    ref = await self._write_not_issued(run, slot, iteration_index, action, operation_id)
-                except ArtifactRepositoryError:
-                    return await self._failed(run, request, ControlResearchFailure(code=CandidateResearchControlFailureCode.ARTIFACT_ERROR), action_ref)
-                run.observation_refs.append(ref)
-            return await self._failed(run, request, ControlResearchFailure(code=CandidateResearchControlFailureCode.BUDGET_ERROR), action_ref)
-        if reservation[0] == 0:
+            if reservation[0] in {-1, -3}:
+                code = (CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR if reservation[0] == -1
+                        else CandidateResearchControlFailureCode.BUDGET_ERROR)
+                return await self._failed(run, request, ControlResearchFailure(code=code), action_ref)
             return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
         for action in place_actions:
             objective = run.objective_directory[action.objective_id]
@@ -1696,12 +1729,16 @@ class CandidateResearchService:
     @staticmethod
     def _correction_snapshot(run):
         from dataclasses import asdict
-        from .artifacts import ArtifactActionCorrectionState
-        return tuple(ArtifactActionCorrectionState(**asdict(item)) for item in run.corrections)
+        return tuple(CorrectableActionCorrectionState(**asdict(item)) for item in run.corrections)
 
     @staticmethod
     def _start_step(run, iteration_index, kind):
         run.active_iteration = iteration_index
+        run.action_attempt_refs = []
+        run.judgment_attempt_refs = []
+        run.call_info = {}
+        run.correction_stop_reason = None
+        run.action_validation_feedback = None
         run.active_step_kind = kind
         run.active_action_ref = None
         run.active_judgment_ref = None
@@ -1737,25 +1774,51 @@ class CandidateResearchService:
                              objectives, output, metadata, rule, *, replay_ref=None):
         from .correction import record_rejection
         output = TypeAdapter(ActionModelOutcome).validate_json(output.model_dump_json(), strict=True)
-        if slot.action_operation_id not in run.rejected_operations:
+        if replay_ref is None:
             run.corrections = record_rejection(run.corrections, run.state, objectives[0],
                 getattr(output, "actions", ()), run.destination, rule, run.objective_history)
-            run.rejected_operations.add(slot.action_operation_id)
-        if replay_ref is None:
             record = ModelActionPolicyRejectedRecord(record_type="policy_rejected",
                 output=self._action_output_snapshot(output), metadata=metadata, reason_code=rule)
+            run.action_validation_feedback = self._action_error_feedback(run, slot, output, objectives, rule)
+            await self._write_attempt(run, "action", record, recovery_code=rule)
+            await self._record_action_feedback(run, record)
+        stopped = correction_stop(used=run.output_recoveries_used, semantic_used=run.semantic_invocations, kind="action")
+        if stopped is None:
+            if replay_ref is not None:
+                return await self._indeterminate(run.run_id)
+            return None
+        run.correction_stop_reason = stopped
+        if replay_ref is None:
             ref = await self._write_model_action(run, request, slot, iteration_index, record)
-        else:
-            ref = replay_ref
-        self._remember_action_ref(run, ref)
-        correction = self._pending_correction(run, objectives[0])
+            self._remember_action_ref(run, ref)
         run.state = self._state_with(run, no_progress=min(2, run.state.iteration_no_progress_streak + 1))
-        if (correction.attempts >= 2 or local_slot == len(request.operation_plan.iteration_slots) - 1
-                or run.semantic_invocations >= 12):
-            return await self._failed(run, request,
-                ControlResearchFailure(code=CandidateResearchControlFailureCode.ACTION_CORRECTION_EXHAUSTED), ref)
-        await self._write_in_progress(run, request, slot)
-        return None
+        return await self._finish(run, request, request.operation_plan.terminal_successor_operation_id, transition_kind="normal")
+
+    def _action_error_feedback(self, run, slot, output, objectives, rule):
+        by_id = {item.objective_id: item for item in objectives}
+        details = []
+        actions = getattr(output, "actions", ())
+        fingerprints = [action_fingerprint(item, run.destination) for item in actions]
+        for action, fingerprint in zip(actions, fingerprints):
+            objective = by_id[action.objective_id]
+            error = self._validate_actions(run, (action.model_copy(update={"ordinal": 0}),), objectives, slot)
+            if fingerprints.count(fingerprint) > 1:
+                error = "duplicate"
+            if action.ordinal == 0 and action.objective_id != objectives[0].objective_id:
+                error = "highest_priority_objective_ignored"
+            details.append({
+                "ordinal": action.ordinal, "objective_id": action.objective_id,
+                "error_code": error,
+                "action": action.model_dump(mode="json"),
+                "allowed_actions": CandidateResearchService._allowed_objective_actions(run, objective),
+                "allowed_detail_uids": CandidateResearchService._objective_detail_uids(run, objective),
+                "objective": objective.model_dump(mode="json"),
+                "duplicate_in_batch": fingerprints.count(fingerprint) > 1,
+            })
+        return {"code": rule, "required_first_objective_id": objectives[0].objective_id,
+                "invalid_action_ordinals": tuple(item["ordinal"] for item in details if item["error_code"]),
+                "rejected_actions": details,
+                "required": "Submit a complete corrected batch. Keep only actions allowed by their objectives; no action in this batch has been executed."}
 
     @staticmethod
     def _action_context(run: _Run, objectives: Sequence[ResearchObjective]) -> dict[str, object]:
@@ -1796,6 +1859,7 @@ class CandidateResearchService:
                 "details_status": candidate.details.status,
             })
         return {
+            "action_validation_feedback": getattr(run, "action_validation_feedback", None),
             "correction": (CandidateResearchService._pending_correction(run, objectives[0]).project(objectives[0], CandidateResearchService._allowed_objective_actions(run, objectives[0]))
                 if objectives and CandidateResearchService._pending_correction(run, objectives[0]) is not None else None),
             "required_objective_id": objectives[0].objective_id if objectives else None,
@@ -1960,7 +2024,7 @@ class CandidateResearchService:
         if not isinstance(lookup, ArtifactFound):
             raise RuntimeError("action artifact lookup contract violation")
         ref = lookup.ref
-        if ref.artifact_type != "candidate_research.model_action" or ref.schema_version != "2.0" or ref.operation_id != operation_id or ref.operation_id.run_id != run.run_id:
+        if ref.artifact_type != "candidate_research.model_action" or ref.schema_version != "3.0" or ref.operation_id != operation_id or ref.operation_id.run_id != run.run_id:
             return None
         try:
             read = await self._repository.get(ref, expected_model=CandidateResearchModelActionArtifact)
@@ -1976,11 +2040,7 @@ class CandidateResearchService:
         ):
             return None
         record = unwrap_model_record(artifact.result)
-        run.action_recoveries = artifact.result.attempts if artifact.result.record_type == "recovered" else ()
-        if ref not in run.action_refs:
-            self._account_replayed_recoveries(run, artifact.result)
-            self._account_replayed_metadata(run, artifact.invocation_index, getattr(record, "metadata", None))
-            self._account_replayed_failure(run, record)
+        await self._restore_attempt_chain(run, artifact, "action")
         if isinstance(record, ModelActionLLMFailureRecord):
             error = self._public_llm_error(record.error)
             return artifact.iteration_index, LLMResearchFailure(invocation_kind=ResearchInvocationKind.ACTION, error=error), ref
@@ -2073,31 +2133,22 @@ class CandidateResearchService:
     @staticmethod
     def _reserve_output_recovery(run, failure, *, judgment=False):
         code = None
-        metadata = None
         if (isinstance(failure, LLMResearchFailure) and not failure.error.possible_duplicate
-                and failure.error.code in {LLMErrorCode.STRUCTURED_OUTPUT_INVALID, LLMErrorCode.OUTPUT_TRUNCATED}):
+                and failure.error.code.value in OUTPUT_CODES):
             code = failure.error.code.value
         elif (judgment and run.judgment_recoverable and isinstance(failure, ControlResearchFailure)
                 and failure.code in {CandidateResearchControlFailureCode.JUDGMENT_PATCH_INVALID,
                                      CandidateResearchControlFailureCode.JUDGMENT_REQUIRED_MISSING}
                 and run.last_judgment_metadata is not None and not run.last_judgment_metadata.possible_duplicate):
-            code, metadata = run.judgment_recovery_code, run.last_judgment_metadata
-        if code is None or run.output_recoveries_used >= 2 or run.semantic_invocations >= 12:
+            code = run.judgment_recovery_code
+        if code is None:
             return None
-        run.output_recoveries_used += 1
-        return OutputRecoveryAttempt(recovery_number=run.output_recoveries_used,
-            invocation_index=run.semantic_invocations - 1, code=code, metadata=metadata)
-
-    @staticmethod
-    def _account_replayed_recoveries(run, record):
-        if record.record_type != "recovered":
-            return
-        for attempt in record.attempts:
-            run.output_recoveries_used = max(run.output_recoveries_used, attempt.recovery_number)
-            CandidateResearchService._account_replayed_metadata(run, attempt.invocation_index, attempt.metadata)
-            if attempt.metadata is None:
-                run.provider_attempts_complete = False
-                run.usage_complete = False
+        stopped = correction_stop(used=run.output_recoveries_used, semantic_used=run.semantic_invocations,
+                                  kind="judgment" if judgment else "action")
+        if stopped is not None:
+            run.correction_stop_reason = stopped
+            return None
+        return CorrectionFeedback(code=code, recovery_number=run.output_recoveries_used + 1)
 
     @staticmethod
     def _account_replayed_failure(run, record):
@@ -2108,77 +2159,220 @@ class CandidateResearchService:
             run.provider_attempts_complete = False
             run.usage_complete = False
 
-    @staticmethod
-    def _account_cancelled_invocation(run, admitted_before):
-        admitted_after = getattr(run.operation, "semantic_invocations_consumed", None)
-        if (type(admitted_before) is int and type(admitted_after) is int
-                and admitted_after - admitted_before in (0, 1)):
-            delta = admitted_after - admitted_before
-            run.semantic_invocations += delta
-            if delta == 0:
-                return
-        else:
-            run.indeterminate = True
-            if run.semantic_invocations == 0:
-                return
-        # A cancelled request has no public final metadata; do not invent usage.
-        run.provider_attempts_complete = False
-        run.usage_complete = False
-
-    @staticmethod
-    def _recovered_record(record, attempts, *, judgment=False):
-        if not attempts:
-            return record
-        model = ModelJudgmentRecoveredRecord if judgment else ModelActionRecoveredRecord
-        return model(record_type="recovered", attempts=attempts, final=record)
-
-    async def _invoke_action(self, run: _Run, prompt: PromptEnvelope) -> tuple[object, ArtifactInvocationMetadataSnapshot] | LLMResearchFailure | ControlResearchFailure:
+    async def _invoke_action(self, run: _Run, prompt: PromptEnvelope):
         from .correction import recovery_prompt
         original = prompt
-        run.action_recoveries = ()
         while True:
             result = await self._invoke_action_once(run, prompt)
-            attempt = self._reserve_output_recovery(run, result)
-            if attempt is None:
+            if not isinstance(result, LLMResearchFailure):
                 return result
-            run.action_recoveries += (attempt,)
-            prompt = recovery_prompt(original, code=attempt.code, recovery_number=attempt.recovery_number)
+            code = result.error.code.value if not result.error.possible_duplicate and result.error.code.value in OUTPUT_CODES else None
+            record = ModelActionLLMFailureRecord(record_type="llm_failure", error=ArtifactLLMErrorSnapshot(**_python_model(result.error)))
+            await self._write_attempt(run, "action", record, recovery_code=code)
+            feedback = self._reserve_output_recovery(run, result)
+            if feedback is None:
+                return result
+            prompt = recovery_prompt(original, code=feedback.code, recovery_number=feedback.recovery_number)
+
+    async def _call_model(self, run, kind, prompt, schema):
+        slot = run.active_slot
+        if slot is None:
+            raise RuntimeError("model invocation has no active research slot")
+        refs = run.action_attempt_refs if kind == "action" else run.judgment_attempt_refs
+        ids = slot.action_attempt_operation_ids if kind == "action" else slot.judgment_attempt_operation_ids
+        if len(refs) >= len(ids):
+            raise RuntimeError("invocation attempt plan exhausted")
+        if refs and correction_stop(used=run.output_recoveries_used,
+                semantic_used=run.semantic_invocations, kind=kind) is not None:
+            raise _OperationReplayIndeterminate()
+        if run.semantic_invocations >= 12:
+            raise _OperationReplayIndeterminate()
+        prior = await self._repository.lookup(operation_id=ids[len(refs)])
+        if not isinstance(prior, ArtifactAbsent):
+            run.indeterminate = True
+            raise _OperationReplayIndeterminate()
+        correction = bool(refs)
+        info = dict(semantic_index=run.semantic_invocations, semantic_cost=None,
+                    is_correction=correction, correction_number=run.output_recoveries_used + 1 if correction else None,
+                    attempt_index=len(refs), trigger_ref=refs[-1] if refs else None,
+                    persisted=None, feedback_recorded=False)
+        run.call_info[kind] = info
+        before = getattr(run.operation, "semantic_invocations_consumed", None)
+        result = None
+        cancelled = False
+        try:
+            with interaction_call("research_" + kind) as identity:
+                result = await run.operation.ainvoke_structured(prompt, schema)
+            return result, identity
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            after = getattr(run.operation, "semantic_invocations_consumed", None)
+            counter_conflict = type(before) is int and type(after) is int and after - before not in (0, 1)
+            if type(before) is int and type(after) is int:
+                cost = None if counter_conflict else after - before
+            elif isinstance(result, LLMInvocationFailure):
+                cost = self._semantic_cost(result.error.code)
+            elif isinstance(result, StructuredInvocationSuccess):
+                cost = 1
+            else:
+                cost = None
+            expected_cost = (1 if isinstance(result, StructuredInvocationSuccess)
+                             else self._semantic_cost(result.error.code) if isinstance(result, LLMInvocationFailure) else None)
+            counter_conflict = counter_conflict or expected_cost is not None and cost != expected_cost
+            if counter_conflict:
+                cost = None
+            info["semantic_cost"] = cost
+            if cost is not None:
+                run.semantic_invocations += cost
+            if correction and cost == 1:
+                run.output_recoveries_used += 1
+            if cost is None:
+                run.provider_attempts_complete = run.usage_complete = False
+            elif cost and not isinstance(result, StructuredInvocationSuccess):
+                run.provider_attempts_complete = run.usage_complete = False
+            if isinstance(result, StructuredInvocationSuccess) and cost == 1:
+                info["metadata"] = self._metadata(result.metadata)
+            if not cancelled and counter_conflict:
+                raise _OperationReplayIndeterminate()
+
+    @staticmethod
+    def _model_contract_failure(run, kind):
+        info = run.call_info.get(kind)
+        if info is not None and info["semantic_cost"] != 0 and info.get("metadata") is None:
+            run.provider_attempts_complete = run.usage_complete = False
+        uncertain = info is not None and info["semantic_cost"] is None
+        code = (CandidateResearchControlFailureCode.OPERATION_RESULT_INDETERMINATE if uncertain
+                else CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+        return ControlResearchFailure(code=code)
+
+    async def _write_attempt(self, run, kind, record=None, *, recovery_code=None, control=None):
+        info = run.call_info.get(kind)
+        if info is None:
+            return None
+        slot = run.active_slot
+        refs = run.action_attempt_refs if kind == "action" else run.judgment_attempt_refs
+        ids = slot.action_attempt_operation_ids if kind == "action" else slot.judgment_attempt_operation_ids
+        if info["semantic_cost"] is None:
+            result = AttemptControlFailure(result_type="indeterminate",
+                code=CandidateResearchControlFailureCode.OPERATION_RESULT_INDETERMINATE, metadata=info.get("metadata"))
+            recovery_code = None
+        elif control is not None:
+            result = AttemptControlFailure(result_type="control_failure", code=control.code, metadata=info.get("metadata"))
+        elif kind == "action":
+            result = AttemptActionResult(result_type="action_result", record=record)
+        else:
+            result = AttemptJudgmentResult(result_type="judgment_result", record=record)
+        if info["persisted"] is not None:
+            if info["saved_result"] != result:
+                raise _OperationReplayIndeterminate()
+            return info["persisted"]
+        artifact = CandidateResearchInvocationAttemptArtifact(
+            schema_version="1.0", run_id=run.run_id, mode=run.mode, kind=kind,
+            main_operation_id=slot.action_operation_id if kind == "action" else slot.judgment_operation_id,
+            invocation_slot_index=slot.invocation_slot_index, iteration_index=run.active_iteration,
+            attempt_index=info["attempt_index"], semantic_index=info["semantic_index"],
+            semantic_cost=info["semantic_cost"], is_correction=info["is_correction"],
+            correction_number=info["correction_number"], trigger_ref=info["trigger_ref"],
+            recovery_code=recovery_code, result=result)
+        ref = await self._put(run, ids[info["attempt_index"]], "candidate_research.invocation_attempt", artifact)
+        refs.append(ref)
+        run.invocation_attempt_refs.append(ref)
+        info["persisted"] = ref
+        info["saved_result"] = result
+        return ref
+
+    async def _write_control_attempt(self, run, kind, failure):
+        return await self._write_attempt(run, kind, control=failure)
+
+    async def _restore_attempt_chain(self, run, artifact, kind):
+        slot = run.active_slot
+        ids = slot.action_attempt_operation_ids if kind == "action" else slot.judgment_attempt_operation_ids
+        main_id = slot.action_operation_id if kind == "action" else slot.judgment_operation_id
+        restored, previous = [], None
+        for index, ref in enumerate(artifact.attempt_refs):
+            saved = await self._repository.get(ref, expected_model=CandidateResearchInvocationAttemptArtifact)
+            attempt = CandidateResearchInvocationAttemptArtifact.model_validate_json(saved.content.model_dump_json(), strict=True)
+            if (saved.ref != ref or content_digest(attempt) != ref.content_hash
+                    or len(canonical_json_bytes(attempt)) != ref.size_bytes or ref.operation_id != ids[index]
+                    or attempt.main_operation_id != main_id or attempt.run_id != run.run_id
+                    or attempt.mode != artifact.mode or attempt.kind != kind
+                    or attempt.iteration_index != artifact.iteration_index
+                    or attempt.invocation_slot_index != artifact.invocation_slot_index
+                    or attempt.attempt_index != index or attempt.trigger_ref != (restored[-1] if restored else None)
+                    or previous is not None and previous.recovery_code is None):
+                raise _OperationReplayIndeterminate()
+            restored.append(ref)
+            previous = attempt
+            if ref in run.invocation_attempt_refs:
+                continue
+            if attempt.semantic_cost is None or attempt.semantic_index != run.semantic_invocations:
+                raise _OperationReplayIndeterminate()
+            if attempt.is_correction and attempt.correction_number != run.output_recoveries_used + 1:
+                raise _OperationReplayIndeterminate()
+            run.invocation_attempt_refs.append(ref)
+            record = getattr(attempt.result, "record", None)
+            if attempt.semantic_cost == 1:
+                self._account_replayed_metadata(run, attempt.semantic_index, getattr(record, "metadata", None))
+                if attempt.is_correction:
+                    run.output_recoveries_used += 1
+                if record is not None:
+                    self._account_replayed_failure(run, record)
+        if (previous is None or previous.result.result_type != kind + "_result"
+                or previous.result.record != artifact.result
+                or artifact.invocation_index != max(0, previous.semantic_index + previous.semantic_cost - 1)):
+            raise _OperationReplayIndeterminate()
+        if kind == "action":
+            run.action_attempt_refs = restored
+        else:
+            run.judgment_attempt_refs = restored
+        if previous.recovery_code is not None:
+            stopped = correction_stop(used=run.output_recoveries_used,
+                semantic_used=run.semantic_invocations, kind=kind)
+            if stopped is None:
+                raise _OperationReplayIndeterminate()
+            run.correction_stop_reason = stopped
+        return previous
+
+    @staticmethod
+    def _judgment_failure_record(run, failure):
+        if isinstance(failure, LLMResearchFailure):
+            return ModelJudgmentLLMFailureRecord(record_type="llm_failure", error=ArtifactLLMErrorSnapshot(**_python_model(failure.error)))
+        if (run.last_judgment_patch is not None and run.last_judgment_metadata is not None
+                and failure.code in {CandidateResearchControlFailureCode.JUDGMENT_PATCH_INVALID,
+                                     CandidateResearchControlFailureCode.JUDGMENT_REQUIRED_MISSING,
+                                     CandidateResearchControlFailureCode.STATE_INVARIANT_FAILED}):
+            return ModelJudgmentControllerRejectedRecord(record_type="controller_rejected",
+                proposed_patch=JudgmentPatchModelSnapshot.model_validate(_python_model(run.last_judgment_patch), strict=True),
+                metadata=run.last_judgment_metadata, code=failure.code.value)
+        return None
 
     async def _invoke_action_once(self, run: _Run, prompt: PromptEnvelope) -> tuple[object, ArtifactInvocationMetadataSnapshot] | LLMResearchFailure | ControlResearchFailure:
         admitted_before = getattr(run.operation, "semantic_invocations_consumed", None)
         try:
-            with interaction_call("research_action") as identity:
-                from .correction import bound_action_schema
-                highest = next(iter(run.objective_directory.values()), None)
-                result = await run.operation.ainvoke_structured(prompt, bound_action_schema(_ActionModelEnvelope, highest,
-                    self._allowed_objective_actions(run, highest) if highest else (),
-                    self._objective_detail_uids(run, highest) if highest else ()))
+            from .correction import bound_action_schema
+            highest = next(iter(run.objective_directory.values()), None)
+            result, identity = await self._call_model(run, "action", prompt, bound_action_schema(_ActionModelEnvelope, highest,
+                self._allowed_objective_actions(run, highest) if highest else (),
+                self._objective_detail_uids(run, highest) if highest else ()))
             run.action_interaction = identity
+        except _OperationReplayIndeterminate:
+            return ControlResearchFailure(code=CandidateResearchControlFailureCode.OPERATION_RESULT_INDETERMINATE)
         except (RuntimeError, TypeError, ValueError, AttributeError):
-            run.semantic_invocations += 1
-            run.provider_attempts_complete = False
-            run.usage_complete = False
-            return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+            return self._model_contract_failure(run, "action")
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
-                self._account_cancelled_invocation(run, admitted_before)
                 raise
-            run.semantic_invocations += 1
-            run.provider_attempts_complete = False
-            run.usage_complete = False
-            return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+            return self._model_contract_failure(run, "action")
         if isinstance(result, LLMInvocationFailure):
             cost = self._semantic_cost(result.error.code)
-            run.semantic_invocations += cost
             if cost:
                 run.provider_attempts_complete = False
                 run.usage_complete = False
             return LLMResearchFailure(invocation_kind=ResearchInvocationKind.ACTION, error=result.error)
         if not isinstance(result, StructuredInvocationSuccess):
-            run.provider_attempts_complete = False
-            run.usage_complete = False
-            return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
-        run.semantic_invocations += 1
+            return self._model_contract_failure(run, "action")
         metadata = self._metadata(result.metadata)
         run.provider_attempts += result.metadata.provider_attempts
         self._add_usage(run, result.metadata)
@@ -2238,12 +2432,20 @@ class CandidateResearchService:
         by_id = {item.objective_id: item for item in objectives}
         if len(actions) > 8 or len(actions) > len(slot.place_observation_operation_ids):
             return "capacity"
-        fingerprints = tuple(action_fingerprint(action, run.destination) for action in actions)
-        if len(set(fingerprints)) != len(fingerprints):
-            return "duplicate"
         known_uids = {item.core.uid for item in run.state.candidates}
         if tuple(actions[index].ordinal for index in range(len(actions))) != tuple(range(len(actions))):
             return "ordinal"
+        for action in actions:
+            if action.objective_id not in by_id:
+                return "objective"
+            if isinstance(action, ProposedDetailsAction) and action.uid not in known_uids:
+                return "uid"
+            if (isinstance(action, ProposedSearchAction) and getattr(action.anchor, "anchor_type", None) == "candidate"
+                    and action.anchor.uid not in known_uids):
+                return "anchor"
+        fingerprints = tuple(action_fingerprint(action, run.destination) for action in actions)
+        if len(set(fingerprints)) != len(fingerprints):
+            return "duplicate"
         for action in actions:
             objective = by_id.get(action.objective_id)
             if objective is None:
@@ -2600,6 +2802,7 @@ class CandidateResearchService:
 
     async def _judgment(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int, prepared=None) -> LLMResearchFailure | ControlResearchFailure | _JudgmentReplayIndeterminate | None:
         run.judgment_recoveries = ()
+        run.active_slot = slot
         existing = await self._repository.lookup(operation_id=slot.judgment_operation_id)
         saved_job = None
         if isinstance(existing, ArtifactFound):
@@ -2626,11 +2829,20 @@ class CandidateResearchService:
         while True:
             run.judgment_recoverable = False
             result = await self._judgment_once(run, request, slot, iteration_index, feedback)
-            attempt = self._reserve_output_recovery(run, result, judgment=True)
-            if attempt is None:
+            if result is None or isinstance(result, _JudgmentReplayIndeterminate):
                 return result
-            run.judgment_recoveries += (attempt,)
-            feedback = attempt
+            record = self._judgment_failure_record(run, result)
+            if record is not None:
+                code = (run.judgment_recovery_code if run.judgment_recoverable
+                        and run.last_judgment_metadata is not None and not run.last_judgment_metadata.possible_duplicate else
+                        result.error.code.value if isinstance(result, LLMResearchFailure)
+                        and not result.error.possible_duplicate and result.error.code.value in OUTPUT_CODES else None)
+                await self._write_attempt(run, "judgment", record, recovery_code=code)
+            else:
+                await self._write_control_attempt(run, "judgment", result)
+            feedback = self._reserve_output_recovery(run, result, judgment=True)
+            if feedback is None:
+                return result
 
     async def _judgment_once(self, run, request, slot, iteration_index, recovery_feedback=None):
         prompt_payload = run.judgment_payload
@@ -2648,7 +2860,7 @@ class CandidateResearchService:
             ref = existing.ref
             if (
                 ref.artifact_type != "candidate_research.model_judgment"
-                or ref.schema_version != "3.0"
+                or ref.schema_version != "4.0"
                 or ref.operation_id != slot.judgment_operation_id
                 or ref.operation_id.run_id != run.run_id
             ):
@@ -2669,11 +2881,7 @@ class CandidateResearchService:
             ):
                 return _JudgmentReplayIndeterminate()
             record = unwrap_model_record(artifact.result)
-            run.judgment_recoveries = artifact.result.attempts if artifact.result.record_type == "recovered" else ()
-            if ref not in run.judgment_refs:
-                self._account_replayed_recoveries(run, artifact.result)
-                self._account_replayed_metadata(run, artifact.invocation_index, getattr(record, "metadata", None))
-                self._account_replayed_failure(run, record)
+            await self._restore_attempt_chain(run, artifact, "judgment")
             self._remember_judgment_ref(run, ref)
             if isinstance(record, ModelJudgmentLLMFailureRecord):
                 return LLMResearchFailure(invocation_kind=ResearchInvocationKind.JUDGMENT, error=self._public_llm_error(record.error))
@@ -2721,33 +2929,23 @@ class CandidateResearchService:
                                      recovery_number=recovery_feedback.recovery_number)
         admitted_before = getattr(run.operation, "semantic_invocations_consumed", None)
         try:
-            with interaction_call("research_judgment") as identity:
-                result = await run.operation.ainvoke_structured(prompt, JudgmentPatch)
+            result, identity = await self._call_model(run, "judgment", prompt, JudgmentPatch)
+        except _OperationReplayIndeterminate:
+            return ControlResearchFailure(code=CandidateResearchControlFailureCode.OPERATION_RESULT_INDETERMINATE)
         except (RuntimeError, TypeError, ValueError, AttributeError):
-            run.semantic_invocations += 1
-            run.provider_attempts_complete = False
-            run.usage_complete = False
-            return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+            return self._model_contract_failure(run, "judgment")
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
-                self._account_cancelled_invocation(run, admitted_before)
                 raise
-            run.semantic_invocations += 1
-            run.provider_attempts_complete = False
-            run.usage_complete = False
-            return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
+            return self._model_contract_failure(run, "judgment")
         if isinstance(result, LLMInvocationFailure):
             cost = self._semantic_cost(result.error.code)
-            run.semantic_invocations += cost
             if cost:
                 run.provider_attempts_complete = False
                 run.usage_complete = False
             return LLMResearchFailure(invocation_kind=ResearchInvocationKind.JUDGMENT, error=result.error)
         if not isinstance(result, StructuredInvocationSuccess):
-            run.provider_attempts_complete = False
-            run.usage_complete = False
-            return ControlResearchFailure(code=CandidateResearchControlFailureCode.DEPENDENCY_CONTRACT_ERROR)
-        run.semantic_invocations += 1
+            return self._model_contract_failure(run, "judgment")
         run.provider_attempts += result.metadata.provider_attempts
         self._add_usage(run, result.metadata)
         run.last_judgment_metadata = self._metadata(result.metadata)
@@ -2809,7 +3007,8 @@ class CandidateResearchService:
             return ControlResearchFailure(code=CandidateResearchControlFailureCode.STATE_INVARIANT_FAILED)
         resolved = self._resolve_patch(patch, refs, run.state.requirement_group_states)
         record = ModelJudgmentAcceptedRecord(record_type="accepted", patch=resolved, metadata=self._metadata(result.metadata))
-        artifact = CandidateResearchModelJudgmentArtifact(schema_version="3.0", job=run.judgment_job, run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=OBSERVATION_PROMPT_VERSION, prompt_sha256=OBSERVATION_PROMPT_CONTENT_DIGEST, evidence_refs=refs, result=self._recovered_record(record, run.judgment_recoveries, judgment=True))
+        await self._write_attempt(run, "judgment", record)
+        artifact = CandidateResearchModelJudgmentArtifact(schema_version="4.0", job=run.judgment_job, run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=OBSERVATION_PROMPT_VERSION, prompt_sha256=OBSERVATION_PROMPT_CONTENT_DIGEST, evidence_refs=refs, result=record, attempt_refs=tuple(run.judgment_attempt_refs))
         ref = await self._put(run, slot.judgment_operation_id, "candidate_research.model_judgment", artifact)
         self._remember_judgment_ref(run, ref)
         run.assessments = proposed_assessments
@@ -3239,7 +3438,7 @@ class CandidateResearchService:
             ref = existing.ref
             if (
                 ref.artifact_type != "candidate_research.candidate_set"
-                or ref.schema_version != "4.0"
+                or ref.schema_version != "5.0"
                 or ref.operation_id != slot.candidate_set_operation_id
                 or ref.operation_id.run_id != run.run_id
             ):
@@ -3262,7 +3461,7 @@ class CandidateResearchService:
             raise ArtifactRepositoryUsageError()
         run.state = await self._state_budget(run)
         base_ref = run.predecessor_ref if run.mode is ResearchMode.SUPPLEMENTAL else None
-        artifact = CandidateResearchArtifact(schema_version="4.0", correction_state=self._correction_snapshot(run), qualification_state=self._qualification_snapshot(run), run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=InProgressCandidateSetRecord(record_type="in_progress", state=run.state))
+        artifact = CandidateResearchArtifact(schema_version="5.0", invocation_attempt_refs=tuple(run.invocation_attempt_refs), correction_state=self._correction_snapshot(run), qualification_state=self._qualification_snapshot(run), run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=InProgressCandidateSetRecord(record_type="in_progress", state=run.state))
         ref = await self._put(run, slot.candidate_set_operation_id, "candidate_research.candidate_set", artifact)
         run.last_consistent_ref = ref
         return ref
@@ -3293,6 +3492,9 @@ class CandidateResearchService:
             if run.semantic_invocations >= 12 or (
                     run.semantic_invocations == 11 and await self._pending_judgment(run) is None):
                 stop += (CandidateResearchStopReason.SEMANTIC_BUDGET_INSUFFICIENT,)
+            if run.correction_stop_reason is not None and run.correction_stop_reason not in stop:
+                stop += (run.correction_stop_reason,)
+            stop = tuple(sorted(set(stop), key=lambda item: list(CandidateResearchStopReason).index(item)))
             if not stop:
                 return await self._failed(
                     run,
@@ -3303,7 +3505,8 @@ class CandidateResearchService:
             record = IncompleteCandidateSetRecord(record_type="incomplete", transition_kind=transition_kind, state=self._state_pending(run.state, gaps), counts=run.state.counts, coverage=run.state.coverage, budgets=run.state.budgets, gaps=gaps, stop_reasons=stop)
             run.state = record.state
         base_ref = run.predecessor_ref if run.mode is ResearchMode.SUPPLEMENTAL else None
-        artifact = CandidateResearchArtifact(schema_version="4.0", correction_state=self._correction_snapshot(run), qualification_state=self._qualification_snapshot(run), run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=record)
+        artifact = CandidateResearchArtifact(schema_version="5.0", invocation_attempt_refs=tuple(run.invocation_attempt_refs), correction_state=self._correction_snapshot(run), qualification_state=self._qualification_snapshot(run), run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=record)
+        await self._validate_qualification_history(artifact)
         try:
             ref = await self._put(run, terminal_id, "candidate_research.candidate_set", artifact)
         except ArtifactRepositoryError:
@@ -3313,7 +3516,7 @@ class CandidateResearchService:
             read = await self._repository.get(ref, expected_model=CandidateResearchArtifact)
         except ArtifactRepositoryError:
             return self._memory_persistence_failure(run)
-        if read.ref != ref or read.content.schema_version != "4.0" or read.content.run_id != run.run_id or read.content.invocation_request_digest != run.request_digest:
+        if read.ref != ref or read.content.schema_version != "5.0" or read.content.run_id != run.run_id or read.content.invocation_request_digest != run.request_digest:
             return self._memory_persistence_failure(run)
         return self._outcome_from_record(ref, read.content.record)
 
@@ -3326,7 +3529,7 @@ class CandidateResearchService:
         snapshot_failure = self._failure_snapshot(failure)
         record = FailedCandidateSetRecord(record_type="failed", state=run.state, failure=snapshot_failure, last_consistent_candidate_set_ref=run.last_consistent_ref, failure_artifact_ref=failure_ref, budgets=run.state.budgets, retryable=self._retryable(failure), possible_duplicate=self._duplicate(failure))
         base_ref = run.predecessor_ref if run.mode is ResearchMode.SUPPLEMENTAL else None
-        artifact = CandidateResearchArtifact(schema_version="4.0", correction_state=self._correction_snapshot(run), qualification_state=self._qualification_snapshot(run), run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=record)
+        artifact = CandidateResearchArtifact(schema_version="5.0", invocation_attempt_refs=tuple(run.invocation_attempt_refs), correction_state=self._correction_snapshot(run), qualification_state=self._qualification_snapshot(run), run_id=run.run_id, mode=run.mode, predecessor_ref=base_ref, invocation_request_digest=run.request_digest, record=record)
         try:
             ref = await self._put(run, request.operation_plan.terminal_successor_operation_id, "candidate_research.candidate_set", artifact)
         except ArtifactRepositoryError:
@@ -3336,21 +3539,27 @@ class CandidateResearchService:
             read = await self._repository.get(ref, expected_model=CandidateResearchArtifact)
         except ArtifactRepositoryError:
             return self._memory_persistence_failure(run)
-        if read.ref != ref or read.content.schema_version != "4.0" or read.content.run_id != run.run_id or read.content.invocation_request_digest != run.request_digest:
+        if read.ref != ref or read.content.schema_version != "5.0" or read.content.run_id != run.run_id or read.content.invocation_request_digest != run.request_digest:
             return self._memory_persistence_failure(run)
         return self._outcome_from_record(ref, read.content.record)
 
     async def _write_action_artifact(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int, failure: LLMResearchFailure, _: object) -> ArtifactRef:
         record = ModelActionLLMFailureRecord(record_type="llm_failure", error=ArtifactLLMErrorSnapshot(**_python_model(failure.error)))
-        artifact = CandidateResearchModelActionArtifact(schema_version="2.0", run_id=run.run_id, mode=run.mode, invocation_index=max(0, run.semantic_invocations - 1), invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=ACTION_PROMPT_VERSION, prompt_sha256=ACTION_PROMPT_CONTENT_DIGEST, input_digest=run.request_digest, result=self._recovered_record(record, run.action_recoveries))
+        await self._write_attempt(run, "action", record)
+        artifact = CandidateResearchModelActionArtifact(schema_version="3.0", run_id=run.run_id, mode=run.mode, invocation_index=max(0, run.semantic_invocations - 1), invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=ACTION_PROMPT_VERSION, prompt_sha256=ACTION_PROMPT_CONTENT_DIGEST, input_digest=run.request_digest, result=record, attempt_refs=tuple(run.action_attempt_refs))
         ref = await self._put(run, slot.action_operation_id, "candidate_research.model_action", artifact)
         self._remember_action_ref(run, ref)
         return ref
 
     async def _write_model_action(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int, record: object) -> ArtifactRef:
-        artifact = CandidateResearchModelActionArtifact(schema_version="2.0", run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=ACTION_PROMPT_VERSION, prompt_sha256=ACTION_PROMPT_CONTENT_DIGEST, input_digest=run.request_digest, result=self._recovered_record(record, run.action_recoveries))
+        await self._write_attempt(run, "action", record)
+        artifact = CandidateResearchModelActionArtifact(schema_version="3.0", run_id=run.run_id, mode=run.mode, invocation_index=run.semantic_invocations - 1, invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=ACTION_PROMPT_VERSION, prompt_sha256=ACTION_PROMPT_CONTENT_DIGEST, input_digest=run.request_digest, result=record, attempt_refs=tuple(run.action_attempt_refs))
         ref = await self._put(run, slot.action_operation_id, "candidate_research.model_action", artifact)
-        if run.action_interaction is not None:
+        await self._record_action_feedback(run, record)
+        return ref
+
+    async def _record_action_feedback(self, run, record):
+        if run.action_interaction is not None and not run.call_info.get("action", {}).get("feedback_recorded", False):
             accepted = record.record_type == "accepted"
             code = None if accepted else getattr(record, "code", getattr(record, "reason_code", "action_failed"))
             await run.action_interaction.record_validation(stage="policy" if record.record_type == "policy_rejected" else "batch", passed=accepted, code=code)
@@ -3365,7 +3574,7 @@ class CandidateResearchService:
                         outcome="cached" if cached else "not_issued" if accepted else "rejected",
                         feedback=json.dumps({"status": disposition.disposition if accepted else record.record_type, "code": code}),
                         observation_ref_json=None if reused is None else reused.model_dump_json())
-        return ref
+            run.call_info["action"]["feedback_recorded"] = True
 
     async def _write_judgment_failure(self, run: _Run, request: CandidateResearchInitialRequest | CandidateResearchSupplementalRequest, slot: ResearchIterationOperationIds, iteration_index: int, failure: LLMResearchFailure | ControlResearchFailure) -> ArtifactRef:
         if isinstance(failure, LLMResearchFailure):
@@ -3382,7 +3591,8 @@ class CandidateResearchService:
                 metadata=run.last_judgment_metadata,
                 code=failure.code.value,
             )
-        artifact = CandidateResearchModelJudgmentArtifact(schema_version="3.0", job=run.judgment_job, run_id=run.run_id, mode=run.mode, invocation_index=max(0, run.semantic_invocations - 1), invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=OBSERVATION_PROMPT_VERSION, prompt_sha256=OBSERVATION_PROMPT_CONTENT_DIGEST, evidence_refs=tuple(run.observation_refs), result=self._recovered_record(record, run.judgment_recoveries, judgment=True))
+        await self._write_attempt(run, "judgment", record)
+        artifact = CandidateResearchModelJudgmentArtifact(schema_version="4.0", job=run.judgment_job, run_id=run.run_id, mode=run.mode, invocation_index=max(0, run.semantic_invocations - 1), invocation_slot_index=slot.invocation_slot_index, iteration_index=iteration_index, prompt_version=OBSERVATION_PROMPT_VERSION, prompt_sha256=OBSERVATION_PROMPT_CONTENT_DIGEST, evidence_refs=tuple(run.observation_refs), result=record, attempt_refs=tuple(run.judgment_attempt_refs))
         ref = await self._put(run, slot.judgment_operation_id, "candidate_research.model_judgment", artifact)
         self._remember_judgment_ref(run, ref)
         return ref
@@ -3404,6 +3614,7 @@ class CandidateResearchService:
                 "candidate_research.model_judgment": CandidateResearchModelJudgmentArtifact,
                 "candidate_research.place_observation": CandidateResearchPlaceObservationArtifact,
                 "candidate_research.candidate_set": CandidateResearchArtifact,
+                "candidate_research.invocation_attempt": CandidateResearchInvocationAttemptArtifact,
             }
             expected = expected_models.get(artifact_type)
             if expected is None:
@@ -3461,7 +3672,7 @@ class CandidateResearchService:
             raise RuntimeError("budget snapshot contract violation")
         iteration_consumed = iteration.consumed
         place_consumed = places.consumed
-        budget = ArtifactResearchBudgetSummarySnapshot(iteration_limit=6, iterations_consumed=iteration_consumed, place_call_limit=48, place_calls_consumed=place_consumed, semantic_invocation_limit=12, semantic_invocations_consumed=run.semantic_invocations, known_provider_attempts=run.provider_attempts, provider_attempts_complete=run.provider_attempts_complete, known_usage=ArtifactKnownLLMUsageSnapshot(prompt_tokens=run.usage.get("prompt_tokens", 0), completion_tokens=run.usage.get("completion_tokens", 0), total_tokens=run.usage.get("total_tokens", 0), reasoning_tokens=run.usage.get("reasoning_tokens", 0), prompt_cache_hit_tokens=run.usage.get("prompt_cache_hit_tokens", 0), prompt_cache_miss_tokens=run.usage.get("prompt_cache_miss_tokens", 0)), usage_complete=run.usage_complete)
+        budget = ArtifactResearchBudgetSummarySnapshot(iteration_limit=6, iterations_consumed=iteration_consumed, place_call_limit=48, place_calls_consumed=place_consumed, semantic_invocation_limit=12, semantic_invocations_consumed=run.semantic_invocations, known_provider_attempts=run.provider_attempts, provider_attempts_complete=run.provider_attempts_complete, known_usage=ArtifactKnownLLMUsageSnapshot(prompt_tokens=run.usage.get("prompt_tokens", 0), completion_tokens=run.usage.get("completion_tokens", 0), total_tokens=run.usage.get("total_tokens", 0), reasoning_tokens=run.usage.get("reasoning_tokens", 0), prompt_cache_hit_tokens=run.usage.get("prompt_cache_hit_tokens", 0), prompt_cache_miss_tokens=run.usage.get("prompt_cache_miss_tokens", 0)), usage_complete=run.usage_complete, correction_limit=2, corrections_consumed=run.output_recoveries_used)
         return QualifiedCandidateSetStateSnapshot(**{**_python_model(run.state), "budgets": budget, "model_action_refs": tuple(run.action_refs), "model_judgment_refs": tuple(run.judgment_refs), "observation_refs": tuple(run.observation_refs)})
 
     @staticmethod
@@ -3823,7 +4034,8 @@ class CandidateResearchService:
                 known = {name: run.usage.get(name, 0) for name in ArtifactKnownLLMUsageSnapshot.model_fields}
                 budget.update(semantic_invocations_consumed=run.semantic_invocations,
                     known_provider_attempts=run.provider_attempts, provider_attempts_complete=False,
-                    known_usage=ArtifactKnownLLMUsageSnapshot(**known), usage_complete=False)
+                    known_usage=ArtifactKnownLLMUsageSnapshot(**known), usage_complete=False,
+                    correction_limit=2, corrections_consumed=run.output_recoveries_used)
                 run.state = QualifiedCandidateSetStateSnapshot(**{**_python_model(run.state),
                     "budgets": ArtifactResearchBudgetSummarySnapshot(**budget)})
         budgets = self._public_budget(run.state.budgets) if run is not None else ResearchBudgetSummary(iteration_limit=6, iterations_consumed=0, place_call_limit=48, place_calls_consumed=0, semantic_invocation_limit=12, semantic_invocations_consumed=0, known_provider_attempts=0, provider_attempts_complete=True, known_usage=KnownLLMUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0, reasoning_tokens=0, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0), usage_complete=True)

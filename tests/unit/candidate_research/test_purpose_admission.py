@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 from app.candidate_research import CandidateRecordV2, MealAssessment, MealIntent, MatchVerdict, MealReasonCode, MealJudgmentUpdate, EvidenceHandle
-from app.candidate_research.artifacts import CandidateResearchArtifact, CandidateResearchLegacyArtifact
+from app.candidate_research.artifacts import CandidateResearchV4Artifact as CandidateResearchArtifact, CandidateResearchLegacyArtifact
 from app.candidate_research.purpose import apply_meal_assessment, normalise_meal_update
 from tests.unit.itinerary_planning.test_service_initial import _upstream
 

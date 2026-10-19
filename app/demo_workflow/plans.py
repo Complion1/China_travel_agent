@@ -87,6 +87,8 @@ def research_plan(run_id, call=0, remaining_iterations=6, remaining_places=48):
             operation(run_id, phase, f"research_{call}_place_{i}_{j}")
             for j in range(min(8, max(0, remaining_places - 8 * i)))
         ),
+        action_attempt_operation_ids=tuple(operation(run_id, phase, f"research_{call}_action_{i}_attempt_{j}") for j in range(3)),
+        judgment_attempt_operation_ids=tuple(operation(run_id, phase, f"research_{call}_judgment_{i}_attempt_{j}") for j in range(3)),
     ) for i in range(remaining_iterations))
     return CandidateResearchOperationPlan(
         run_id=run_id, iteration_slots=slots,

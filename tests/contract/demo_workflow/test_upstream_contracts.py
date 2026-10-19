@@ -29,7 +29,7 @@ async def test_real_initial_requirement_and_production_definition():
     transition = await dependencies.domain_service.process_turn(turn)
     assert type(transition.outcome) is NeedConfirmation, transition
     assert len(providers.extractor.calls) == 1
-    assert definition.contract.contract_id == "demo_workflow.web.v6"
+    assert definition.contract.contract_id == "demo_workflow.web.v9"
     assert len(definition.contract.node_rules) == 76
     await definition.aclose()
 

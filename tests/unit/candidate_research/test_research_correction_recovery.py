@@ -68,8 +68,10 @@ async def test_recovery_reuses_evidence_and_terminal_replays_without_calls(stage
     writes = [item for item in repo.put_requests if item.artifact_type.endswith(f'model_{stage}')]
     assert len(writes) == 1
     record = writes[0].content['result']
-    assert record['record_type'] == 'recovered' and record['final']['record_type'] == 'accepted'
-    assert record['attempts'][0]['metadata'] is None
+    assert record['record_type'] == 'accepted'
+    chain = [w.content for w in repo.put_requests if w.artifact_type.endswith('invocation_attempt') and w.content['kind'] == stage]
+    assert len(chain) == 2 and chain[0]['result']['record']['record_type'] == 'llm_failure'
+    assert chain[1]['correction_number'] == 1
     before = (model.call_count, maps.call_count, len(repo.put_requests))
     await service.aclose()
     replay = CandidateResearchService(runtime=FakeRuntime(), map_adapter=maps,
@@ -84,13 +86,13 @@ async def test_action_and_judgment_share_two_attempts_and_third_error_is_final()
     maps.responses.append(search_no_result())
     model.responses.extend([failure(), action(model), failure(), failure(), structured(empty_patch())])
     result = await service.research_initial(request)
-    assert result.failure.error.code is LLMErrorCode.STRUCTURED_OUTPUT_INVALID
+    assert result.outcome_type == 'incomplete'
+    assert 'correction_limit_reached' in {item.value for item in result.stop_reasons}
     assert model.call_count == 4 and len(model.responses) == 1 and maps.call_count == 1
     assert result.budgets.semantic_invocations_consumed == 4
-    attempts = [a for w in repo.put_requests if w.artifact_type.endswith(('model_action', 'model_judgment'))
-                for a in w.content['result'].get('attempts', ())]
-    assert [a['recovery_number'] for a in attempts] == [1, 2]
-    assert [a['invocation_index'] for a in attempts] == [0, 2]
+    attempts = [w.content for w in repo.put_requests if w.artifact_type.endswith('invocation_attempt') and w.content['is_correction']]
+    assert [a['correction_number'] for a in attempts] == [1, 2]
+    assert [a['semantic_index'] for a in attempts] == [1, 3]
     assert await service.research_initial(request) == result and model.call_count == 4
     await service.aclose()
 
@@ -99,12 +101,13 @@ async def test_two_recoveries_still_invalid_stop_without_maps_or_partial_output(
     request, model, maps, repo, service = setup()
     model.responses.extend([failure()] * 4)
     result = await service.research_initial(request)
-    assert result.failure.error.code is LLMErrorCode.STRUCTURED_OUTPUT_INVALID
+    assert result.outcome_type == 'incomplete'
+    assert 'correction_limit_reached' in {item.value for item in result.stop_reasons}
     assert (model.call_count, maps.call_count) == (3, 0)
     assert result.budgets.semantic_invocations_consumed == 3
     record = (await repo.get(repo.refs[request.operation_plan.iteration_slots[0].action_operation_id],
         expected_model=CandidateResearchModelActionArtifact)).content
-    assert len(record.result.attempts) == 2 and record.invocation_index == 2
+    assert len(record.attempt_refs) == 3 and record.invocation_index == 2
     # Replaying a stored failed operation cannot start another recovery loop.
     run = service._runs[request.operation_plan.run_id]
     replay = await service._replay_action(run, request.operation_plan.iteration_slots[0].action_operation_id)
@@ -126,25 +129,21 @@ async def test_non_recoverable_or_uncertain_failure_does_not_consume_recovery(co
 
 @pytest.mark.parametrize('used', [10, 11])
 async def test_semantic_twelve_limit_includes_recovery(used):
-    class NearlySpent(CandidateResearchService):
+    from app.candidate_research.recovery import correction_stop
+    assert correction_stop(used=0, semantic_used=used, kind='action') is None if used == 10 else correction_stop(used=0, semantic_used=used, kind='action').value == 'semantic_budget_insufficient'
+    class UnprovenHistory(CandidateResearchService):
         async def _load_or_create_run(self, *args):
             run = await super()._load_or_create_run(*args)
             run.semantic_invocations = used
-            run.provider_attempts = used
-            run.usage = dict(prompt_tokens=used, completion_tokens=used, total_tokens=used * 2,
-                            reasoning_tokens=0, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=used)
             return run
-    request, model, maps, repo, service = setup(service_class=NearlySpent)
+    request, model, maps, repo, service = setup(service_class=UnprovenHistory)
     model.responses.extend([failure()] * 4)
     result = await service.research_initial(request)
-    if used == 10:
-        assert result.failure.error.code is LLMErrorCode.STRUCTURED_OUTPUT_INVALID
-        assert model.call_count == 2 and result.budgets.semantic_invocations_consumed == 12
-    else:
-        assert result.outcome_type == 'incomplete'
-        assert model.call_count == 0 and result.budgets.semantic_invocations_consumed == 11
-        assert 'semantic_budget_insufficient' in {item.value for item in result.stop_reasons}
-    assert maps.call_count == 0
+    # Consumption without its prior invocation sources cannot become a normal deliverable.
+    assert result.outcome_type == 'failed'
+    assert result.failure.code.value == 'state_invariant_failed'
+    assert model.call_count == (1 if used == 10 else 0) and maps.call_count == 0
+    assert result.budgets.corrections_consumed == 0
     await service.aclose()
 
 
@@ -165,7 +164,8 @@ async def test_initial_and_supplemental_share_recovery_without_repeating_maps():
     model.responses.extend([failure(), action(model)])
     service._budget.iteration_limit = 6
     result = await service.research_supplemental(supplemental)
-    assert result.failure.error.code is LLMErrorCode.STRUCTURED_OUTPUT_INVALID
+    assert result.outcome_type == 'incomplete'
+    assert 'correction_limit_reached' in {item.value for item in result.stop_reasons}
     assert model.call_count == 5 and maps.call_count == 1
     assert result.budgets.semantic_invocations_consumed == 5
     await service.aclose()
@@ -207,12 +207,16 @@ async def test_judgment_ownership_recovers_but_unknown_refs_and_state_errors_fai
         assert result.outcome_type == 'incomplete', getattr(result, 'failure', None)
         artifact = (await repo.get(result.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
         assert artifact.record.state.candidates[0].roles[0].verdict is RoleVerdict.SUPPORTED
+    elif mode == 'exhausted':
+        assert result.outcome_type == 'incomplete'
+        assert 'correction_limit_reached' in {item.value for item in result.stop_reasons}
+        assert len(service._runs[request.operation_plan.run_id].state.candidates) == 2
     else:
         assert result.failure.code.value == ('state_invariant_failed' if mode == 'internal' else 'judgment_patch_invalid')
         assert service._runs[request.operation_plan.run_id].state.candidates == ()
     records = [w.content for w in repo.put_requests if w.artifact_type.endswith('model_judgment')]
     assert len(records) == 1
-    assert records[0]['result']['record_type'] == ('recovered' if mode in {'fixed', 'exhausted'} else 'controller_rejected')
+    assert records[0]['result']['record_type'] == ('accepted' if mode == 'fixed' else 'controller_rejected')
     assert await service.research_initial(request) == result and model.call_count == expected_calls
     await service.aclose()
 
@@ -304,14 +308,18 @@ async def test_middle_judgment_replay_preserves_known_costs_and_unknown_final_fl
         before = None
         async def _judgment(self, run, *args):
             self.before = replace(run, usage=run.usage.copy(), judgment_refs=list(run.judgment_refs),
-                                  action_refs=list(run.action_refs), observation_refs=list(run.observation_refs))
+                                  action_refs=list(run.action_refs), observation_refs=list(run.observation_refs), invocation_attempt_refs=list(run.invocation_attempt_refs))
             return await super()._judgment(run, *args)
     request, model, maps, repo, service = setup(width=2, service_class=CaptureBeforeJudgment)
     maps.responses.extend([search_success('one'), search_success('two')])
     model.responses.extend([lambda _: structured(_action_batch_from_prompt(model, 2)),
         structured(role_patch()), structured(role_patch()), failure(final_code)])
     result = await service.research_initial(request)
-    assert result.failure.error.code.value == final_code
+    if final_code == 'structured_output_invalid':
+        assert result.outcome_type == 'incomplete'
+        assert 'correction_limit_reached' in {item.value for item in result.stop_reasons}
+    else:
+        assert result.failure.error.code.value == final_code
     saved = result.budgets
     before = service.before
     calls = (model.call_count, maps.call_count, len(repo.put_requests))
@@ -324,7 +332,7 @@ async def test_middle_judgment_replay_preserves_known_costs_and_unknown_final_fl
     assert current.budgets.known_usage.total_tokens == saved.known_usage.total_tokens == 6
     assert current.budgets.usage_complete == saved.usage_complete == (final_code == 'input_too_large')
     assert current.budgets.provider_attempts_complete == saved.provider_attempts_complete
-    assert before.output_recoveries_used == 2
+    assert before.output_recoveries_used == (1 if final_code == 'input_too_large' else 2)
     assert calls == (model.call_count, maps.call_count, len(repo.put_requests))
     # Re-reading the already remembered operation cannot double-count it.
     assert await CandidateResearchService._judgment(service, before, request, slot, 0) == replay
@@ -333,7 +341,7 @@ async def test_middle_judgment_replay_preserves_known_costs_and_unknown_final_fl
 
 
 @pytest.mark.parametrize('accepted', [False, True])
-async def test_twelfth_saved_action_replays_outcome_before_budget_guard(accepted):
+async def test_saved_action_replays_final_outcome_without_reissuing_corrections(accepted):
     from dataclasses import replace
     from app.candidate_research import NoUsefulActionProposed
     class InterruptedTerminal(FakeRepository):
@@ -341,32 +349,24 @@ async def test_twelfth_saved_action_replays_outcome_before_budget_guard(accepted
             if request.operation_id.logical_step == 'terminal':
                 raise asyncio.CancelledError()
             return await super().put(request)
-    class NearlySpent(CandidateResearchService):
+    class Capture(CandidateResearchService):
         async def _load_or_create_run(self, *args):
             run = await super()._load_or_create_run(*args)
-            run.semantic_invocations = 10
-            self.before = replace(run, usage=run.usage.copy(), action_refs=[], judgment_refs=[], observation_refs=[])
+            self.before = replace(run, usage=run.usage.copy(), action_refs=[], judgment_refs=[], observation_refs=[], invocation_attempt_refs=[])
             return run
-    request, model, maps, repo, service = setup(service_class=NearlySpent, repository=InterruptedTerminal())
-    # Legitimate no-useful-action proof without a map side effect.
+    request, model, maps, repo, service = setup(service_class=Capture, repository=InterruptedTerminal())
     service._budget.place_limit = 0
-    model.responses.extend([failure(), structured(NoUsefulActionProposed(reason_code='insufficient_remaining_budget')) if accepted else failure()])
+    model.responses.extend([failure(), structured(NoUsefulActionProposed(reason_code='insufficient_remaining_budget'))] if accepted else [failure()] * 3)
     with pytest.raises(asyncio.CancelledError):
         await service.research_initial(request)
-    run = service._runs[request.operation_plan.run_id]
-    action_ref = repo.refs[request.operation_plan.iteration_slots[0].action_operation_id]
-    artifact = (await repo.get(action_ref, expected_model=CandidateResearchModelActionArtifact)).content
-    assert artifact.invocation_index == 11 and run.semantic_invocations == 12
-    # Stop only at finalization so the already durable Action can be exercised.
-    async def failed(*args):
-        return args[2]
-    service._failed = failed
-    replayed = await service._iteration(service.before, request, request.operation_plan.iteration_slots[0], 0, service._objectives(service.before, request))
-    if accepted:
-        assert replayed is None
-    else:
-        assert replayed.error.code is LLMErrorCode.STRUCTURED_OUTPUT_INVALID
-    assert model.call_count == 2 and maps.call_count == 0
+    calls = model.call_count
+    async def finish(run, *args, **kwargs):
+        return 'finished'
+    service._finish = finish
+    result = await service._iteration(service.before, request, request.operation_plan.iteration_slots[0], 0, service._objectives(service.before, request))
+    assert result is None if accepted else result == 'finished'
+    assert model.call_count == calls and maps.call_count == 0
+    assert service.before.semantic_invocations == calls
     await service.aclose()
 
 
@@ -465,30 +465,33 @@ async def test_save_failure_after_valid_recovery_keeps_consumption_and_issues_no
 
 
 @pytest.mark.parametrize('stage', ['action', 'judgment'])
-async def test_recovered_artifact_strict_roundtrip_legacy_rejection_and_index_validation(stage):
+async def test_attempt_artifact_roundtrip_and_legacy_inline_recovery_remain_distinct(stage):
+    from app.candidate_research import CandidateResearchV2ModelActionArtifact, CandidateResearchV3ModelJudgmentArtifact
+    from tests.unit.candidate_research.test_inline_correction import audited
     request, model, maps, repo, service = setup()
     model.responses.extend([failure(), action(model), structured(empty_patch())] if stage == 'action'
         else [action(model), failure(), structured(empty_patch())])
     maps.responses.append(search_no_result())
-    await service.research_initial(request)
+    result = await service.research_initial(request)
+    await audited(repo, result.candidate_set_ref)
     artifact_model = CandidateResearchModelActionArtifact if stage == 'action' else CandidateResearchModelJudgmentArtifact
+    legacy_model = CandidateResearchV2ModelActionArtifact if stage == 'action' else CandidateResearchV3ModelJudgmentArtifact
     content = next(w.content for w in repo.put_requests if w.artifact_type.endswith(f'model_{stage}'))
     artifact = artifact_model.model_validate_json(json.dumps(content), strict=True)
     assert artifact_model.model_validate_json(artifact.model_dump_json(), strict=True) == artifact
-    for mutation in ('legacy', 'index', 'number', 'metadata'):
-        invalid = json.loads(artifact.model_dump_json())
-        if mutation == 'legacy':
-            invalid['schema_version'] = '1.0'
-        elif mutation == 'index':
-            invalid['invocation_index'] += 1
-        elif mutation == 'number':
-            invalid['result']['attempts'][0]['recovery_number'] = 3
-        else:
-            invalid['result']['attempts'][0]['metadata'] = invalid['result']['final']['metadata']
+    for field, value in [('schema_version', '1.0'), ('attempt_refs', []), ('attempt_refs', content['attempt_refs'] * 2)]:
         with pytest.raises(ValidationError):
-            artifact_model.model_validate_json(json.dumps(invalid), strict=True)
-    # Original normal record layout and hash input are unchanged.
-    normal = json.loads(artifact.model_dump_json())
-    normal['result'] = normal['result']['final']
-    assert artifact_model.model_validate_json(json.dumps(normal), strict=True).model_dump(mode='json') == normal
+            artifact_model.model_validate_json(json.dumps(dict(content, **{field: value})), strict=True)
+    historical = dict(content)
+    historical.pop('attempt_refs')
+    historical['schema_version'] = '2.0' if stage == 'action' else '3.0'
+    historical['result'] = {'record_type': 'recovered', 'attempts': [{'recovery_number': 1,
+        'invocation_index': content['invocation_index'] - 1, 'code': 'structured_output_invalid', 'metadata': None}], 'final': content['result']}
+    old = legacy_model.model_validate_json(json.dumps(historical), strict=True)
+    assert legacy_model.model_validate_json(old.model_dump_json(), strict=True).model_dump(mode='json') == historical
+    for field, value in [('recovery_number', 3), ('invocation_index', content['invocation_index']), ('metadata', content['result']['metadata'])]:
+        invalid = json.loads(json.dumps(historical))
+        invalid['result']['attempts'][0][field] = value
+        with pytest.raises(ValidationError):
+            legacy_model.model_validate_json(json.dumps(invalid), strict=True)
     await service.aclose()

@@ -34,11 +34,18 @@ async def test_every_formatting_failure_has_exact_safe_disposition(code):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("days,transit,map_requested", [(1, False, False), (3, False, False), (1, True, False), (1, True, True)])
-async def test_real_formatter_days_then_index_and_delivery_rules(days, transit, map_requested):
+@pytest.mark.parametrize("days,transit,map_requested,quality", [(1, False, False, False), (3, False, False, False), (1, True, False, False), (1, True, True, False), (1, True, False, True)])
+async def test_real_formatter_days_then_index_and_delivery_rules(days, transit, map_requested, quality):
     nodes, state, command, _ = await hotel_nodes()
     cap = nodes.cap("publish_index")
-    scenario = await make_scenario(cap.artifact_repository, run_id=state.run_id, days=days, transit_only=transit)
+    scenario = await make_scenario(cap.artifact_repository, run_id=state.run_id, days=days, transit_only=transit,
+        planning_version="8.0")
+    if quality:
+        from tests.unit.result_formatting.fakes import tree, replace_itinerary, interval, local_time, START_DATE
+        payload = tree(scenario.itinerary)
+        payload["record"]["draft"]["days"][0]["quality_issues"] = [dict(date=str(START_DATE), rule="unexplained_gap",
+            minutes=180, interval=interval(local_time(START_DATE, 10), local_time(START_DATE, 13)))]
+        scenario = await replace_itinerary(scenario, payload)
     state = changed(scenario.request.state, phase=WorkflowPhase.OUTPUT_FORMATTING)
     command[0] = DemoRequirementCommand(schema_version="1.0", kind="requirement", map_requested=map_requested,
         resume=RequirementConfirmationResume(action=RequirementConfirmation(decision="accept", revision_text=None)))
@@ -57,7 +64,7 @@ async def test_real_formatter_days_then_index_and_delivery_rules(days, transit, 
         assert state.delivery_status is DeliveryStatus.IN_PROGRESS
     state = TravelSessionState.model_validate((await index_node(nodes)(state)).update, strict=True)
     state = TravelSessionState.model_validate((await nodes.terminal(state)).update, strict=True)
-    expected = DeliveryStatus.DEMO_READY if transit and not map_requested else DeliveryStatus.DEGRADED
+    expected = DeliveryStatus.DEMO_READY if transit and not map_requested and not quality else DeliveryStatus.DEGRADED
     assert state.delivery_status is expected
     index_ref = next(ref for ref in state.artifact_refs if ref.artifact_type == "result_formatting.index")
     loaded = await ResultFormattingService(artifact_repository=cap.artifact_repository).load(

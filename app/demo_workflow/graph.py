@@ -77,7 +77,7 @@ def create_demo_workflow_definition(*, dependencies):
     }
     rules = tuple(DurableExecutionNodeRecoveryRule(node_name=name, phase=phase, recovery_class=recovery)
         for name, (phase, recovery) in sorted(specs.items()))
-    payload = dict(schema_version="1.0", contract_id="demo_workflow.web.v6",
+    payload = dict(schema_version="1.0", contract_id="demo_workflow.web.v9",
         command_codec=codec.descriptor.model_dump(mode="json"), budgeted_phases=[phase.value for phase in BUDGETED_PHASES],
         node_rules=[rule.model_dump(mode="json") for rule in rules])
     contract = DurableExecutionContract.model_validate_json(canonical(payload | {"contract_digest": digest(canonical(payload))}), strict=True)

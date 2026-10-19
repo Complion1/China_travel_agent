@@ -40,7 +40,7 @@ from app.candidate_research.errors import CandidateResearchConfigurationError
 from app.candidate_research.artifacts import (
     ArtifactCandidateCoreSnapshot,
     ArtifactCoordinateSnapshot,
-    CandidateSetStateSnapshot,
+    CorrectableCandidateSetStateSnapshot as CandidateSetStateSnapshot,
     SearchCoverageRecord,
     SearchCoverageState,
 )
@@ -160,6 +160,8 @@ def _request(run_id, *, place_width: int = 1, slot_count: int = 6):
             invocation_slot_index=index, action_operation_id=op(f"action_{index}"), judgment_operation_id=op(f"judgment_{index}"),
             candidate_set_operation_id=op(f"candidate_{index}"),
             place_observation_operation_ids=tuple(op(f"observation_{index}_{ordinal}") for ordinal in range(place_width)),
+            action_attempt_operation_ids=tuple(op(f"action_{index}_attempt_{j}") for j in range(3)),
+            judgment_attempt_operation_ids=tuple(op(f"judgment_{index}_attempt_{j}") for j in range(3)),
         )
         for index in range(slot_count)
     )
@@ -281,7 +283,7 @@ async def test_public_initial_rejects_invalid_action_and_persists_actual_batch()
     assert operation.schemas[0].model_json_schema()["type"] == "object"
     assert set(operation.schemas[0].model_json_schema()["properties"]) == {"output"}
     assert result.failure.code.value == "action_batch_invalid"
-    assert len(repository.put_requests) == 2
+    assert len(repository.put_requests) == 3
     action_payload = repository.contents[repository.refs[request.operation_plan.iteration_slots[0].action_operation_id].artifact_id]
     assert action_payload["result"]["output"]["actions"][0]["query"] == "museum"
 
@@ -561,12 +563,16 @@ async def test_public_initial_action_validation_rejects_each_structural_shape(mu
 
     operation.responses.append(response)
     if mutation in {"wrong_area", "extra_interest"}:
-        operation.responses.append(response)
+        operation.responses.extend((response, response, response))
     repository = FakeRepository(); repository.seed(hotel_ref, hotel_artifact)
     maps = FakeMapAdapter()
     service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=maps, artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
     result = await service.research_initial(request)
-    assert result.failure.code.value == ("action_correction_exhausted" if mutation in {"wrong_area", "extra_interest"} else "action_batch_invalid")
+    if mutation in {"wrong_area", "extra_interest"}:
+        assert result.outcome_type == "incomplete"
+        assert "correction_limit_reached" in {item.value for item in result.stop_reasons}
+    else:
+        assert result.failure.code.value == "action_batch_invalid"
     assert maps.call_count == 0
 
 
@@ -581,7 +587,7 @@ async def test_public_initial_rejects_same_batch_duplicate_before_map_calls() ->
         second = first.model_copy(update={"ordinal": 1})
         return structured(ProposedActionBatch(actions=(first, second)))
 
-    operation.responses.extend((response, response))
+    operation.responses.extend((response, response, response))
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel_artifact)
     maps = FakeMapAdapter()
@@ -594,7 +600,7 @@ async def test_public_initial_rejects_same_batch_duplicate_before_map_calls() ->
 
     result = await service.research_initial(request)
 
-    assert result.failure.code.value == "action_correction_exhausted"
+    assert "correction_limit_reached" in {item.value for item in result.stop_reasons}
     assert maps.call_count == 0
 
 
@@ -613,12 +619,12 @@ async def test_public_initial_policy_rejection_persists_and_progresses_to_termin
             action = ProposedSearchAction(ordinal=0, objective_id=objective["objective_id"], query="ignored", area_mode=SearchAreaMode.CITY)
         return structured(ProposedActionBatch(actions=(action,)))
 
-    operation.responses.extend((ignored_action, structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
+    operation.responses.extend((ignored_action,) + (structured(NoUsefulActionProposed(reason_code="prior_no_progress")),) * 2)
     repository = FakeRepository(); repository.seed(hotel_ref, hotel_artifact)
     service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=FakeMapAdapter(), artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
     result = await service.research_initial(request)
-    assert result.outcome_type == "failed"
-    assert result.failure.code.value == "action_correction_exhausted"
+    assert result.outcome_type == "incomplete"
+    assert "correction_limit_reached" in {item.value for item in result.stop_reasons}
     action_records = [item.content["result"] for item in repository.put_requests if item.artifact_type == "candidate_research.model_action"]
     assert action_records and action_records[0]["record_type"] == "policy_rejected"
 
@@ -645,7 +651,7 @@ async def test_public_initial_no_useful_action_is_checked_against_public_policy(
     request, hotel_ref, hotel_artifact, _ = _request(run_id, place_width=1)
     responses = [structured(NoUsefulActionProposed(reason_code=reason))]
     if reason == "prior_no_progress":
-        responses.append(structured(NoUsefulActionProposed(reason_code=reason)))
+        responses.extend([structured(NoUsefulActionProposed(reason_code=reason))] * 2)
     if reason == "insufficient_remaining_budget":
         responses.append(structured(NoUsefulActionProposed(reason_code="prior_no_progress")))
     operation = FakeModelOperation(responses)
@@ -654,7 +660,7 @@ async def test_public_initial_no_useful_action_is_checked_against_public_policy(
     service = CandidateResearchService(runtime=FakeRuntime(operation), map_adapter=FakeMapAdapter(), artifact_repository=repository, budget_manager=budget)
     result = await service.research_initial(request)
     if reason == "prior_no_progress":
-        assert result.failure.code.value == "action_correction_exhausted"
+        assert "correction_limit_reached" in {item.value for item in result.stop_reasons}
     else:
         assert result.outcome_type == "incomplete"
 
@@ -706,14 +712,14 @@ async def test_public_initial_requirement_group_judgment_updates_derived_state(r
             action = ProposedSearchAction(ordinal=0, objective_id=objective["objective_id"], query="ignored", area_mode=SearchAreaMode.CITY)
         return structured(ProposedActionBatch(actions=(action,)))
 
-    operation.responses.extend((action_response, judgment_response, ignored_action, structured(NoUsefulActionProposed(reason_code="prior_no_progress"))))
+    operation.responses.extend((action_response, judgment_response, ignored_action) + (structured(NoUsefulActionProposed(reason_code="prior_no_progress")),) * 2)
     repository = FakeRepository(); repository.seed(hotel_ref, hotel_artifact)
     runtime = FakeRuntime(operation)
     service = CandidateResearchService(runtime=runtime, map_adapter=FakeMapAdapter((search_success("requirement-place"),)), artifact_repository=repository, budget_manager=FakeBudgetManager(run_id))
     result = await service.research_initial(request)
     assert result.outcome_type in {"incomplete", "failed"}
     if result.outcome_type == "failed":
-        assert result.failure.code.value == "action_correction_exhausted"
+        assert "correction_limit_reached" in {item.value for item in result.stop_reasons}
         assert result.failure.code.value != "replay_mismatch"
         state_ref = result.last_consistent_candidate_set_ref
     else:
@@ -839,6 +845,7 @@ async def test_public_initial_multiple_must_groups_and_items_are_counted_once_pe
             judgment_response,
             ignored_action,
             structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
+            structured(NoUsefulActionProposed(reason_code="prior_no_progress")),
         )
     )
     search = PlaceSearchSuccess(
@@ -859,9 +866,9 @@ async def test_public_initial_multiple_must_groups_and_items_are_counted_once_pe
 
     result = await service.research_initial(request)
 
-    assert result.outcome_type == "failed"
-    assert result.failure.code.value == "action_correction_exhausted"
-    state = repository.contents[result.last_consistent_candidate_set_ref.artifact_id]["record"]["state"]
+    assert result.outcome_type == "incomplete"
+    assert "correction_limit_reached" in {item.value for item in result.stop_reasons}
+    state = repository.contents[result.candidate_set_ref.artifact_id]["record"]["state"]
     assert state["coverage"]["must_item_count"] == 3
     assert state["coverage"]["resolved_must_item_count"] == 2
     assert [candidate["state"] for candidate in state["candidates"]] == ["eligible", "eligible"]

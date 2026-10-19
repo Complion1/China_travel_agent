@@ -49,7 +49,7 @@ async def test_search_query_wording_does_not_replace_required_objective_interest
 
     operation.responses.append(action_response)
     if not copy_interest:
-        operation.responses.append(structured(NoUsefulActionProposed(reason_code="prior_no_progress")))
+        operation.responses.extend([structured(NoUsefulActionProposed(reason_code="prior_no_progress"))] * 2)
     repository = FakeRepository()
     repository.seed(hotel_ref, hotel_artifact)
     maps = FakeMapAdapter(tuple(BaiduMapTimeoutError(capability=MapCapability.PLACE_SEARCH) for _ in range(3)))
@@ -61,7 +61,8 @@ async def test_search_query_wording_does_not_replace_required_objective_interest
         assert result.failure.failure_type == "map_failure"
         assert len(maps.search_requests) == 3
     else:
-        assert result.failure.code is CandidateResearchControlFailureCode.ACTION_CORRECTION_EXHAUSTED
+        assert result.outcome_type == "incomplete"
+        assert "correction_limit_reached" in {item.value for item in result.stop_reasons}
         assert not maps.search_requests
 
 

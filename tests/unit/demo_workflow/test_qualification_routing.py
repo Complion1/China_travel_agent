@@ -9,7 +9,7 @@ from app.candidate_research import CandidateResearchIncomplete
 from app.demo_workflow.terminal import changed
 from app.workflow_contracts import ArtifactWriteRequest, WorkflowPhase, TravelSessionState
 from tests.support.demo_workflow_fakes import hotel_nodes
-from tests.unit.candidate_research.test_qualification_supply import blocked_supply
+from tests.unit.candidate_research.test_qualification_supply import blocked_supply, current_supply_fixture
 from tests.unit.itinerary_planning.test_service_initial import _upstream
 
 
@@ -24,10 +24,10 @@ async def test_persisted_candidate_status_routes_to_registered_terminal(options,
     nodes, state, _, _ = await hotel_nodes()
     cap = nodes.cap("research")
     hotel_ref, candidate_ref, hotel, source = _upstream(state.run_id)
-    artifact = blocked_supply(data=source.model_dump(mode="json"), **options)
+    artifact = current_supply_fixture(blocked_supply(data=source.model_dump(mode="json"), **options))
     ref = await cap.artifact_repository.put(ArtifactWriteRequest(
         operation_id=candidate_ref.operation_id, artifact_type=candidate_ref.artifact_type,
-        schema_version="4.0", content=artifact.model_dump(mode="json")))
+        schema_version="5.0", content=artifact.model_dump(mode="json")))
     record = artifact.record
     result = CandidateResearchIncomplete.model_validate_json(
         json.dumps(dict(candidate_set_ref=ref.model_dump(mode="json"),

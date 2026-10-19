@@ -35,6 +35,22 @@ async def execute(request):
                 hotel_calls=context.providers.hotel_map.search_call_count,research_calls=context.providers.research_model.call_count,
                 planning_calls=context.providers.planning_model.call_count)
         state = await context.runtime.get_state(run_id=request["run_id"])
+        if request["mode"] == "read_research":
+            from app.candidate_research import (
+                CandidateResearchArtifact, CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS,
+                validate_qualification_sources,
+            )
+            ref = max((r for r in state.artifact_refs if r.artifact_type == "demo.control"), key=lambda r: r.operation_id.logical_step)
+            control = (await context.artifacts.repository.get(ref, expected_model=DemoControlArtifact)).content
+            saved = (await context.artifacts.repository.get(control.candidate_set_ref, expected_model=CandidateResearchArtifact)).content
+            assert saved.record.record_type == "incomplete" and not saved.record.state.candidates
+            assert saved.record.budgets.corrections_consumed == 2
+            models = {(item.artifact_type, item.schema_version): item.model for item in CANDIDATE_RESEARCH_ARTIFACT_REGISTRATIONS}
+            sources = {}
+            for source in (*saved.invocation_attempt_refs, *saved.record.state.model_action_refs,
+                           *saved.record.state.model_judgment_refs, *saved.record.state.observation_refs):
+                sources[source.artifact_id] = await context.artifacts.repository.get(source, expected_model=models[source.artifact_type, source.schema_version])
+            validate_qualification_sources(saved, sources)
         if request["mode"] == "read_diagnostic":
             from app.itinerary_planning import ItineraryPlanningArtifact
             ref = max((r for r in state.artifact_refs if r.artifact_type == "demo.control"),key=lambda r:r.operation_id.logical_step)

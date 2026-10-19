@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from .artifacts import ResultCore, ResultDayData, ResultInterval, ResultPlace, ResultRoute, ResultTransitRoute, ResultVisit
+from .artifacts import ResultCore, ResultDayData, ResultInterval, ResultPlace, ResultRoute, ResultTransitRoute, ResultVisit, ResultPlannedBreak
 from .errors import ResultFormattingFailureCode as Code
 from .projection import ProjectionFailure
 
@@ -173,7 +173,7 @@ def render_header(core: ResultCore, *, template_version="zh-guide-v1") -> str:
     if requirement.budget_total_cny is not None:
         budget = ("约 " if requirement.budget_is_approximate else "") + _decimal(requirement.budget_total_cny)
         lines.insert(5, f"- 用户总预算：{budget} 元；范围为目的地内住宿、当地交通、餐饮、景点和其他当地消费，不含往返目的地的大交通。")
-    if template_version == "zh-guide-v2-active-inputs":
+    if template_version in {"zh-guide-v2-active-inputs", "zh-guide-v3-boundary-quality", "zh-guide-v4-daily-quality"}:
         lines = [line for line in lines if not line.startswith(("- 同行人员：", "- 用户总预算："))]
         lines[3] = (f"- 住宿日期：{requirement.hotel_check_in_date.isoformat()} 入住，"
                     f"{requirement.hotel_check_out_date.isoformat()} 离店；{requirement.hotel_nights} 晚。")
@@ -190,10 +190,28 @@ def render_day(core: ResultCore, day: ResultDayData) -> str:
         lines.append("- 本日未安排游览。")
     timeline = [(route.interval.start_at_utc, index * 2, route) for index, route in enumerate(day.route_legs)]
     timeline.extend((visit.interval.start_at_utc, index * 2 + 1, visit) for index, visit in enumerate(day.visits))
+    timeline.extend((item.interval.start_at_utc, 100 + index, item)
+                    for index, item in enumerate(getattr(day, "planned_breaks", ())))
     if timeline:
         lines.extend(["", "### 主行程", ""])
         for _, _, item in sorted(timeline, key=lambda entry: (entry[0], entry[1])):
-            lines.append(_route_line(item, places) if isinstance(item, ResultRoute) else _visit_line(item, places))
+            if isinstance(item, ResultPlannedBreak):
+                label = "休息" if item.kind == "rest" else "自由活动"
+                lines.append(f"- {_interval(item.interval)}｜{label}（规划安排）：{_escape(item.reason)}。")
+            else:
+                lines.append(_route_line(item, places) if isinstance(item, ResultRoute) else _visit_line(item, places))
+    issues = getattr(day, "quality_issues", ())
+    if issues:
+        lines.extend(["", "### 尚待完善的安排", ""])
+        for item in issues:
+            if item.rule == "unexplained_gap":
+                message = f"{_interval(item.interval)} 内仍有 {item.minutes} 分钟未说明的空档，建议补充安排。"
+            elif item.rule == "excessive_break":
+                message = f"本日休息或自由活动累计 {item.minutes} 分钟，安排可能偏少，建议按体力和兴趣复核。"
+            else:
+                meal = "午餐" if item.rule == "missing_lunch" else "晚餐"
+                message = f"可用时间覆盖{meal}时段，当前未安排{meal}；请补充并核验营业及路线。"
+            lines.append("- " + message)
     if day.backups:
         lines.extend(["", "### 附近备选", "", "以下备选未纳入主路线；距离为对应模式的路网距离。", ""])
         visits = {visit.visit_id: visit for visit in day.visits}
@@ -215,6 +233,10 @@ def render_footer(core: ResultCore, *, template_version="zh-guide-v1") -> str:
              _route_line(core.departure_transfer.route, _place_map(core)),
              _transfer_allowance(core, arrival=False), "", "## 费用核验状态", ""]
     lines.extend(f"- {category}：未核验。" for category in ("住宿", "当地交通", "餐饮", "景点", "其他当地消费"))
+    if getattr(core, "quality_issue_count", 0):
+        subject = "每日安排" if template_version == "zh-guide-v4-daily-quality" else "抵离日"
+        lines.extend(["", "## 规划安排提醒", "",
+            f"- {subject}仍有 {core.quality_issue_count} 项安排需要完善，详情见对应日期；通过时间和路线硬校验不表示这些问题已经解决。"])
     legacy = template_version == "zh-guide-v1"
     if legacy:
         lines.extend(["", "## 关键限制（已记录，本版未逐项验证）", ""])

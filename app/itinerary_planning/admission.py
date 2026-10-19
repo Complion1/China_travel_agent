@@ -1,6 +1,5 @@
 """候选用途的唯一规划准入和纯代码预检；不访问模型、地图或预算。"""
 from collections import Counter
-from datetime import date, datetime, timedelta
 from .policy import candidate_is_eligible
 from app.candidate_research import MealIntent, MatchVerdict, ResearchRole
 
@@ -12,37 +11,15 @@ def candidate_purposes(candidate):
     return candidate_admitted_purposes(candidate)
 
 
-def full_dates(confirmed):
-    window = confirmed.requirement.time_window
-    boundary = {datetime.fromisoformat(item.local_datetime).date() for item in (window.arrival, window.departure)
-                if item.local_datetime is not None}
-    start, end = date.fromisoformat(window.sightseeing_start_date), date.fromisoformat(window.sightseeing_end_date)
-    return tuple(start + timedelta(days=i) for i in range((end-start).days+1)
-                 if start + timedelta(days=i) not in boundary)
-
-
-def minimum_attractions(confirmed):
-    pace = confirmed.requirement.preferences.pace
-    return {"轻松": 1, "标准": 3, "紧凑": 4}.get(getattr(pace, "value", pace), 1)
-
-
 def supply_shortages(candidates, confirmed, groups):
-    """Known necessary conditions only; route and time feasibility remain final gates."""
+    """只预检明确资格缺口，不按理论全日数量要求候选。"""
+    from .quality import boundary_day_windows
     purposes = {item.core.uid: candidate_purposes(item) for item in candidates}
     shortages = []
-    full_count = len(full_dates(confirmed))
-    if full_count:
-        count = sum("attraction" in values for values in purposes.values())
-        required = minimum_attractions(confirmed) * full_count
-        if count < required:
-            shortages.append(("count", "attraction", count, required, None))
-        for meal in ("lunch", "dinner"):
-            count = sum(meal in values for values in purposes.values())
-            if count < full_count:
-                shortages.append(("meal", meal, count, full_count, None))
-        usable_restaurants = sum(any(meal in values for meal in ("lunch", "dinner")) for values in purposes.values())
-        if usable_restaurants < 2 * full_count and not any(item[0] == "meal" for item in shortages):
-            shortages.append(("count", "restaurant", usable_restaurants, 2 * full_count, None))
+    possible_visit = any((window.end_at - window.start_at).total_seconds() >= 3600
+                         for window in boundary_day_windows(confirmed))
+    if possible_visit and not any(purposes.values()):
+        shortages.append(("count", "attraction", 0, 1, None))
     for group in groups:
         if group.requirement_kind == "must_visit" and not any(purposes[item.core.uid]
                 and any(match.requirement_group_id == group.group_id and match.verdict is MatchVerdict.CONFIRMED
@@ -122,14 +99,6 @@ def qualification_issues(candidates, intents, confirmed, *, require_daily=False,
                 if meal in admitted and purpose in (meal, "attraction_"+meal):
                     counts[(date, meal)] += 1
     if require_daily:
-        for date in full_dates(confirmed):
-            for purpose, expected in (("attraction", minimum_attractions(confirmed)), ("lunch", 1), ("dinner", 1)):
-                if counts[(date, purpose)] < expected:
-                    issues.append(_issue(target=f"{date.isoformat()}:main:{purpose}:required", rule="required_visit_missing",
-                        field="draft.days.visits", actual=counts[(date, purpose)], expected=expected))
-                if purpose in ("lunch", "dinner") and counts[(date, purpose)] > 1:
-                    issues.append(_issue(target=f"{date.isoformat()}:main:{purpose}:required", rule="meal_count_exceeded",
-                        field="draft.days.visits", actual=counts[(date, purpose)], expected=1))
         for group in required_must:
             if group not in must_seen:
                 issues.append(_issue(target=f"itinerary:main:must:{group}", rule="must_visit_unscheduled",

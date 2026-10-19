@@ -18,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -40,7 +41,7 @@ from app.workflow_contracts import (
 )
 
 
-ITINERARY_PLANNING_SCHEMA_VERSION: Literal["6.0"] = "6.0"
+ITINERARY_PLANNING_SCHEMA_VERSION: Literal["8.0"] = "8.0"
 ITINERARY_PLANNING_MODEL_INVOCATION_BUDGET_KEY = ExecutionBudgetKey(
     scope=ExecutionBudgetScope.PHASE,
     name="planning.model_invocation",
@@ -168,7 +169,7 @@ class PlanningFailureCode(str, Enum):
 
 
 class PlanningInvocationOperationIds(_Model):
-    schema_version: Literal["6.0"] = "6.0"
+    schema_version: Literal["8.0"] = "8.0"
     invocation_slot_index: Annotated[int, Field(ge=0, le=18)]
     action_operation_id: OperationId
     planning_state_operation_id: OperationId
@@ -186,7 +187,7 @@ class PlanningInvocationOperationIds(_Model):
 
 
 class ItineraryPlanningOperationPlan(_Model):
-    schema_version: Literal["6.0"] = "6.0"
+    schema_version: Literal["8.0"] = "8.0"
     run_id: UUID
     invocation_slots: Annotated[tuple[PlanningInvocationOperationIds, ...], Field(min_length=0, max_length=19)]
     hub_geocode_operation_ids: Annotated[tuple[OperationId, ...], Field(min_length=0, max_length=2)]
@@ -217,7 +218,7 @@ class ItineraryPlanningOperationPlan(_Model):
 
 
 class ItineraryPlanningInitialRequest(_Model):
-    schema_version: Literal["6.0"] = "6.0"
+    schema_version: Literal["8.0"] = "8.0"
     confirmed: ConfirmedTravelRequirement
     hotel_selection_ref: ArtifactRef
     candidate_set_ref: ArtifactRef
@@ -234,7 +235,7 @@ class ItineraryPlanningInitialRequest(_Model):
 
 
 class ItineraryPlanningResumeRequest(_Model):
-    schema_version: Literal["6.0"] = "6.0"
+    schema_version: Literal["8.0"] = "8.0"
     predecessor_planning_ref: ArtifactRef
     supplemented_candidate_set_ref: ArtifactRef
     operation_plan: ItineraryPlanningOperationPlan
@@ -252,7 +253,7 @@ class ItineraryPlanningResumeRequest(_Model):
 
 
 def _require_ref(ref: ArtifactRef, artifact_type: str, phase: WorkflowPhase, run_id: UUID) -> None:
-    if ref.artifact_type != artifact_type or ref.schema_version not in (("6.0",) if artifact_type == "itinerary_planning.itinerary" else ("1.0", "2.0", "3.0", "4.0") if artifact_type == "candidate_research.candidate_set" else ("1.0",)):
+    if ref.artifact_type != artifact_type or ref.schema_version not in (("8.0",) if artifact_type == "itinerary_planning.itinerary" else ("1.0", "2.0", "3.0", "4.0", "5.0") if artifact_type == "candidate_research.candidate_set" else ("1.0",)):
         raise ValueError("artifact reference type/version mismatch")
     if ref.operation_id.phase is not phase or ref.operation_id.run_id != run_id:
         raise ValueError("artifact reference run/phase mismatch")
@@ -263,7 +264,7 @@ def _require_itinerary_ref(ref: ArtifactRef | None, *, required: bool = False) -
         if required:
             raise ValueError("itinerary reference is required")
         return
-    if ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version != "6.0" or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING:
+    if ref.artifact_type != "itinerary_planning.itinerary" or ref.schema_version != "8.0" or ref.operation_id.phase is not WorkflowPhase.ITINERARY_PLANNING:
         raise ValueError("reference must point to an itinerary planning artifact")
 
 
@@ -506,6 +507,42 @@ class BackupOption(_Model):
         return self
 
 
+class PlannedBreak(_Model):
+    schema_version: Literal["1.0"] = "1.0"
+    break_id: StableId
+    kind: Literal["rest", "free_time"]
+    start_at: datetime
+    end_at: datetime
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=160)]
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _reason(cls, value: object) -> object:
+        if isinstance(value, str) and re.search(r"(?:https?://|www\.|[<>`\[\]#*_\\$;|&\x00-\x1f\x7f-\x9f])", value, re.IGNORECASE):
+            raise ValueError("break reason must be plain safe text")
+        return value
+
+    @model_validator(mode="after")
+    def _break(self) -> PlannedBreak:
+        if not all(_aware_shanghai(value) and _minute(value) for value in (self.start_at, self.end_at)) or self.start_at >= self.end_at:
+            raise ValueError("break requires a positive whole-minute Shanghai interval")
+        return self
+
+
+class BoundaryDayQualityIssue(_Model):
+    date: date
+    rule: Literal["unexplained_gap", "missing_lunch", "missing_dinner", "excessive_break"]
+    start_at: datetime
+    end_at: datetime
+    minutes: Annotated[int, Field(ge=1, le=1440)]
+
+    @model_validator(mode="after")
+    def _interval(self) -> BoundaryDayQualityIssue:
+        if not all(_aware_shanghai(value) and _minute(value) for value in (self.start_at, self.end_at)) or self.start_at >= self.end_at:
+            raise ValueError("quality issue interval is invalid")
+        return self
+
+
 class DayPlan(_Model):
     schema_version: Literal["1.0"] = "1.0"
     date: date
@@ -515,9 +552,21 @@ class DayPlan(_Model):
     visits: Annotated[tuple[ScheduledVisit, ...], Field(min_length=0, max_length=6)]
     route_legs: Annotated[tuple[RouteLeg, ...], Field(min_length=0, max_length=7)]
     backups: Annotated[tuple[BackupOption, ...], Field(min_length=0, max_length=3)]
+    planned_breaks: Annotated[tuple[PlannedBreak, ...], Field(max_length=16)] = ()
+    quality_issues: Annotated[tuple[BoundaryDayQualityIssue, ...], Field(max_length=32)] = ()
 
     @model_validator(mode="after")
     def _day(self) -> DayPlan:
+        _unique(tuple(item.break_id for item in self.planned_breaks), "break ids")
+        if tuple(sorted(self.planned_breaks, key=lambda item: item.start_at)) != self.planned_breaks:
+            raise ValueError("breaks must be chronologically ordered")
+        spans = [(item.start_at, item.end_at) for item in self.planned_breaks]
+        occupied = [(item.interval.start_at, item.interval.end_at) for item in (*self.visits, *self.route_legs)]
+        for index, (start, end) in enumerate(spans):
+            if any(start < other_end and other_start < end for other_start, other_end in (*occupied, *spans[:index])):
+                raise ValueError("break overlaps another scheduled item")
+        if any(item.date != self.date for item in self.quality_issues):
+            raise ValueError("quality issue date mismatch")
         if re.search(r"(?:https?://|www\.|[<>`\[\]#])", self.theme, re.IGNORECASE):
             raise ValueError("theme must be plain safe text")
         if self.day_kind is PlanningDayKind.TRANSIT_ONLY:
@@ -737,6 +786,7 @@ class ProposedDayPlan(_Model):
     visits: Annotated[tuple[ProposedScheduledVisit, ...], Field(min_length=0, max_length=6)]
     route_legs: Annotated[tuple[ProposedRouteLeg, ...], Field(min_length=0, max_length=7)]
     backups: Annotated[tuple[ProposedBackupOption, ...], Field(min_length=0, max_length=3)]
+    planned_breaks: Annotated[tuple[PlannedBreak, ...], Field(max_length=16)] = ()
 
 
 class ProposedItineraryDraft(_Model):
@@ -911,13 +961,38 @@ class DirectionLegIntent(_Model):
         return self
 
 
+class DailyPlanOutline(_Model):
+    schema_version: Literal["1.0"] = "1.0"
+    date: date
+    visits: Annotated[tuple[PurposeVisitIntent, ...], Field(max_length=6)]
+    planned_breaks: Annotated[tuple[PlannedBreak, ...], Field(max_length=16)] = ()
+
+    @model_validator(mode="after")
+    def _day(self):
+        if any(item.is_backup or item.interval is None or item.date != self.date for item in self.visits):
+            raise ValueError("outline needs dated main visits with intervals")
+        spans = [(item.interval.start_at, item.interval.end_at) for item in self.visits]
+        if spans != sorted(spans):
+            raise ValueError("outline visits must be ordered")
+        spans.extend((item.start_at, item.end_at) for item in self.planned_breaks)
+        spans.sort()
+        if any(start.date() != self.date or end.date() != self.date for start, end in spans):
+            raise ValueError("outline interval must stay in its date")
+        if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
+            raise ValueError("outline activities overlap")
+        _unique(tuple(item.break_id for item in self.planned_breaks), "outline break ids")
+        return self
+
+
 class PlanDirectionsArgs(_Model):
-    schema_version: Literal["2.0"] = "2.0"
+    schema_version: Literal["3.0"] = "3.0"
+    daily_outline: Annotated[tuple[DailyPlanOutline, ...], Field(max_length=60)] = ()
     legs: Annotated[tuple[DirectionLegIntent, ...], Field(min_length=1, max_length=482)]
     visit_intents: Annotated[tuple[PurposeVisitIntent, ...], Field(max_length=256)] = ()
 
     @model_validator(mode="after")
     def _legs(self) -> PlanDirectionsArgs:
+        _unique(tuple(item.date for item in self.daily_outline), "outline dates")
         _unique(tuple(item.leg_id for item in self.legs), "direction leg ids")
         _unique(tuple((item.origin_handle, item.destination_handle, item.route_mode, item.alternatives_limit) for item in self.legs), "direction requests")
         return self
@@ -1180,7 +1255,7 @@ class CandidateSupplyGap(_GapBase):
     def _evidence(self) -> CandidateSupplyGap:
         if (self.schema_version == "2.0" and self.target.target_type in {"candidate_count", "meal_count", "must_resolution"}
                 and len(self.evidence_refs) == 1 and self.evidence_refs[0].artifact_type == "candidate_research.candidate_set"
-                and self.evidence_refs[0].schema_version in {"2.0", "3.0", "4.0"}):
+                and self.evidence_refs[0].schema_version in {"2.0", "3.0", "4.0", "5.0"}):
             return self
         if not self.evidence_refs or any(ref.artifact_type != "candidate_research.place_observation" or ref.schema_version != "1.0" for ref in self.evidence_refs):
             raise ValueError("candidate supply gap requires candidate-research evidence refs")
@@ -1381,7 +1456,7 @@ class _PlanningBudgetSummaryV2(_Model):
 
 
 class PlanningBudgetSummary(_PlanningBudgetSummaryV2):
-    schema_version: Literal["6.0"]
+    schema_version: Literal["6.0", "7.0", "8.0"]
     model_invocation_limit: Literal[19]
     model_invocations_consumed: Annotated[int, Field(ge=0, le=19)]
     normal_invocation_limit: Literal[17]
@@ -1488,7 +1563,7 @@ PlanningFailure: TypeAlias = Annotated[
 
 
 class ItineraryPlanningCompleted(_Model):
-    schema_version: Literal["6.0"] = "6.0"
+    schema_version: Literal["8.0"] = "8.0"
     outcome_type: Literal["completed"] = "completed"
     itinerary_ref: ArtifactRef
     summary: PlanningSummary
@@ -1502,7 +1577,7 @@ class ItineraryPlanningCompleted(_Model):
 
 
 class ItineraryPlanningIncomplete(_Model):
-    schema_version: Literal["6.0"] = "6.0"
+    schema_version: Literal["8.0"] = "8.0"
     outcome_type: Literal["incomplete"] = "incomplete"
     itinerary_ref: ArtifactRef | None
     summary: PlanningSummary
@@ -1521,7 +1596,7 @@ class ItineraryPlanningIncomplete(_Model):
 
 
 class ItineraryPlanningCandidateSupplementRequested(_Model):
-    schema_version: Literal["6.0"] = "6.0"
+    schema_version: Literal["8.0"] = "8.0"
     outcome_type: Literal["candidate_supplement_requested"] = "candidate_supplement_requested"
     planning_ref: ArtifactRef
     candidate_set_ref: ArtifactRef
@@ -1533,7 +1608,7 @@ class ItineraryPlanningCandidateSupplementRequested(_Model):
     def _refs(self) -> ItineraryPlanningCandidateSupplementRequested:
         _require_itinerary_ref(self.planning_ref, required=True)
         _validate_outcome_versions(self, self.planning_ref)
-        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0"}:
+        if self.candidate_set_ref.artifact_type != "candidate_research.candidate_set" or self.candidate_set_ref.schema_version not in {"1.0", "2.0", "3.0", "4.0", "5.0"}:
             raise ValueError("supplement outcome must reference candidate set")
         if self.planning_ref.operation_id.run_id != self.candidate_set_ref.operation_id.run_id:
             raise ValueError("supplement outcome refs must share run")
@@ -1541,7 +1616,7 @@ class ItineraryPlanningCandidateSupplementRequested(_Model):
 
 
 class ItineraryPlanningFailed(_Model):
-    schema_version: Literal["6.0"] = "6.0"
+    schema_version: Literal["8.0"] = "8.0"
     outcome_type: Literal["failed"] = "failed"
     failure: PlanningFailure
     last_consistent_itinerary_ref: ArtifactRef | None
@@ -1563,7 +1638,7 @@ class ItineraryPlanningFailed(_Model):
                 "itinerary_planning.itinerary",
             }
             expected_schema_version = (
-                "9.0"
+                "11.0"
                 if self.failure_artifact_ref.artifact_type == "itinerary_planning.model_action"
                 else self.schema_version if self.failure_artifact_ref.artifact_type == "itinerary_planning.itinerary" else "1.0"
             )

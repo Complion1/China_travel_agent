@@ -60,6 +60,7 @@ def candidate_supply_status(artifact):
         return "research_candidates_unsuitable"
     exhausted = {CandidateResearchStopReason.ITERATION_LIMIT_REACHED,
                  CandidateResearchStopReason.PLACE_BUDGET_EXHAUSTED,
+                 CandidateResearchStopReason.CORRECTION_LIMIT_REACHED,
                  CandidateResearchStopReason.SEMANTIC_BUDGET_INSUFFICIENT}
     if exhausted.intersection(getattr(artifact.record, "stop_reasons", ())):
         return "research_budget_exhausted"
