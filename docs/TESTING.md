@@ -6,6 +6,8 @@
 
 按修改范围选择测试。页面样式和说明修改可以检查资源、页面行为和相关 HTTP 协议；业务协议或迁移修改需要增加对应单元、契约和隔离数据库集成测试。真实供应商调用与云端发布单独安排。
 
+当前模块验证摘要见[验证说明](VALIDATION.md)，详细公共合同和阶段测试矩阵见[设计文档目录](README.md)。程序回归与攻略质量评价分别记录，测试通过不能代替用户体验判断。
+
 ## 网页应用离线检查
 
 以下示例不读取私有配置，关闭容器网络，临时写入只放在 `/tmp`：
@@ -19,6 +21,8 @@ docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256
 ```
 
 这组测试检查网页配置、身份与暂停凭证保护、任务操作、供应商装配协议和诊断导出。使用模拟供应商和业务服务，不会验证真实 API 可用性。
+
+前端公开过程记录还包括 `tests/unit/frontend_experience`、`tests/contract/frontend_experience` 和 `tests/integration/frontend_experience`。集成测试应使用独立的真实 PostgreSQL，先应用已有迁移，再应用前端过程记录迁移；不得连接在线演示数据库。
 
 ## 测试目录
 

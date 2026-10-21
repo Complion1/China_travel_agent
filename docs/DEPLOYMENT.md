@@ -32,7 +32,7 @@ docker run --rm --network none --mount "type=bind,source=$demoKeysDirectory,targ
 
 独立备份原密钥，限制配置、密钥及备份的读取权限。以后启动复用同一密钥。
 
-先启动本机专用数据库，再依次执行三条迁移：
+先启动本机专用数据库，再依次执行 M10、M11、M14、M24 四个模块的迁移。当前版本新增前端过程记录结构，不能省略最后一个模块：
 
 ```powershell
 docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local up --detach --wait m14-postgres
@@ -40,6 +40,8 @@ docker compose --env-file .m14-local/config.env --project-name cta-m14-local --p
 docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local run --rm --no-deps m14-web python -m app.durable_execution.migrate
 docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local run --rm --no-deps m14-web python -m app.web_application.migrate
 docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local run --rm --no-deps m14-web python -m app.web_application.migrate --check
+docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local run --rm --no-deps m14-web python -m app.frontend_experience.migrate
+docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local run --rm --no-deps m14-web python -m app.frontend_experience.migrate --check
 docker compose --env-file .m14-local/config.env --project-name cta-m14-local --profile m14-local up --detach --wait m14-web
 ```
 
@@ -80,6 +82,8 @@ cloud_compose run --rm --no-deps m14-web python -m alembic -c app/artifact_persi
 cloud_compose run --rm --no-deps m14-web python -m app.durable_execution.migrate
 cloud_compose run --rm --no-deps m14-web python -m app.web_application.migrate
 cloud_compose run --rm --no-deps m14-web python -m app.web_application.migrate --check
+cloud_compose run --rm --no-deps m14-web python -m app.frontend_experience.migrate
+cloud_compose run --rm --no-deps m14-web python -m app.frontend_experience.migrate --check
 cloud_compose up --detach --wait m14-web
 ```
 
@@ -88,6 +92,8 @@ cloud_compose up --detach --wait m14-web
 ## 更新、停止与备份
 
 前端文件包含在应用镜像中。修改后先完成本机检查，再构建新镜像，在任务停止且运行统计保存后更新应用容器。继续使用原 Compose 项目名、配置、数据库卷和暂停密钥；只有数据库版本发生变化时，才执行相应迁移。
+
+从不含 `frontend_experience` 结构的旧版本升级时，应先备份数据库和原密钥，再对同一目标数据库显式执行 `python -m app.frontend_experience.migrate` 及其 `--check`。应用启动不会代替这一步。仓库更新与线上部署分别进行，GitHub 推送不会更新现有云服务器。
 
 日常停止使用本机或云端对应的 Compose 命令。云端示例：
 
